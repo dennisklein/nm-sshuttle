@@ -1650,12 +1650,12 @@ to 2026-10-10).
 | 1 | NM accepts a shim `program=` that exits after D-Bus activation | **Retired** (R1b, runs 2 to 6): activation, traffic and teardown work. |
 | 2 | SELinux | **Retired for the shim** (R1b, R2): plugin, sshuttle, tunnel unit and the user's `ssh` run as `unconfined_service_t`; the whole run logged no denials besides R1a's five. With an ordinary unit name, direct mode is denied even `is-active` (R1a). With a `NetworkManager-*` unit name it works on the minimal path only (R1e: start, stop, status, `dns=none`, no `nmss0`). `journalctl` is denied by policy; the link, guard and reconnects are untested (§4.1). |
 | 3 | NM with a plugin-created dummy `tundev` | **Retired** (R3a to R3c, R8a): addressed, with split DNS through resolved and the tunnel, managed or unmanaged. NM's VPN code binds `nmss0` to the profile's firewalld zone (default `public`) and unbinds it at deactivation **[src]**. When the link is already gone, firewalld keeps `nmss0` in the zone until a later teardown or a firewalld restart (R4j, R4p, R8p). No DNS for `dns=none`. A single-label name is completed only with a plain domain. |
-| 4 | gcr-ssh-agent unlock for an ssh outside the session | **Retired** with conditions (R6, §2.1). Behind the lock screen an unloaded key fails in 1 s (R6b). Waiting for the unlock and retrying is untested, and the test VM never locks at resume. |
+| 4 | gcr-ssh-agent unlock for an ssh outside the session | **Retired** with conditions (R6, §2.1). Behind the lock screen an unloaded key fails in 1 s (R6b). Waiting for the unlock and retrying passed VM test M2-25 with a `LockedHint` set by the test; with GNOME's lock screen it is untested. |
 | 5 | GNOME without an editor plugin | **Retired** (R5a to R5d, R5f). The toggle works. Without the stub Settings waits 25 s; with it the editor opens at once. GNOME shows the same "Connection failed" for every failure reason. |
 | 6 | Reconnect display in NM | **Retired for 1.56.1** (§2.1, §4.4). In runs 3 to 6 the `nbns` sentinel recovered in every variant, each time 19–40 ms after `Config`: three drops (R4b), without firewalld (R4g), `dns=none` (R4e), two-phase (R4i), and with `nmss0` unmanaged (R8b, R8g, R8j). A split name resolved after each (-q, runs 4 to 6). The alternating address works (R4c, R8c). The invisible reconnect stays "activated" (R4d), and an unchanged config stays stuck (R4a, R8i). Relinking does not recover: it flips early and loses DNS (R4f). Other NM versions: same code **[src]**, untested. |
 | 7 | NM restart while the VPN is up | **Retired** (R7, runs 3 to 6): the plugin tore down within about 0.1 s, and the restarted NM did not reattach. In runs 4 to 6 it removed `nmss0` first, and the restarted NM did not list it. R7 ran with a managed `nmss0`; untested with the unmanaged setting installed. The plugin's teardown does not depend on it. |
 | 8 | Switching off during a reconnect | **Retired** (R4h, runs 3 to 6): NM ended the VPN with "user disconnected" and dropped its DNS, and nothing came back. The pending reconnect was cancelled at `Disconnect` (R4h-k, runs 4 to 6). Run 5's R4h-p FAIL came from the driver's `busctl status` check: the plugin ran until its idle exit 60 s after STOPPED. With a check by bus name and PID, R4h-p passed in run 6. Not tested: a STARTING that races the click **[src]**. |
-| 9 | Giving up from "connecting" | **Retired on 1.56.1 for the order in §4.4** (runs 4 to 6, with trace). Re-sending the unchanged `Config` first failed the VPN from ip-config-get and removed its DNS while `nmss0` existed: R4l in each run, R4n (SIGTERM in a gap) and R8l (unmanaged). With `nmss0` lost, NM failed the VPN itself ("IP configuration invalid") and removed its DNS, from "connect", managed or unmanaged (R4p, R8p). STOPPED first left the entry until NM restarted, as on 1.46 **[smoke]**, and resolved kept the server on `nmss0` while it existed (R4k-d, R4k-k FAIL). Deleting the link first dropped the entry only through the early flip, with dead-link warnings (R4j). A SIGKILL in a gap leaks like R4k, managed or unmanaged (R4m-d, R8m-d FAIL); the startup cleanup and `ExecStopPost` limit it (§4.4). **[src]** The policy code is the same from 1.46 to `main`. Open, for M2: branch 4 from pre-up or "activated", branch 2 inside a gap, a give-up with firewalld stopped or after a content-changing reconnect with a managed `nmss0`, and SIGTERM with `nmss0` unmanaged. |
+| 9 | Giving up from "connecting" | **Retired on 1.56.1 for the order in §4.4** (runs 4 to 6, with trace). Re-sending the unchanged `Config` first failed the VPN from ip-config-get and removed its DNS while `nmss0` existed: R4l in each run, R4n (SIGTERM in a gap) and R8l (unmanaged). With `nmss0` lost, NM failed the VPN itself ("IP configuration invalid") and removed its DNS, from "connect", managed or unmanaged (R4p, R8p). STOPPED first left the entry until NM restarted, as on 1.46 **[smoke]**, and resolved kept the server on `nmss0` while it existed (R4k-d, R4k-k FAIL). Deleting the link first dropped the entry only through the early flip, with dead-link warnings (R4j). A SIGKILL in a gap leaks like R4k, managed or unmanaged (R4m-d, R8m-d FAIL); the startup cleanup and `ExecStopPost` limit it (§4.4). **[src]** The policy code is the same from 1.46 to `main`. Branch 4 from "activated" and from pre-up passed (VM tests M2-18, M2-19), and so did SIGTERM in a gap with `nmss0` unmanaged (M2-08). Still open: branch 2 inside a gap, and a give-up with firewalld stopped or after a content-changing reconnect with a managed `nmss0`. |
 | 10 | Early "activated" during a gap | **Confirmed; handled by the health check** (§4.4). Traced triggers: deleting the link, managed or unmanaged (R4f 79–121 ms before the `Config`, R4j, R4p, R8p), and `nmcli device reapply nmss0` (R4a-i). With `nmss0` unmanaged the reapply is refused and does not flip (R8i); `nmcli device set nmss0 managed …` still does **[src]**. An address change and an uplink commit do not flip it (R4a, R4e, R8i, R8b). With the same ifindex the flip leaves the VPN's DNS correct **[src]**. With a managed `nmss0` a reapply also files a non-VPN entry (§4.5). |
 | 11 | VPN DNS after the first "activated" | **Retired for an unmanaged `nmss0`** (R8, §4.1): no non-VPN entry and no default-route capture after R8b, R8g, R8c and R8j (-u, -o PASS). R8c and R8j changed the committed content, R8j with the sentinel committed and then the real config, and NM filed nothing, because it files a device entry only between ip-config and deactivating **[src]**. **A managed `nmss0` (user override) still has it:** every content-changing commit files a second, non-VPN entry at the VPN's priority (R4i, R4c, run 4's R4g, a reapply). In R4c-o it took resolved's default route in runs 4 to 6. Whether the `nbns` burst commits the sentinel is a race: never with firewalld (0 of 14 bursts), once without it (1 of 5, run 4's R4g). Relinking still loses DNS (R4f-d, -q, -n FAIL). |
 
@@ -1699,7 +1699,7 @@ Later, also propose a hook for an externally provided firewall helper
    a service stop in a gap, `nmcli device set nmss0 managed …` in a gap,
    an NM restart under an active VPN, and one while a killed plugin's
    `nmss0` survives. These and the rest of §4.10 belong to M2's VM tests.
-3. **M2, lifecycle (in progress, [`nm_sshuttle/`](../nm_sshuttle)):** done
+3. **M2, lifecycle (done but for the checks listed below, [`nm_sshuttle/`](../nm_sshuttle)):** done
    so far: the plugin with the first connect, the `nbns` reconnect with
    backoff and escalation, the bounce of an early "activated", the give-up
    branches, giving up at once on link loss, SIGTERM waiting for
@@ -1739,20 +1739,51 @@ Later, also propose a hook for an externally provided firewall helper
    (roaming, offline, captive portals) with paused time left out of the
    reconnect timeout, the 10 s health check with the probe, the lock-screen
    wait and retry, and the NM version mark. All have unit tests; the D-Bus
-   smoke test covers the NM and logind watchers. New VM scenarios, not run
-   yet: M2-16 to M2-28 in [`test-vm/`](../test-vm) (the rest of §4.10,
-   with the lock screen simulated and suspend opt-in). Still to do: run
-   them, the GNOME checks by hand, and resolv.conf without resolved, which
+   smoke test covers the NM and logind watchers. **Second VM run** (CI's VM
+   tests workflow, Fedora 44, NM 1.56.1, SELinux enforcing, 2026-10-10; 441
+   checks, no failure, no SELinux denial) added M2-16 to M2-27:
+   - **Health:** after `kill -9` of sshuttle the unit's failure started a
+     reconnect (M2-16). After `nft flush ruleset` the guard was back within
+     10 s and the missing sshuttle table started a reconnect (M2-17). With
+     the remote sshuttle server stopped, the probe failed twice and the
+     plugin reconnected; the probe answered again afterwards (M2-27).
+   - **Branch 4:** link loss while activated took the VPN down in 157 ms
+     with its DNS (M2-18). Link loss before the first "activated" left
+     nothing behind (M2-19).
+   - **Gaps:** `nmcli device set nmss0 managed yes` in a gap was bounced and
+     the reconnect left `nmss0` unmanaged (M2-20). A service stop in a gap
+     with the user override sent Config, Failure, STOPPED and cleaned up in
+     317 ms (M2-21). `nmcli general reload conf` under an active VPN kept
+     the VPN and its DNS (M2-22).
+   - **Roaming:** moving NM's primary connection to a second uplink and
+     back reconnected at once each time, with DNS intact (M2-23). Without a
+     default route the plugin did not count itself offline, and DNS worked,
+     but traffic to the subnets failed for lack of a route (M2-24; §4.4).
+   - **Lock screen,** with `LockedHint` set on a logind session (no GNOME):
+     no attempt while locked, one retry after the unlock that reconnected
+     or, with the key still refused, failed the VPN; unlocked, the
+     authentication failure failed it at once (M2-25).
+   - **The park candidate** (M2-26): NM stayed "activating" 4 s into a
+     parked gap with no flip, and a kill in a parked gap left no VPN DNS
+     entry, unlike M2-09. One run is not enough to turn it on by default.
+   The first CI run logged one SELinux denial that the second did not; its
+   record was not kept.
+   Still to do: suspend (M2-28, opt-in: `test-vm/vm.sh run --only M2-28
+   --suspend` on a host whose VM wakes from its RTC), the GNOME checks by
+   hand (`test-vm/README.md`), and resolv.conf without resolved, which
    needs a Debian or Ubuntu VM.
    The full scope: persistence, reconnect and backoff, sleep, roaming,
    guard, sweeper, startup and `ExecStopPost` cleanup, the unmanaged
-   `nmss0` setting and its check, health checks and unit tests. One
-   candidate to try in the VM tests before adopting it: during a gap, keep
-   NM in ip-config-get with a lone, unchanged `Config`. A kill would then
-   remove the DNS too **[src]**. It is untested, and NM's firewalld call
-   and `_apply_config` must commit nothing, or the VPN flips. The plugin
-   has it behind `NM_SSHUTTLE_PARK_GAP=1`, off by default; M2-26 runs it.
-4. **M3, usable:** CLI, packaging (RPM, deb), documentation, and VM tests in
-   CI if feasible.
+   `nmss0` setting and its check, health checks and unit tests. The park
+   candidate (during a gap, keep NM in ip-config-get with a lone, unchanged
+   `Config`, so that a kill removes the DNS too **[src]**) stays behind
+   `NM_SSHUTTLE_PARK_GAP=1`, off by default.
+4. **M3, usable (in progress):** CLI, packaging (RPM, deb), documentation,
+   and VM tests in CI if feasible. Done: the profile commands `add`,
+   `check`, `list` and `remove` (`nm-sshuttle` on PATH); RPM packages for
+   Fedora 43 and 44 and deb packages for Debian 13 and Ubuntu 26.04, built
+   and install-checked in CI; the [user guide](user-guide.md); and the VM
+   tests in CI, on demand and weekly, on hosted runners with KVM (about
+   12 min).
 5. **Later:** GTK4 editor plugin for GNOME Settings, several tunnels at once
    (template units), UDP through `tproxy`, IPv6 guard sets.
