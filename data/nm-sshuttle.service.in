@@ -1,0 +1,19 @@
+[Unit]
+Description=NetworkManager sshuttle VPN plugin
+Documentation=https://github.com/dennisklein/nm-sshuttle
+
+[Service]
+Type=dbus
+BusName=org.freedesktop.NetworkManager.sshuttle
+ExecStart=@LIBEXECDIR@/nm-sshuttle-service
+# After a stop, a kill or a crash: stop the tunnel unit, remove nmss0, the
+# guard and stale sshuttle tables. NetworkManager never removes nmss0 itself
+# (design §4.4, §4.7).
+ExecStopPost=@LIBEXECDIR@/nm-sshuttle cleanup
+# The plugin owns the restart policy; a restart under an active VPN would
+# leave NetworkManager's DNS entry behind.
+Restart=no
+OOMScoreAdjust=-500
+# On SIGTERM the plugin gives up first and waits up to 1 s for
+# NetworkManager's Disconnect; it exits within 5 s whatever happens.
+TimeoutStopSec=20
