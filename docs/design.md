@@ -843,7 +843,7 @@ keys:
 | `dns-domains` | `corp.example,lab.example` | Routing domains for `split`. |
 | `method` | `nft` | `nft` (default) or `nat`. `tproxy` comes later. |
 | `gateway` | `203.0.113.7` | Override the first hop. Needed with `ProxyCommand`. |
-| `probe` | `10.1.0.10:22` | Optional reachability check through the tunnel. |
+| `probe` | `10.1.0.10:22` | Optional reachability check through the tunnel. The service must send first, as an ssh server does (§4.4, "Health"). |
 | `fail-closed` | `yes` | Install the guard table (default `yes`). |
 
 The CLI also sets `connection.permissions=user:<local-user>`,
@@ -972,8 +972,8 @@ Events and what the supervisor does:
 
   A failure during this first connect is reported straight away, without
   retries; the user has to act anyway.
-- **The tunnel drops while up** (the unit stops, two probes fail, the
-  network changes, connectivity goes NONE, or the machine suspends):
+- **The tunnel drops while up** (the unit stops, a health check fails, the
+  network changes, NM goes offline, or the machine suspends):
   - authentication or host-key error while the screen is unlocked →
     **failed**;
   - anything else → **reconnecting**. The plugin stops the tunnel unit,
@@ -990,10 +990,20 @@ Events and what the supervisor does:
     first waits for "activated" (at most 2 s).
   - Attempts: at once after a network change or resume, otherwise after 1,
     2, 4 … 60 s. None while offline, asleep or waiting for an unlock; at
-    most one a minute behind a captive portal.
-  - The plugin gives up (reports failure) after `reconnect-timeout`,
-    default 10 min of attempt time. Offline, asleep and locked time do not
-    count.
+    most one a minute behind a captive portal (connectivity `PORTAL`), and
+    one at once when the portal goes.
+  - Offline means that no uplink is activated: no active connection that
+    NM manages and that is not a VPN, loopback or external (`docker0`,
+    `virbr0`). NM's global `State` does not tell: an activating VPN, the
+    plugin's own during a reconnect included, turns it into `CONNECTING`.
+    Connectivity `NONE` with an activated uplink is not offline, because a
+    first hop on the local network needs no default route. The subnets do
+    need a route, though a default route is enough: sshuttle's redirect
+    applies only after the kernel has found one, and without it `connect()`
+    fails (VM test M2-24).
+  - The plugin gives up (reports failure) after 10 min of attempt time.
+    Offline, asleep and locked time do not count. The profile has no key
+    for it yet.
 - **Coming back:** NM shows "connected" again only if the re-sent IP
   config differs from the one NM received just before it (§2.1). The
   plugin sends, back to back from one callback, `Config`, one `Ip4Config`
@@ -1019,8 +1029,9 @@ Events and what the supervisor does:
     step but not the 10 s timer before it; the timer is for M2's unit
     tests.
   - Still not "activated" 60 s after the first try: the plugin reports
-    failure and records the NM version in `/run`. Later activations on that
-    version use the invisible reconnect.
+    failure and records the NM version in `/run/nm-sshuttle/invisible-reconnect`.
+    Later activations on that version use the invisible reconnect, until
+    the next boot.
 - **"Activated" is not proof.** NM never clears its "waiting for pre-up"
   flag, so any l3cfg commit on `nmss0` during a gap flips the VPN to
   "activated" while the tunnel is down. **[spike]** Traced triggers:
@@ -1174,29 +1185,62 @@ Events and what the supervisor does:
   prompt is cancelled at once (**[spike]** R6b: 1 s). On that failure,
   with logind's `LockedHint` set, the plugin waits (NM keeps showing
   "connecting"), retries once after unlock (allowing 110 s for the
-  prompt), and reports "login failed" if that fails. The wait and the
-  retry are untested: the spike plugin has neither, and it reported
-  "connect failed".
+  prompt), and reports "login failed" if that fails.
+  - "Locked" means that any of the user's logind sessions has `LockedHint`
+    set: the prompt shows in the graphical session, and an unlocked ssh
+    session does not make it visible. The plugin follows `LockedHint`
+    changes and also asks every 5 s.
+  - Each attempt gets 45 s to start; the retry after an unlock gets 110 s.
+    The tunnel unit's own `TimeoutStartSec=120` is longer than both
+    (§4.7), and the plugin stops the unit when its own time is up.
+  - One such retry per gap. An authentication failure while unlocked, or
+    a second one in the same gap, reports "login failed" at once.
+  - The VM test M2-25 simulates the lock: root sets `LockedHint` on a
+    session of the user, and the jump host refuses the key. It has not run
+    yet, and a real GNOME lock screen with gcr's prompt is untested.
 - **The network changes** (primary connection or its IP config changes,
   connectivity returns): treat it as a drop and restart the tunnel **at
   once**. Lab T10 shows ssh does not notice a new address for tens of
   seconds. If the first hop's address changed, it goes into the guard's
   exclude set before the tunnel starts.
+  - The network is NM's `PrimaryConnection`: its UUID, and its IPv4
+    config's addresses and gateway. A DHCP renewal with the same address,
+    an IPv6 change (the tunnel is IPv4) or a moment without a primary
+    connection is no change.
+  - After a change or a resume the first hop is resolved again, as the
+    user, before the next attempt; if that fails the old address stays.
+    A new address also goes into `Config`'s `gateway`.
+  - An attempt that started more than 2 s before the change is abandoned.
+    The at-once attempt waits until the stop of the tunnel it replaces is
+    confirmed (at most 20 s), so the two start and stop jobs do not race.
 - **Suspend:** the plugin holds a logind *delay* inhibitor while the toggle
   is on.
   - `PrepareForSleep(true)`: send STARTING, stop the tunnel, release the
-    inhibitor. After resume the lock screen shows "connecting" until the
-    tunnel is really back.
+    inhibitor once the stop is confirmed, at most 3 s later (logind waits
+    `InhibitDelayMaxSec`, 5 s by default). After resume the lock screen
+    shows "connecting" until the tunnel is really back. A suspend during
+    the first connect fails it.
   - `PrepareForSleep(false)`: take the inhibitor again and reconnect as
-    soon as NM reports connectivity.
+    soon as NM is online again (it is usually still asleep at this
+    point).
 - **Health (every 10 s while up)**, from the plugin's own checks; NM's
   state is not evidence (see "Activated is not proof"):
-  - the tunnel unit is active;
-  - sshuttle's nft table exists and a listener holds its port;
+  - the tunnel unit is active (an unreadable state is no failure);
+  - with `method=nft`, sshuttle's nft table exists and a listener holds its
+    port;
   - the guard table exists (re-install it if something flushed the ruleset);
   - optionally, the `probe` TCP connect through the tunnel, where two
     failures in a row cause a restart. This covers sshuttle's "process
     alive, forwarding dead" reports (#285 and others).
+    - The probe waits up to 5 s for the first byte. sshuttle accepts the
+      connection locally at once, so only data from the far end shows the
+      path works, and the probed service must send first.
+    - Failures count only once the probe has answered since the tunnel
+      last came up, so a dead or wrong probe target cannot cause a restart
+      loop.
+  - After a `nft flush ruleset` the guard is back within 10 s; until then
+    traffic to the tunnelled networks is not refused (VM test M2-17, not
+    run yet).
 - **Toggle off (`Disconnect`):** cancel every timer, send STOPPING and then
   STOPPED at once, then stop the tunnel, remove the guard and `nmss0`, and
   sweep. NM has dropped the connection by then, and a STOPPED that waits for
@@ -1425,9 +1469,14 @@ ExecStartPre=/usr/libexec/nm-sshuttle/nm-sshuttle sweep
 ExecStart=/usr/libexec/nm-sshuttle/nm-sshuttle exec-tunnel
 ExecStopPost=/usr/libexec/nm-sshuttle/nm-sshuttle sweep
 Restart=no
-TimeoutStartSec=45
+TimeoutStartSec=120
 TimeoutStopSec=15
 ```
+
+**Why `TimeoutStartSec=120`.** The plugin times each attempt itself (45 s)
+and stops the unit when the time is up. Only the retry after an unlock
+waits longer, 110 s, for the agent's prompt (§4.4); the unit's limit must
+not cut it short.
 
 **Why the restart policy is `Restart=no`.** The supervisor owns the restart
 policy, because only it knows about connectivity, sleep and authentication
@@ -1493,7 +1542,8 @@ minimal path under it; `ip` and `nft` there are untested.
 nm_sshuttle/
   service.py      VPN D-Bus interface (Gio), about 250 lines
   supervisor.py   state machine, backoff, health; pure logic, unit-testable
-  watch.py        NM, logind and systemd D-Bus watchers
+  watch.py        NM and logind D-Bus watchers (systemd's and NM's active
+                  connection signals stay in service.py)
   profile.py      vpn.data parsing and validation
   tunnel.py       sshuttle argv, exec-tunnel, sweep, ssh-as-user
   guard.py        nft guard table, dummy link
@@ -1685,19 +1735,23 @@ Later, also propose a hook for an externally provided firewall helper
    First run bugs the unit tests had missed: the DNS server's /32 inside
    a subnet made nft refuse the guard set (overlapping intervals), which
    failed every activation.
-   Still to do: sleep, roaming and connectivity, health probes, the
-   lock-screen retry, marking an NM version for the invisible reconnect, and
-   the §4.10 VM tests that were not in the run: branch 4 from pre-up and
-   from "activated", a stop of `nm-sshuttle.service` with the user override
-   in place, the reload under an active VPN, resolv.conf without resolved,
-   and everything with GNOME or the lock screen.
+   **Since the first run:** suspend with a delay inhibitor, network changes
+   (roaming, offline, captive portals) with paused time left out of the
+   reconnect timeout, the 10 s health check with the probe, the lock-screen
+   wait and retry, and the NM version mark. All have unit tests; the D-Bus
+   smoke test covers the NM and logind watchers. New VM scenarios, not run
+   yet: M2-16 to M2-28 in [`test-vm/`](../test-vm) (the rest of §4.10,
+   with the lock screen simulated and suspend opt-in). Still to do: run
+   them, the GNOME checks by hand, and resolv.conf without resolved, which
+   needs a Debian or Ubuntu VM.
    The full scope: persistence, reconnect and backoff, sleep, roaming,
    guard, sweeper, startup and `ExecStopPost` cleanup, the unmanaged
    `nmss0` setting and its check, health checks and unit tests. One
    candidate to try in the VM tests before adopting it: during a gap, keep
    NM in ip-config-get with a lone, unchanged `Config`. A kill would then
    remove the DNS too **[src]**. It is untested, and NM's firewalld call
-   and `_apply_config` must commit nothing, or the VPN flips.
+   and `_apply_config` must commit nothing, or the VPN flips. The plugin
+   has it behind `NM_SSHUTTLE_PARK_GAP=1`, off by default; M2-26 runs it.
 4. **M3, usable:** CLI, packaging (RPM, deb), documentation, and VM tests in
    CI if feasible.
 5. **Later:** GTK4 editor plugin for GNOME Settings, several tunnels at once
