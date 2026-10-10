@@ -194,6 +194,11 @@ class FakeWorld:
     # what NetworkManager sees from the plugin
     def on_plugin_signal(self, conn, sender, path, iface, name, params):
         self.signals.append((name, params.unpack()[0]))
+        # Like NM: STARTING after "activated" (a reconnect) makes the connection
+        # "activating" at once, before the plugin's attempt can finish.
+        if name == "StateChanged" and params.unpack()[0] == ST_STARTING \
+                and self.ac_state == AC_ACTIVATED:
+            self.set_ac(AC_ACTIVATING, 6)
 
     def names(self):
         return [n if n != "StateChanged" else f"State{v}" for n, v in self.signals]
@@ -281,7 +286,6 @@ def test_connect_reconnect_and_link_loss(world):
     fake.signals.clear()
     fake.set_unit("failed")
     iterate_until(lambda: fake.names() == [f"State{ST_STARTING}"])
-    fake.set_ac(AC_ACTIVATING, 6)
     iterate_until(lambda: f"State{ST_STARTED}" in fake.names(), timeout=5)
     assert fake.names() == [f"State{ST_STARTING}", "Config", "Ip4Config", "Ip4Config",
                             f"State{ST_STARTED}"]
@@ -294,7 +298,6 @@ def test_connect_reconnect_and_link_loss(world):
     fake.signals.clear()
     fake.set_unit("failed")
     iterate_until(lambda: fake.names() == [f"State{ST_STARTING}"])
-    fake.set_ac(AC_ACTIVATING, 6)
     iterate_until(lambda: svc.sup.ac_state == AC_ACTIVATING)
     fake.signals.clear()
     host["link"] = None
@@ -312,12 +315,12 @@ def test_sigterm_in_a_gap_waits_for_disconnect(world):
     fake, svc, host = world
     fake.call_plugin("Connect", settings_variant())
     iterate_until(lambda: svc.sup.phase == "up")
+    iterate_until(lambda: f"State{ST_STARTED}" in fake.names())   # all of it arrived
     fake.set_ac(AC_ACTIVATED)
     iterate_until(lambda: svc.sup.ac_state == AC_ACTIVATED)
     fake.signals.clear()
     fake.set_unit("failed")
     iterate_until(lambda: fake.names() == [f"State{ST_STARTING}"])
-    fake.set_ac(AC_ACTIVATING, 6)
     iterate_until(lambda: svc.sup.ac_state == AC_ACTIVATING)
     fake.signals.clear()
     os.kill(os.getpid(), 15)
