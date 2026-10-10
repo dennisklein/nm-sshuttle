@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: MIT
+import subprocess
+
 from nm_sshuttle import tunnel
 
 SPEC = {"remote": "corp", "user": "alice", "subnets": ["10.0.0.0/8"], "exclude": ["10.0.5.0/24"],
@@ -90,3 +92,17 @@ def test_stale_tables(tmp_path):
     tables = ("table inet sshuttle-ipv4-12305\ntable inet sshuttle-ipv4-12300\n"
               "table inet nm-sshuttle-guard\ntable ip nat\ntable inet sshuttle-ipv6-12299\n")
     assert tunnel.stale_tables(tables, ports) == ["sshuttle-ipv4-12300", "sshuttle-ipv6-12299"]
+    assert tunnel.sshuttle_tables(tables, ports, live=True) == ["sshuttle-ipv4-12305"]
+
+
+def test_nft_health(monkeypatch):
+    out = "table inet sshuttle-ipv4-12305\ntable inet nm-sshuttle-guard\n"
+    monkeypatch.setattr(tunnel.subprocess, "run",
+                        lambda *a, **k: subprocess.CompletedProcess(a, 0, out, ""))
+    monkeypatch.setattr(tunnel, "listening_ports", lambda: {12305})
+    assert tunnel.nft_health() == {"guard": True, "sshuttle": True}
+    monkeypatch.setattr(tunnel, "listening_ports", lambda: set())
+    assert tunnel.nft_health() == {"guard": True, "sshuttle": False}
+    monkeypatch.setattr(tunnel.subprocess, "run",
+                        lambda *a, **k: subprocess.CompletedProcess(a, 1, "", "denied"))
+    assert tunnel.nft_health() is None
