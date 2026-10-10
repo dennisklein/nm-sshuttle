@@ -1,7 +1,8 @@
 # nm-sshuttle: design proposal
 
 Status: proposal, updated 2026-10-10 after the sixth Fedora 44 spike run.
-Nothing is built yet. The code so far is the research lab in
+M2's plugin is in [`nm_sshuttle/`](../nm_sshuttle); its first Fedora 44 VM
+run ([`test-vm/`](../test-vm)) passed. The research code is the lab in
 [`lab/`](../lab), which checks the sshuttle and kernel behaviour this design
 relies on, and the spike in [`spike/`](../spike), which checks
 NetworkManager, SELinux and GNOME on Fedora 44.
@@ -1196,9 +1197,14 @@ Events and what the supervisor does:
   - optionally, the `probe` TCP connect through the tunnel, where two
     failures in a row cause a restart. This covers sshuttle's "process
     alive, forwarding dead" reports (#285 and others).
-- **Toggle off (`Disconnect`):** stop the tunnel, remove the guard and
-  `nmss0`, then sweep. A `Disconnect` while already stopped is ignored, so
-  that NM sees only one STOPPED.
+- **Toggle off (`Disconnect`):** cancel every timer, send STOPPING and then
+  STOPPED at once, then stop the tunnel, remove the guard and `nmss0`, and
+  sweep. NM has dropped the connection by then, and a STOPPED that waits for
+  the teardown could reach the next activation after a quick off and on
+  **[src]**: NM fails any connection between waiting and activated that
+  receives it. A `Disconnect` while already stopped is ignored, and so is a
+  `Connect` still queued behind a cleanup or a teardown, so that NM sees only
+  one STOPPED.
 - **The plugin starts:** at every process start, before or right after
   answering the first call, remove a leftover guard table, `nmss0`, stale
   sshuttle tables and a running tunnel unit. Do not wait for a `Connect`:
@@ -1247,8 +1253,8 @@ item is explained above or in §2.1.
   from an earlier activation.
 - Stop the tunnel unit without blocking the main loop.
 - NM's "activated" during a gap is not health; bounce at most 3 times.
-- `Disconnect` cancels every pending timer first, then tears down, then one
-  STOPPED.
+- `Disconnect` cancels every pending timer first, sends STOPPING and one
+  STOPPED at once, then tears down; a queued `Connect` is dropped.
 - Give-up: pick the branch from cached state, with no D-Bus call before
   the signals. In a gap or on link loss, send `Config`, `Failure` and
   STOPPED from one callback, with no `systemctl` call or link change in
@@ -1643,7 +1649,49 @@ Later, also propose a hook for an externally provided firewall helper
    a service stop in a gap, `nmcli device set nmss0 managed …` in a gap,
    an NM restart under an active VPN, and one while a killed plugin's
    `nmss0` survives. These and the rest of §4.10 belong to M2's VM tests.
-3. **M2, lifecycle:** persistence, reconnect and backoff, sleep, roaming,
+3. **M2, lifecycle (in progress, [`nm_sshuttle/`](../nm_sshuttle)):** done
+   so far: the plugin with the first connect, the `nbns` reconnect with
+   backoff and escalation, the bounce of an early "activated", the give-up
+   branches, giving up at once on link loss, SIGTERM waiting for
+   `Disconnect`, startup and `ExecStopPost` cleanup, the guard, the sweeper,
+   the unmanaged `conf.d` setting and its check, and unit tests with a fake
+   clock plus a D-Bus smoke test. **First VM run** (Fedora 44, NM 1.56.1,
+   SELinux enforcing, 2026-10-10; [`test-vm/`](../test-vm), 226 checks, no
+   failure, no SELinux denial): install and labels; connect with split DNS;
+   three `nbns` reconnects with firewalld and one without, each with the
+   guard refusing traffic during the gap; a gap of 14 s; the early
+   "activated" bounce (`nmcli device set nmss0 managed no`); link loss in a
+   gap (VPN down 17 ms later); `systemctl stop` and `restart` in a gap
+   (Config, Failure, STOPPED; link gone after 136 ms; exit after 202 ms);
+   `kill -9` in a gap; switching off during a reconnect; a Connect right
+   after a Disconnect; the user override of the unmanaged setting; an NM
+   restart under an active VPN; startup and `ExecStopPost` cleanup. What
+   the run answered:
+   - **Firewalld after a link loss:** `nmss0` stayed bound to `public`, as
+     §2.1 predicted. A second profile in zone `work` got `work`, and after
+     it was switched off with the link present, `nmss0` had no zone.
+   - **A kill in a gap:** `ExecStopPost` had already removed `nmss0`, the
+     guard and the tunnel unit before NM's `Disconnect` started the new
+     instance, which found nothing to clean and exited at its idle timeout.
+     NM kept the VPN's DNS entry (no `interface`), and resolved kept
+     10.99.0.53 on `nmss0` until the link went, as in R4m and R8m.
+   - **No escalation:** NM showed "activated" within 10 s of the burst
+     every time, so the sentinel-alone step has still not run against a
+     real NM.
+   - **A managed `nmss0`** (override in `/etc`): the plugin logged the
+     risk 11 hint, the device was in state 100, and removing the override
+     plus `nmcli general reload conf` restored state 10 on the next
+     activation.
+   First run bugs the unit tests had missed: the DNS server's /32 inside
+   a subnet made nft refuse the guard set (overlapping intervals), which
+   failed every activation.
+   Still to do: sleep, roaming and connectivity, health probes, the
+   lock-screen retry, marking an NM version for the invisible reconnect, and
+   the §4.10 VM tests that were not in the run: branch 4 from pre-up and
+   from "activated", a stop of `nm-sshuttle.service` with the user override
+   in place, the reload under an active VPN, resolv.conf without resolved,
+   and everything with GNOME or the lock screen.
+   The full scope: persistence, reconnect and backoff, sleep, roaming,
    guard, sweeper, startup and `ExecStopPost` cleanup, the unmanaged
    `nmss0` setting and its check, health checks and unit tests. One
    candidate to try in the VM tests before adopting it: during a gap, keep
