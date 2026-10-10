@@ -1,0 +1,40 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+#
+# sshuttle's ssh command (-e "ssh-as-user USER"): runs ssh as USER with the
+# agent and display variables of USER's systemd manager, so the user's
+# ~/.ssh/config, known_hosts and agent apply and key unlock prompts can
+# appear in the user's session. Everything else in the tunnel stays root.
+set -u
+user=$1
+shift
+uid=$(id -u "$user") || exit 255
+gid=$(id -g "$user")
+home=$(getent passwd "$user" | cut -d: -f6)
+rt=/run/user/$uid
+
+# Talk to the user's manager as the user, over its own bus socket.
+envdump=$(setpriv --reuid="$uid" --regid="$gid" --init-groups --reset-env \
+    env XDG_RUNTIME_DIR="$rt" DBUS_SESSION_BUS_ADDRESS="unix:path=$rt/bus" \
+    systemctl --user show-environment 2>/dev/null)
+get() { printf '%s\n' "$envdump" | sed -n "s/^$1=//p" | head -n 1; }
+
+sock=$(get SSH_AUTH_SOCK)
+origin="user manager"
+if [ -z "$sock" ]; then
+    origin="fallback"
+    for s in "$rt/gcr/ssh" "$rt/keyring/ssh" "$rt/nmss-spike-agent.sock"; do
+        if [ -S "$s" ]; then sock=$s; break; fi
+    done
+fi
+echo "ssh-as-user: user=$user agent=${sock:-none} ($origin)" >&2
+
+exec setpriv --reuid="$uid" --regid="$gid" --init-groups --reset-env \
+    env HOME="$home" USER="$user" LOGNAME="$user" \
+        PATH=/usr/local/bin:/usr/bin:/bin XDG_RUNTIME_DIR="$rt" \
+        SSH_AUTH_SOCK="$sock" \
+        WAYLAND_DISPLAY="$(get WAYLAND_DISPLAY)" DISPLAY="$(get DISPLAY)" \
+        XAUTHORITY="$(get XAUTHORITY)" \
+    ssh -o BatchMode=yes -o ControlMaster=no -o ControlPath=none \
+        -o ConnectTimeout=15 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 \
+        "$@"
