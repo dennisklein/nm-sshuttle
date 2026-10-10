@@ -17,6 +17,10 @@ Phases:
               has deactivated the connection
   exiting     NetworkManager vanished: tearing down without telling anyone
   exited      the main loop was asked to quit
+
+A gap pauses its attempts while the machine sleeps, while NetworkManager has
+no activated device, and while it waits for the user to unlock the screen;
+paused time does not count against the reconnect timeout.
 """
 
 import functools
@@ -25,14 +29,15 @@ import traceback
 
 from . import profile as profile_mod
 from .const import (AC_ACTIVATED, AC_ACTIVATING, AC_DEACTIVATED, AC_DEACTIVATING,
-                    AC_NAMES, AC_UNKNOWN, DEVICE_UNMANAGED, FAIL_CONNECT, FAIL_LOGIN,
-                    LINK, LINK_ADDRESS, NBNS_SENTINEL, ST_INIT, ST_STARTED, ST_STARTING,
-                    ST_STOPPED, ST_STOPPING, STATE_NAMES)
+                    AC_NAMES, AC_UNKNOWN, CONN_PORTAL, DEVICE_UNMANAGED, FAIL_CONNECT,
+                    FAIL_LOGIN, LINK, LINK_ADDRESS, NBNS_SENTINEL,
+                    ST_INIT, ST_STARTED, ST_STARTING, ST_STOPPED, ST_STOPPING, STATE_NAMES)
 from .tunnel import classify_failure
 
 log = logging.getLogger("nm-sshuttle")
 
 ACTIVE = ("connecting", "up", "gap", "reconfig")
+TIMED_OUT = "no result from systemd within"
 
 
 def guarded(fn):
@@ -51,7 +56,8 @@ def guarded(fn):
 class Supervisor:
     DEVICE_POLL = 0.1          # GetDeviceByIpIface at once, then every 100 ms ...
     DEVICE_TIMEOUT = 10.0      # ... for up to 10 s (design §4.1)
-    TUNNEL_START_TIMEOUT = 60.0  # the unit's own TimeoutStartSec=45 fails first
+    TUNNEL_START_TIMEOUT = 45.0  # the unit's own TimeoutStartSec=120 is for the next one
+    UNLOCK_START_TIMEOUT = 110.0  # the retry after an unlock allows time for the prompt
     STARTING_WAIT = 2.0        # a drop during a reconfiguration waits for "activated"
     ESCALATE_AFTER = 10.0      # not "activated": sentinel alone (design §4.4)
     RECONFIG_DEADLINE = 60.0   # still not "activated": give up
@@ -64,6 +70,14 @@ class Supervisor:
     QUIT_CAP = 5.0             # whatever happens, a stopping process exits by then
     STOP_CAP = 20.0            # tunnel stop not confirmed: carry on regardless
     IDLE_EXIT = 60.0
+    HEALTH_INTERVAL = 10.0     # health checks while up (design §4.4, "Health")
+    PROBE_TIMEOUT = 5.0        # connect and read the probe's first byte
+    PROBE_FAILURES = 2         # in a row, before the tunnel is restarted
+    PORTAL_INTERVAL = 60.0     # at most one attempt a minute behind a captive portal
+    KICK_GRACE = 2.0           # an attempt younger than this already sees the new network
+    UNLOCK_POLL = 5.0          # also ask logind this often while waiting for an unlock
+    SLEEP_CAP = 3.0            # release the sleep inhibitor by then (logind waits 5 s)
+    PARK_GAP = False           # candidate (design §7, M2): a lone Config in each gap
 
     def __init__(self, fx, parse_profile=profile_mod.parse):
         self.fx = fx
@@ -78,6 +92,12 @@ class Supervisor:
         self.nm_current_owner = None
         self.quit_requested = False
         self.handling_error = False
+        self.asleep = False
+        self.uplink = None             # an uplink is activated; None until NM is read
+        self.connectivity = None
+        self.net_key = None            # the primary connection and its IPv4 config
+        self.nm_version = None
+        self.health_id = 0             # health results of an earlier "up" are ignored
         self._reset_activation()
 
     def _reset_activation(self):
@@ -110,6 +130,22 @@ class Supervisor:
         self.link_removed = False
         self.tunnel_running = False    # a start job succeeded and no stop was asked for since
         self.starting_pending = False  # STARTING sent from "activated"; NM has not answered
+        self.stops = 0                 # tunnel stops not yet confirmed
+        self.stop_waiters = []
+        self.gap_elapsed = 0.0         # attempt time in this gap, paused time left out
+        self.counting_since = None
+        self.in_attempt = False        # a reconnect attempt runs, up to its burst
+        self.attempt_started = None
+        self.next_at_once = False
+        self.retry_after_stop = False  # the next attempt waits for pending stops
+        self.refresh_hop = False       # resolve the first hop again before the next attempt
+        self.waiting_unlock = False
+        self.unlock_used = False       # the one retry after an unlock, per gap
+        self.unlock_retry = False      # the attempt that runs is that retry
+        self.probe_answered = False
+        self.probe_warned = False
+        self.probe_failures = 0
+        self.parked = False
 
     # ------------------------------------------------------------ helpers
     def _set_state(self, state):
@@ -193,6 +229,7 @@ class Supervisor:
             return
         self._cancel_all()
         self.phase = "exited"
+        self.fx.release_sleep()
         self.fx.flush()
         self.fx.quit()
 
@@ -222,6 +259,64 @@ class Supervisor:
             # Same address, dns and domains: NM keeps whichever it commits (design §2.1).
             cfg["nbns"] = [NBNS_SENTINEL]
         return cfg
+
+    def _install_guard(self):
+        self.fx.install_guard(self.profile.guarded_networks(),
+                              [self.gateway] + list(self.profile.exclude))
+        self.guard_installed = True
+
+    def _stop_tunnel(self, cb=None):
+        """Stop the tunnel unit; stop_waiters run once no stop is pending."""
+        aid = self.activation_id
+        self.stops += 1
+
+        def stopped():
+            mine = aid == self.activation_id
+            if mine:
+                self.stops -= 1
+            if cb:
+                cb()
+            if mine and self.stops == 0:
+                waiters, self.stop_waiters = self.stop_waiters, []
+                for fn in waiters:
+                    fn()
+        self.fx.stop_tunnel(self._callback(stopped))
+
+    def _after_stops(self, fn):
+        if self.stops == 0:
+            fn()
+        else:
+            self.stop_waiters.append(fn)
+
+    # ---------------------------------------------------------- pausing
+    def _offline(self):
+        """No uplink is activated (design §4.4). Connectivity NONE alone is not
+        offline: a first hop on the local network needs no default route."""
+        return self.uplink is False
+
+    def _paused(self):
+        return self.asleep or self._offline() or self.waiting_unlock
+
+    def _pause_reason(self):
+        if self.asleep:
+            return "the machine sleeps"
+        if self._offline():
+            return "NetworkManager is offline"
+        return "waiting for the screen to be unlocked"
+
+    def _tick(self):
+        """Account the gap's attempt time; call after anything _paused reads changed."""
+        now = self.fx.now()
+        if self.counting_since is not None:
+            self.gap_elapsed += now - self.counting_since
+        counting = self.gap_started is not None and not self._paused()
+        self.counting_since = now if counting else None
+
+    def _gap_time(self):
+        t = self.gap_elapsed
+        if self.counting_since is not None:
+            t += self.fx.now() - self.counting_since
+        return t
 
     # ------------------------------------------------------- process start
     @guarded
@@ -282,6 +377,12 @@ class Supervisor:
                  p.remote, p.user, ",".join(p.subnets), p.dns)
         if p.ignored_keys:
             log.warning("ignoring unknown profile keys: %s", ", ".join(p.ignored_keys))
+        if not self.asleep:
+            self.fx.inhibit_sleep()
+        if self.nm_version and self.nm_version in self._invisible_versions():
+            log.info("NetworkManager %s never completed an nbns reconnect here; reconnects "
+                     "will not show in NetworkManager (invisible reconnect)", self.nm_version)
+            self.invisible = True
         self.fx.find_active_connection(p.uuid,
                                        self._callback(self._on_ac_found, self.activation_id))
         if p.gateway:
@@ -289,6 +390,13 @@ class Supervisor:
         else:
             self.fx.resolve_first_hop(p.user, p.remote,
                                       self._callback(self._first_hop_result, self.activation_id))
+
+    def _invisible_versions(self):
+        try:
+            return self.fx.invisible_versions()
+        except OSError as e:
+            log.warning("cannot read the NM versions marked for the invisible reconnect: %s", e)
+            return set()
 
     def _on_ac_found(self, aid, path, state):
         if aid != self.activation_id or self.phase not in ACTIVE:
@@ -323,9 +431,7 @@ class Supervisor:
             self.fx.sweep()
             self.ifindex = self.fx.create_link()
             if self.profile.fail_closed:
-                self.fx.install_guard(self.profile.guarded_networks(),
-                                      [addr] + list(self.profile.exclude))
-                self.guard_installed = True
+                self._install_guard()
             self.fx.write_tunnel_spec(self.profile.tunnel_spec(addr))
         except (OSError, RuntimeError) as e:
             self.give_up(FAIL_CONNECT, str(e))
@@ -369,12 +475,14 @@ class Supervisor:
         self.fx.emit_ip4_config(self._ip4_config())
         self.phase = "up"
         self._set_state(ST_STARTED)
+        self._arm_health()
 
     # ----------------------------------------------------- tunnel and device
-    def _start_tunnel(self, cb):
+    def _start_tunnel(self, cb, timeout=None):
         self.attempt_id += 1
         aid = self.attempt_id
-        self._timer("tunnel", self.TUNNEL_START_TIMEOUT, self._tunnel_timeout, aid, cb)
+        timeout = self.TUNNEL_START_TIMEOUT if timeout is None else timeout
+        self._timer("tunnel", timeout, self._tunnel_timeout, aid, cb, timeout)
         self.fx.start_tunnel(self._callback(self._tunnel_result, aid, cb))
 
     def _tunnel_result(self, aid, cb, ok, detail):
@@ -384,13 +492,13 @@ class Supervisor:
         self.tunnel_running = ok
         cb(ok, detail)
 
-    def _tunnel_timeout(self, aid, cb):
+    def _tunnel_timeout(self, aid, cb, timeout):
         if aid != self.attempt_id:
             return
         self.attempt_id += 1        # a late result no longer counts
         self.tunnel_running = False
-        self.fx.stop_tunnel(lambda: None)
-        cb(False, f"no result from systemd within {self.TUNNEL_START_TIMEOUT:.0f} s")
+        self._stop_tunnel()
+        cb(False, f"{TIMED_OUT} {timeout:.0f} s")
 
     def _wait_device(self, cb):
         """Ask NM for its device for nmss0 at once, then every 100 ms."""
@@ -439,6 +547,13 @@ class Supervisor:
             self._on_activated()
         elif state in (AC_DEACTIVATING, AC_DEACTIVATED):
             self._on_deactivating(state)
+        elif state == AC_ACTIVATING and self.phase == "gap" and self.PARK_GAP \
+                and self.starting_sent and not self.parked and not self.invisible:
+            # Candidate (design §7, M2): keep NM in ip-config-get for the rest of the
+            # gap, so that a kill in the gap fails the VPN and removes its DNS.
+            self.parked = True
+            log.info("parking NM in ip-config-get with the unchanged Config")
+            self.fx.emit_config(self.last_config)
 
     def _on_activated(self):
         if not self.activated_once:
@@ -451,6 +566,8 @@ class Supervisor:
             log.info("reconnected after %.1f s", self.fx.now() - self.gap_started)
             self._end_gap()
         elif self.phase == "gap":
+            if self.invisible:
+                return
             if not self.starting_sent:
                 self._send_starting()
             elif not self._link_intact():
@@ -461,6 +578,7 @@ class Supervisor:
                 log.info("NM shows activated during a reconnect; bouncing it back (%d/%d)",
                          self.bounces, self.MAX_BOUNCES)
                 self.starting_pending = True
+                self.parked = False
                 self._set_state(ST_STARTED)
                 self._set_state(ST_STARTING)
             else:
@@ -486,7 +604,8 @@ class Supervisor:
         if self.phase in ACTIVE:
             # NM is ending the VPN; its Disconnect follows. Never reconnect now.
             self.nm_deactivating = True
-            self._cancel("retry", "escalate", "deadline", "starting-wait", "burst-wait")
+            self._cancel("retry", "escalate", "deadline", "starting-wait", "burst-wait",
+                         "stop-wait", "unlock-poll")
         elif self.phase == "stopping" and state == AC_DEACTIVATED:
             self._timer("link", self.LINK_DELAY, self._remove_link_and_guard)
 
@@ -506,8 +625,9 @@ class Supervisor:
             log.info("the tunnel stopped again during a reconnect")
             self.poll_id += 1
             self.attempt_id += 1
+            self.in_attempt = False
             self._cancel("burst-wait", "device")
-            self.fx.stop_tunnel(lambda: None)
+            self._stop_tunnel()
             if not self._nm_ending():
                 self._schedule_retry()
 
@@ -520,24 +640,36 @@ class Supervisor:
         log.info("simulating a drop")
         self._drop("simulated drop")
 
-    def _drop(self, why):
+    def _drop(self, why, at_once=False):
+        """The tunnel is down while up or reconfiguring: start a gap (design §4.4).
+        at_once: the network changed, so the first attempt starts right after the stop."""
         log.info("tunnel dropped (%s)", why)
         if self.nm_deactivating or self.ac_state in (AC_DEACTIVATING, AC_DEACTIVATED):
             self.give_up(FAIL_CONNECT, f"{why} while NM deactivates the connection")
             return
-        self._cancel("escalate", "deadline", "burst-wait")
+        self._cancel("escalate", "deadline", "burst-wait", "health", "retry", "stop-wait")
+        self.health_id += 1
         self.poll_id += 1
         self.attempt_id += 1
         self.tunnel_running = False
+        self.in_attempt = False
         self.first_burst_at = None
         if self.phase == "up":
             self.gap_started = self.fx.now()
+            self.gap_elapsed = 0.0
+            self.counting_since = None
             self.attempts = 0
             self.bounces = 0
             self.starting_sent = False
+            self.unlock_used = False
+            self.parked = False
         self.phase = "gap"
         self.escalated = False
-        self.fx.stop_tunnel(lambda: None)
+        self._tick()
+        if at_once:
+            self.attempts = 0
+            self.next_at_once = True
+        self._stop_tunnel()
         if self.invisible:
             self._schedule_retry()
         elif self.ac_state == AC_ACTIVATED:
@@ -554,27 +686,113 @@ class Supervisor:
         self._cancel("starting-wait")
         self.starting_sent = True
         self.starting_pending = self.ac_state == AC_ACTIVATED
+        self.parked = False
         self._set_state(ST_STARTING)
         self._schedule_retry()
 
-    def _schedule_retry(self):
+    def _schedule_retry(self, at_once=False):
+        at_once = at_once or self.next_at_once
+        self.next_at_once = False
         if self._nm_ending():
             return      # NM's Disconnect follows; nothing may start the tunnel now
-        if self.fx.now() - self.gap_started >= self.RECONNECT_TIMEOUT:
+        if self._gap_time() >= self.RECONNECT_TIMEOUT:
             self.give_up(FAIL_CONNECT, f"no reconnect within {self.RECONNECT_TIMEOUT:.0f} s")
             return
-        delay = self.BACKOFF[min(self.attempts, len(self.BACKOFF) - 1)]
+        if self._paused():
+            self._cancel("retry")
+            log.info("no reconnect attempt while %s", self._pause_reason())
+            return
+        delay = 0 if at_once else self.BACKOFF[min(self.attempts, len(self.BACKOFF) - 1)]
+        if self.connectivity == CONN_PORTAL and not at_once:
+            delay = max(delay, self.PORTAL_INTERVAL)
+        self.retry_after_stop = at_once
         log.info("reconnect attempt %d in %d s", self.attempts + 1, delay)
         self._timer("retry", delay, self._retry)
 
-    def _retry(self):
-        if self.phase != "gap":
+    def _kick(self, why):
+        """Attempt now: after a resume, a network change, the network coming back,
+        or an unlock (design §4.4: "at once after a network change or resume")."""
+        if self.phase != "gap" or self._nm_ending() or "starting-wait" in self.timers:
             return
+        if not (self.starting_sent or self.invisible):
+            return
+        if self.in_attempt:
+            if self.fx.now() - self.attempt_started < self.KICK_GRACE:
+                return      # it started on the new network already
+            log.info("%s: abandoning the running attempt", why)
+            self.attempt_id += 1
+            self.poll_id += 1
+            self.in_attempt = False
+            self.tunnel_running = False
+            self._cancel("tunnel", "device", "burst-wait")
+            self._stop_tunnel()
+        else:
+            log.info("%s: reconnecting at once", why)
+        self.attempts = 0
+        self._schedule_retry(at_once=True)
+
+    def _retry(self):
+        if self.phase != "gap" or self._paused():
+            return
+        if self.retry_after_stop and self.stops:
+            # An at-once attempt must not race the stop of the tunnel it replaces.
+            if "stop-wait" not in self.timers:
+                self._timer("stop-wait", self.STOP_CAP, self._stop_wait_over)
+                self._after_stops(self._stops_done)
+            return
+        self.retry_after_stop = False
+        self._cancel("stop-wait")
         if not self._link_intact():
             self.give_up(FAIL_CONNECT, f"{LINK} was lost during a reconnect")
             return
         self.attempts += 1
-        self._start_tunnel(self._retry_result)
+        self.in_attempt = True
+        self.attempt_started = self.fx.now()
+        if self.refresh_hop and not self.profile.gateway:
+            self.refresh_hop = False
+            self.attempt_id += 1
+            self.fx.resolve_first_hop(self.profile.user, self.profile.remote,
+                                      self._callback(self._hop_refreshed, self.attempt_id))
+            return
+        self.refresh_hop = False
+        self._start_attempt()
+
+    def _stops_done(self):
+        if "stop-wait" in self.timers:
+            self._cancel("stop-wait")
+            self.retry_after_stop = False
+            self._retry()
+
+    def _stop_wait_over(self):
+        log.warning("systemd did not confirm the tunnel stop within %.0f s; attempting anyway",
+                    self.STOP_CAP)
+        self.retry_after_stop = False
+        self._retry()
+
+    def _hop_refreshed(self, aid, addr, error):
+        """After a network change or resume: the first hop may have a new address,
+        which goes into the guard's exclude set before the tunnel starts."""
+        if aid != self.attempt_id or self.phase != "gap" or self._nm_ending():
+            return
+        if addr is None:
+            log.warning("cannot work out the first hop again (%s); keeping %s", error,
+                        self.gateway)
+        elif addr != self.gateway:
+            log.info("the first hop is now %s (was %s)", addr, self.gateway)
+            self.gateway = addr
+            try:
+                if self.profile.fail_closed:
+                    self._install_guard()
+                self.fx.write_tunnel_spec(self.profile.tunnel_spec(addr))
+            except (OSError, RuntimeError) as e:
+                self.give_up(FAIL_CONNECT, str(e))
+                return
+            # last_config stays what NM last got until the burst sends the new one
+        self._start_attempt()
+
+    def _start_attempt(self):
+        timeout = self.UNLOCK_START_TIMEOUT if self.unlock_retry else None
+        self._start_tunnel(self._retry_result, timeout)
 
     def _retry_result(self, ok, detail):
         if self.phase != "gap":
@@ -585,13 +803,25 @@ class Supervisor:
         if self._nm_ending():
             return
         if not ok:
-            if classify_failure(detail) == "login":
-                # TODO(M2): with logind's LockedHint set, wait for the unlock and retry once.
-                self.give_up(FAIL_LOGIN, f"reconnect failed on authentication: {detail}")
-            else:
-                log.info("reconnect attempt %d failed: %s", self.attempts, detail.strip())
-                self._schedule_retry()
+            self.in_attempt = False
+            login = classify_failure(detail) == "login"
+            if self.unlock_retry:
+                self.unlock_retry = False
+                if login or detail.startswith(TIMED_OUT):
+                    self.give_up(FAIL_LOGIN, f"the retry after the unlock failed: {detail}")
+                    return
+            elif login:
+                if self.unlock_used:
+                    self.give_up(FAIL_LOGIN, f"reconnect failed on authentication: {detail}")
+                else:
+                    # Behind the lock screen the agent cannot prompt (design §4.3).
+                    self.fx.session_locked(self.profile.user, self._callback(
+                        self._lock_answer, self.attempt_id, detail))
+                return
+            log.info("reconnect attempt %d failed: %s", self.attempts, detail.strip())
+            self._schedule_retry()
             return
+        self.unlock_retry = False
         if self.invisible:
             log.info("tunnel is back (invisible reconnect)")
             self._end_gap()
@@ -628,21 +858,68 @@ class Supervisor:
         self.device_path = path
         self._burst()
 
+    def _lock_answer(self, aid, detail, locked):
+        if aid != self.attempt_id or self.phase != "gap" or self._nm_ending():
+            return
+        if not locked:
+            self.give_up(FAIL_LOGIN, f"reconnect failed on authentication: {detail}")
+            return
+        log.info("the reconnect failed on authentication while %s's screen is locked; "
+                 "waiting for the unlock to retry once", self.profile.user)
+        self.waiting_unlock = True
+        self._tick()
+        self._timer("unlock-poll", self.UNLOCK_POLL, self._poll_lock)
+
+    @guarded
+    def on_lock_changed(self):
+        """A session's LockedHint changed (any session; the answer says whose)."""
+        if self.waiting_unlock and self.phase == "gap":
+            self._poll_lock()
+
+    def _poll_lock(self):
+        if not self.waiting_unlock or self.phase != "gap":
+            return
+        self._timer("unlock-poll", self.UNLOCK_POLL, self._poll_lock)
+        self.fx.session_locked(self.profile.user, self._callback(self._unlock_answer))
+
+    def _unlock_answer(self, locked):
+        # None (logind cannot tell) is no unlock: the next poll asks again
+        if not self.waiting_unlock or self.phase != "gap" or self._nm_ending() \
+                or locked is not False:
+            return
+        self._cancel("unlock-poll")
+        self.waiting_unlock = False
+        self.unlock_used = True
+        self.unlock_retry = True
+        self._tick()
+        self._kick("unlocked; retrying once")
+
     def _burst(self):
         """Config, sentinel Ip4Config, real Ip4Config, STARTED, from one callback
         with nothing in between (design §4.4, "Coming back")."""
+        self.last_config = self._config()
         self.fx.emit_config(self.last_config)
         self.fx.emit_ip4_config(self._ip4_config(sentinel=True))
         self.fx.emit_ip4_config(self._ip4_config())
         self.phase = "reconfig"
+        self.in_attempt = False
         self._set_state(ST_STARTED)
         now = self.fx.now()
         if self.first_burst_at is None:
             self.first_burst_at = now
         self._timer("escalate", self.ESCALATE_AFTER, self._escalate)
         self._timer("deadline", max(0.0, self.first_burst_at + self.RECONFIG_DEADLINE - now),
-                    self.give_up, FAIL_CONNECT,
-                    "NetworkManager never showed the reconnect as activated")
+                    self._reconfig_deadline)
+
+    def _reconfig_deadline(self):
+        self.give_up(FAIL_CONNECT, "NetworkManager never showed the reconnect as activated")
+        if self.nm_version and not self.invisible:
+            # Later activations on this version reconnect invisibly (design §4.4).
+            log.warning("marking NetworkManager %s for the invisible reconnect", self.nm_version)
+            try:
+                self.fx.mark_invisible(self.nm_version)
+            except OSError as e:
+                log.warning("cannot mark it: %s", e)
 
     def _escalate(self):
         if self.phase != "reconfig" or self.escalated:
@@ -668,8 +945,154 @@ class Supervisor:
         self._cancel("escalate", "deadline", "burst-wait", "starting-wait")
         self.phase = "up"
         self.gap_started = None
+        self.counting_since = None
         self.first_burst_at = None
         self.escalated = False
+        self.in_attempt = False
+        self.parked = False
+        self.probe_answered = False     # the probe answers again before its failures count
+        self.probe_failures = 0
+        self._arm_health()
+
+    # --------------------------------------------------------------- health
+    def _arm_health(self):
+        self.health_id += 1
+        self._timer("health", self.HEALTH_INTERVAL, self._health, self.health_id)
+
+    def _health(self, hid):
+        """Every 10 s while up, from the plugin's own checks; NM's "activated" is
+        not evidence (design §4.4, "Health")."""
+        if self.phase != "up" or hid != self.health_id:
+            return
+        self._timer("health", self.HEALTH_INTERVAL, self._health, hid)
+        snap = self.fx.nft_health()
+        if snap is not None:
+            if self.profile.fail_closed and not snap["guard"]:
+                log.warning("the guard table is gone (was the ruleset flushed?); installing it "
+                            "again")
+                try:
+                    self._install_guard()
+                except (OSError, RuntimeError) as e:
+                    self.give_up(FAIL_CONNECT, f"cannot restore the guard: {e}")
+                    return
+            if self.profile.method == "nft" and not snap["sshuttle"]:
+                self._drop("health: no sshuttle table with a listener on its port")
+                return
+        self.fx.tunnel_active(self._callback(self._health_unit, hid))
+        if self.profile.probe:
+            host, _, port = self.profile.probe.rpartition(":")
+            self.fx.probe(host, int(port), self.PROBE_TIMEOUT,
+                          self._callback(self._probe_result, hid))
+
+    def _health_unit(self, hid, active):
+        if self.phase != "up" or hid != self.health_id or not self.tunnel_running:
+            return
+        if active is None:
+            log.warning("health: cannot read the state of the tunnel unit")
+        elif not active:
+            self.tunnel_running = False
+            self._drop("health: the tunnel unit is not active")
+
+    def _probe_result(self, hid, ok, detail):
+        if self.phase != "up" or hid != self.health_id:
+            return
+        if ok:
+            if not self.probe_answered:
+                log.info("probe %s answers through the tunnel", self.profile.probe)
+            self.probe_answered = True
+            self.probe_failures = 0
+            return
+        if not self.probe_answered:
+            # A probe that has not answered since the tunnel came up says nothing
+            # about the tunnel, and a dead probe target cannot cause restarts.
+            if not self.probe_warned:
+                self.probe_warned = True
+                log.warning("probe %s has not answered yet (%s); its failures count once it "
+                            "has", self.profile.probe, detail)
+            return
+        self.probe_failures += 1
+        log.warning("probe %s failed (%d/%d): %s", self.profile.probe, self.probe_failures,
+                    self.PROBE_FAILURES, detail)
+        if self.probe_failures >= self.PROBE_FAILURES:
+            self.probe_failures = 0
+            self._drop(f"the probe failed {self.PROBE_FAILURES} times in a row")
+
+    # ------------------------------------------------- network, sleep, lock
+    @guarded
+    def on_network(self, uplink, connectivity, key):
+        """Whether an uplink (an activated non-VPN connection) exists, NM's
+        connectivity, and the primary connection with its IPv4 addresses and
+        gateway as one key (None: no primary connection)."""
+        was_offline = self._offline()
+        was_portal = self.connectivity == CONN_PORTAL
+        self.uplink, self.connectivity = uplink, connectivity
+        changed = key is not None and self.net_key is not None and key != self.net_key
+        if key is not None:
+            self.net_key = key
+        offline = self._offline()
+        if offline != was_offline:
+            log.info("NetworkManager is %s", "offline" if offline else "online")
+        self._tick()
+        if self.phase not in ("up", "gap", "reconfig"):
+            return
+        if offline:
+            self.refresh_hop = True
+            if not was_offline and self.phase in ("up", "reconfig"):
+                self._drop("the network went away")
+            elif self.phase == "gap":
+                self._cancel("retry")
+            return
+        back = was_offline or (was_portal and connectivity != CONN_PORTAL)
+        if changed:
+            self.refresh_hop = True
+            log.info("the network changed: %s", key)
+            if self.phase in ("up", "reconfig"):
+                self._drop("the network changed", at_once=True)
+                return
+        if (changed or back) and self.phase == "gap":
+            self._kick("the network changed" if changed else "the network is back")
+
+    @guarded
+    def on_nm_version(self, version):
+        self.nm_version = version or None
+
+    @guarded
+    def on_prepare_sleep(self, sleeping):
+        """logind's PrepareForSleep: stop the tunnel before suspend, release the delay
+        inhibitor once it is stopped; reconnect after resume (design §4.4)."""
+        if sleeping == self.asleep:
+            return
+        self.asleep = sleeping
+        log.info("%s (%s)", "suspending" if sleeping else "resumed", self.phase)
+        if sleeping:
+            if self.phase == "connecting":
+                self.give_up(FAIL_CONNECT, "the machine suspended during the first connect")
+            elif self.phase in ("up", "reconfig"):
+                self._drop("the machine is suspending")
+            elif self.phase == "gap":
+                self._cancel("retry", "stop-wait")
+                if self.in_attempt:
+                    self.attempt_id += 1
+                    self.poll_id += 1
+                    self.in_attempt = False
+                    self.tunnel_running = False
+                    self._cancel("tunnel", "device", "burst-wait")
+                    self._stop_tunnel()
+            self._tick()
+            self._timer("sleep-cap", self.SLEEP_CAP, self._release_sleep)
+            self._after_stops(self._release_sleep)
+            return
+        self._tick()
+        if self.phase in ACTIVE:
+            self.fx.inhibit_sleep()
+        if self.phase == "gap":
+            self.refresh_hop = True
+            self._kick("resumed")
+
+    def _release_sleep(self):
+        self._cancel("sleep-cap")
+        if self.asleep:
+            self.fx.release_sleep()
 
     # ------------------------------------------------------------- link loss
     @guarded
@@ -738,7 +1161,7 @@ class Supervisor:
         self.tunnel_running = False
         self.tunnel_stopped = False
         self.link_removed = False
-        self.fx.stop_tunnel(self._callback(self._tunnel_stopped))
+        self._stop_tunnel(self._tunnel_stopped)
         self._timer("stop-cap", self.STOP_CAP, self._tunnel_stop_cap)
         self._timer("link-cap", self.LINK_CAP, self._remove_link_and_guard)
         if self.disconnect_seen or self.ac_state == AC_DEACTIVATED:
@@ -793,6 +1216,7 @@ class Supervisor:
             return
         self._cancel_all()
         self.phase = "idle"
+        self.fx.release_sleep()
         log.info("torn down")
         if self.quit_requested:
             self._quit_now()

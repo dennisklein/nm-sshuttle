@@ -297,6 +297,8 @@ def test_reconnect_auth_failure_is_login_failed(up):
     gap(fx, sup)
     fx.advance(1)
     fx.finish_start(False, "alice@corp: Host key verification failed.")
+    assert "failure" not in fx.names()       # first: is the screen locked?
+    fx.lock_cbs.pop(0)(False)
     assert ("failure", FAIL_LOGIN) in fx.events
 
 

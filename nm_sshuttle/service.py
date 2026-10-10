@@ -11,6 +11,7 @@ the cleanup run asynchronously. ip and nft calls are single short runs.
 import json
 import logging
 import os
+import pwd
 import signal
 import socket
 import struct
@@ -24,10 +25,11 @@ gi.require_version("Gio", "2.0")
 gi.require_version("GLib", "2.0")
 from gi.repository import Gio, GLib  # noqa: E402
 
-from . import guard, tunnel  # noqa: E402
-from .const import (BUS_NAME, LIBEXEC, NM_AC_IFACE, NM_DEVICE_IFACE, NM_NAME,  # noqa: E402
-                    NM_PATH, PLUGIN_IFACE, PLUGIN_PATH, STATE_DIR, SYSTEMD_MANAGER_IFACE,
-                    SYSTEMD_NAME, SYSTEMD_PATH, SYSTEMD_UNIT_IFACE, TUNNEL_SPEC, TUNNEL_UNIT)
+from . import guard, tunnel, watch  # noqa: E402
+from .const import (BUS_NAME, INVISIBLE_MARK, LIBEXEC, LOGIN_MANAGER_IFACE,  # noqa: E402
+                    LOGIN_NAME, LOGIN_PATH, NM_AC_IFACE, NM_DEVICE_IFACE, NM_NAME, NM_PATH,
+                    PLUGIN_IFACE, PLUGIN_PATH, STATE_DIR, SYSTEMD_MANAGER_IFACE, SYSTEMD_NAME,
+                    SYSTEMD_PATH, SYSTEMD_UNIT_IFACE, TUNNEL_SPEC, TUNNEL_UNIT)
 from .supervisor import Supervisor  # noqa: E402
 
 # GLib.unix_signal_add and DBusConnection.register_object are deprecated in
@@ -140,6 +142,13 @@ class Service:
         self.finished_jobs = {}   # JobRemoved that arrived before StartUnit's reply
         self.unit_path = unit_object_path(TUNNEL_UNIT)
         self.node = Gio.DBusNodeInfo.new_for_xml(INTROSPECTION)
+        self.network = watch.NetworkWatcher(conn, self._call, self.sup.on_network,
+                                            self.sup.on_nm_version)
+        self.logind = watch.LogindWatcher(conn, self.sup.on_prepare_sleep,
+                                          self.sup.on_lock_changed)
+        self.inhibit_fd = None
+        self.inhibit_wanted = False
+        self.inhibit_pending = False
 
     # ------------------------------------------------------------- set-up
     def run(self, bus_name=BUS_NAME):
@@ -156,6 +165,8 @@ class Service:
         # systemd sends unit and job signals only while someone is subscribed.
         self._call(SYSTEMD_NAME, SYSTEMD_PATH, SYSTEMD_MANAGER_IFACE, "Subscribe", None, None,
                    lambda r, e: e and log.warning("systemd Subscribe failed: %s", e))
+        self.network.start()
+        self.logind.start()
         Gio.bus_watch_name_on_connection(self.conn, NM_NAME, Gio.BusNameWatcherFlags.NONE,
                                          self.on_nm_appeared, self.on_nm_vanished)
         for sig in (signal.SIGTERM, signal.SIGINT):
@@ -176,8 +187,10 @@ class Service:
     def on_nm_appeared(self, conn, name, owner):
         log.info("NetworkManager is %s", owner)
         self.sup.on_nm_owner(owner)
+        self.network.refresh()
 
     def on_nm_vanished(self, conn, name):
+        self.network.forget()
         self.sup.on_nm_owner(None)
 
     def on_term(self):
@@ -294,6 +307,60 @@ class Service:
     def device_state(self, path, done):
         self._get_property(NM_NAME, path, NM_DEVICE_IFACE, "State", lambda v, e: done(v))
 
+    def invisible_versions(self):
+        try:
+            with open(INVISIBLE_MARK) as f:
+                return {line.strip() for line in f if line.strip()}
+        except FileNotFoundError:
+            return set()
+
+    def mark_invisible(self, version):
+        os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+        with open(INVISIBLE_MARK, "a") as f:
+            f.write(version + "\n")
+
+    # -------------------------------------------------------------- logind
+    def inhibit_sleep(self):
+        """Hold a delay inhibitor for sleep while the toggle is on (design §4.4)."""
+        self.inhibit_wanted = True
+        if self.inhibit_fd is not None or self.inhibit_pending:
+            return
+        self.inhibit_pending = True
+
+        def finished(conn, res):
+            self.inhibit_pending = False
+            try:
+                r, fds = conn.call_with_unix_fd_list_finish(res)
+                fd = fds.get(r.unpack()[0])
+            except GLib.Error as e:
+                log.warning("cannot take a sleep inhibitor: %s", e.message)
+                return
+            if self.inhibit_wanted and self.inhibit_fd is None:
+                self.inhibit_fd = fd
+                log.info("holding a sleep delay inhibitor")
+            else:
+                os.close(fd)
+        self.conn.call_with_unix_fd_list(
+            LOGIN_NAME, LOGIN_PATH, LOGIN_MANAGER_IFACE, "Inhibit",
+            GLib.Variant("(ssss)", ("sleep", "nm-sshuttle",
+                                    "Stops the sshuttle tunnel before suspend", "delay")),
+            GLib.VariantType("(h)"), Gio.DBusCallFlags.NONE, 5000, None, None, finished)
+
+    def release_sleep(self):
+        self.inhibit_wanted = False
+        if self.inhibit_fd is not None:
+            os.close(self.inhibit_fd)
+            self.inhibit_fd = None
+            log.info("released the sleep inhibitor")
+
+    def session_locked(self, user, done):
+        try:
+            uid = pwd.getpwnam(user).pw_uid
+        except KeyError:
+            done(None)
+            return
+        watch.session_locked(self._call, uid, done)
+
     # ------------------------------------------------------------- systemd
     def on_job_removed(self, conn, sender, path, iface, signal_name, params):
         _id, job, unit, result = params.unpack()
@@ -345,6 +412,14 @@ class Service:
                 log.warning("stopping %s: %s", TUNNEL_UNIT, err)
             done()
         self._job("StopUnit", stopped)
+
+    def tunnel_active(self, done):
+        def got(value, err):
+            if err:
+                done(None)      # an error is not "inactive"
+            else:
+                done(value in ("active", "reloading"))
+        self._get_property(SYSTEMD_NAME, self.unit_path, SYSTEMD_UNIT_IFACE, "ActiveState", got)
 
     def _failure_detail(self, done):
         """The last lines of the tunnel unit's journal, for the failure markers."""
@@ -424,6 +499,52 @@ class Service:
     def sweep(self):
         tunnel.sweep()
 
+    def nft_health(self):
+        return tunnel.nft_health()
+
+    def probe(self, host, port, timeout_s, done):
+        """Connect through the tunnel and wait for the first byte: sshuttle accepts
+        locally at once, so only data from the far end shows the path works."""
+        cancel = Gio.Cancellable()
+        state = {"over": False, "conn": None}
+
+        def finish(ok, detail):
+            if state["over"]:
+                return
+            state["over"] = True
+            if state.get("timer"):
+                GLib.source_remove(state.pop("timer"))
+            cancel.cancel()
+            if state["conn"] is not None:
+                state["conn"].close_async(GLib.PRIORITY_DEFAULT, None, None, None)
+            done(ok, detail)
+
+        def expired():
+            state.pop("timer", None)
+            finish(False, f"no data within {timeout_s:g} s")
+            return False
+
+        def connected(client, res):
+            try:
+                state["conn"] = client.connect_to_host_finish(res)
+            except GLib.Error as e:
+                finish(False, e.message)
+                return
+            state["conn"].get_input_stream().read_bytes_async(1, GLib.PRIORITY_DEFAULT, cancel,
+                                                               got_data)
+
+        def got_data(stream, res):
+            try:
+                data = stream.read_bytes_finish(res)
+            except GLib.Error as e:
+                finish(False, e.message)
+                return
+            finish(data.get_size() > 0, "" if data.get_size() else "closed without data")
+
+        state["timer"] = GLib.timeout_add(int(timeout_s * 1000), expired)
+        client = Gio.SocketClient.new()
+        client.connect_to_host_async(f"{host}:{port}", port, cancel, connected)
+
     def write_tunnel_spec(self, spec):
         os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
         tmp = TUNNEL_SPEC + ".tmp"
@@ -478,6 +599,9 @@ def main(argv=None):
     if "--bus-name" in argv:
         bus_name = argv[argv.index("--bus-name") + 1]
     os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+    if os.environ.get("NM_SSHUTTLE_PARK_GAP") == "1":
+        log.info("candidate: parking NM in ip-config-get during gaps (NM_SSHUTTLE_PARK_GAP)")
+        Supervisor.PARK_GAP = True
     log.info("starting (pid %d)", os.getpid())
     loop = GLib.MainLoop()
     service = Service(connect_bus(), loop)

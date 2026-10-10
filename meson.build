@@ -34,6 +34,7 @@ python.install_sources(
   'nm_sshuttle/service.py',
   'nm_sshuttle/supervisor.py',
   'nm_sshuttle/tunnel.py',
+  'nm_sshuttle/watch.py',
   subdir: 'nm_sshuttle',
 )
 
