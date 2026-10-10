@@ -13,7 +13,7 @@ import stat
 import subprocess
 import sys
 
-from .const import LIBEXEC, TUNNEL_SPEC
+from .const import GUARD_TABLE, LIBEXEC, TUNNEL_SPEC
 from .profile import collapse
 
 log = logging.getLogger("nm-sshuttle")
@@ -185,16 +185,44 @@ def listening_ports(proc_files=("/proc/net/tcp", "/proc/net/tcp6")):
     return ports
 
 
-def stale_tables(nft_list_tables, ports):
-    """sshuttle tables whose redirect port has no listener (lab T7c)."""
-    stale = []
+def inet_tables(nft_list_tables):
+    """Names of the inet tables in 'nft list tables' output."""
+    names = []
     for line in nft_list_tables.splitlines():
         parts = line.split()
         if len(parts) == 3 and parts[0] == "table" and parts[1] == "inet":
-            m = SSHUTTLE_TABLE_RE.match(parts[2])
-            if m and int(m.group(1)) not in ports:
-                stale.append(parts[2])
-    return stale
+            names.append(parts[2])
+    return names
+
+
+def sshuttle_tables(nft_list_tables, ports, live):
+    """sshuttle tables whose redirect port has a listener (live) or none (stale)."""
+    out = []
+    for name in inet_tables(nft_list_tables):
+        m = SSHUTTLE_TABLE_RE.match(name)
+        if m and (int(m.group(1)) in ports) == live:
+            out.append(name)
+    return out
+
+
+def stale_tables(nft_list_tables, ports):
+    """sshuttle tables whose redirect port has no listener (lab T7c)."""
+    return sshuttle_tables(nft_list_tables, ports, live=False)
+
+
+def nft_health():
+    """What the health check reads from nft (design §4.4, "Health"): is the
+    guard table there, and does a sshuttle table have a listener on its port?
+    None when nft cannot be asked."""
+    try:
+        p = subprocess.run(["nft", "list", "tables"], capture_output=True, text=True,
+                           timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if p.returncode:
+        return None
+    return {"guard": GUARD_TABLE in inet_tables(p.stdout),
+            "sshuttle": bool(sshuttle_tables(p.stdout, listening_ports(), live=True))}
 
 
 def sweep():
