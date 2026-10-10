@@ -11,26 +11,35 @@ not an option.
 
 ## Status
 
-**M2, lifecycle, in progress.** The plugin runs its lifecycle and passes the
-first VM run on Fedora 44 (`test-vm/`, 226 checks). There is no profile CLI or
-distribution package yet.
+**M3, usable, in progress.** The plugin runs its whole lifecycle (M2):
+reconnects with backoff, suspend, roaming, captive portals, a health check,
+the lock screen and the fail-closed guard. The profile commands and RPM and
+deb packages exist. The [user guide](docs/user-guide.md) covers installing,
+creating a profile and troubleshooting.
+
+```console
+$ nm-sshuttle add corp --remote corp --subnets 10.0.0.0/8 \
+      --dns split --dns-servers 10.1.0.53 --dns-domains corp.example
+$ nm-sshuttle check corp
+$ nmcli connection up corp         # or the VPN toggle in Quick Settings
+```
 
 - [`nm_sshuttle/`](nm_sshuttle) is the plugin (design §4.9): the VPN D-Bus
-  service, its lifecycle state machine, the guard table and `nmss0`, and the
-  commands the systemd units run. [`data/`](data) holds the files it
-  installs, among them the NetworkManager `conf.d` snippet that keeps
-  `nmss0` unmanaged.
-- [`docs/design.md`](docs/design.md) is the design proposal. It covers the
-  research findings, the options considered, the proposed architecture, and
-  the risks to retire first.
+  service, its lifecycle state machine, the NetworkManager and logind
+  watchers, the guard table and `nmss0`, and the commands the systemd units
+  and users run. [`data/`](data) holds the files it installs, among them
+  the NetworkManager `conf.d` snippet that keeps `nmss0` unmanaged.
+- [`packaging/rpm/`](packaging/rpm) and [`debian/`](debian) build the
+  Fedora and Debian/Ubuntu packages.
+- [`docs/design.md`](docs/design.md) is the design: the research findings,
+  the options considered, the architecture, the risks and the roadmap.
+- [`test-vm/`](test-vm) runs the plugin's scenarios in a throwaway Fedora
+  44 VM, from a Fedora host or in CI (the VM tests workflow).
 - [`lab/`](lab) is a self-contained test lab. It checks the sshuttle and
   kernel behaviour the design relies on (network namespaces; run as root in a
   throwaway VM or container).
-- [`spike/`](spike) is the M1 spike. `spike/vm.sh` on a Fedora 44 host
-  creates a throwaway Fedora 44 VM with GNOME and runs a bare VPN plugin
-  through the open risks (NetworkManager activation, SELinux, split DNS,
-  reconnects, the GNOME toggle, agent key unlock), then copies a report
-  back.
+- [`spike/`](spike) is the M1 spike: a bare VPN plugin run through the open
+  risks in a Fedora 44 VM with GNOME.
 - [`docs/upstream/`](docs/upstream) holds draft bug reports for
   NetworkManager, GNOME Shell and sshuttle, found along the way and not yet
   filed.
@@ -41,14 +50,13 @@ distribution package yet.
 $ python3 -m pytest                 # needs python3-gobject and dbus-daemon for the D-Bus test
 $ meson setup build --prefix=/usr
 $ sudo meson install -C build
-$ sudo /usr/libexec/nm-sshuttle/nm-sshuttle post-install
+$ sudo nm-sshuttle post-install
+$ test-vm/vm.sh                     # on a Fedora 44 host with KVM; see test-vm/README.md
 ```
 
 `post-install` reloads NetworkManager's configuration so that `nmss0` is
 unmanaged, unless an nm-sshuttle VPN is active; then the setting takes
-effect at NetworkManager's next start. Until M3's CLI exists, a profile is
-created with `nmcli` as in [`spike/spike.sh`](spike/spike.sh), plus
-`vpn.persistent yes` (design §4.2).
+effect at NetworkManager's next start. The packages run it themselves.
 
 ## Proposed shape, in short
 

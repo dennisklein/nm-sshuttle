@@ -1334,9 +1334,9 @@ item is explained above or in §2.1.
 `--to-ns` is always set. It pins the remote resolver and avoids the tunnel
 crash in lab T9.
 
-`split` takes routing-only domains (`~corp.example`) by default. A plain
-`corp.example` also becomes a search domain, so short names such as `git`
-get completed with it; the profile can ask for that.
+`dns-domains` go to NM as given. A routing-only domain (`~corp.example`)
+only routes lookups. A plain `corp.example` also becomes a search domain, so
+short names such as `git` get completed with it.
 
 **Coverage.** The kernel side is covered: a query pinned to the link with
 `IP_UNICAST_IF` is redirected and answered through the tunnel **[lab T3]**.
