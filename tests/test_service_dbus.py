@@ -29,6 +29,10 @@ from nm_sshuttle.const import (AC_ACTIVATED, AC_ACTIVATING, AC_DEACTIVATED,  # n
 pytestmark = pytest.mark.skipif(not shutil.which("dbus-daemon"), reason="needs dbus-daemon")
 
 AC_PATH = "/org/freedesktop/NetworkManager/ActiveConnection/1"
+PRIMARY_PATH = "/org/freedesktop/NetworkManager/ActiveConnection/0"
+AC_IFACE = "org.freedesktop.NetworkManager.Connection.Active"
+IP4_PATH = "/org/freedesktop/NetworkManager/IP4Config/3"
+SESSION_PATH = "/org/freedesktop/login1/session/_32"
 DEV_PATH = "/org/freedesktop/NetworkManager/Devices/5"
 UNIT_PATH = "/org/freedesktop/systemd1/unit/nm_2dsshuttle_2dtunnel_2eservice"
 
@@ -39,14 +43,45 @@ NM_XML = """
       <arg name="iface" type="s" direction="in"/><arg name="device" type="o" direction="out"/>
     </method>
     <property name="ActiveConnections" type="ao" access="read"/>
+    <property name="State" type="u" access="read"/>
+    <property name="Connectivity" type="u" access="read"/>
+    <property name="PrimaryConnection" type="o" access="read"/>
+    <property name="Version" type="s" access="read"/>
   </interface>
   <interface name="org.freedesktop.NetworkManager.Connection.Active">
     <property name="Uuid" type="s" access="read"/>
     <property name="State" type="u" access="read"/>
+    <property name="StateFlags" type="u" access="read"/>
+    <property name="Vpn" type="b" access="read"/>
+    <property name="Type" type="s" access="read"/>
+    <property name="Ip4Config" type="o" access="read"/>
     <signal name="StateChanged"><arg type="u"/><arg type="u"/></signal>
   </interface>
   <interface name="org.freedesktop.NetworkManager.Device">
     <property name="State" type="u" access="read"/>
+  </interface>
+  <interface name="org.freedesktop.NetworkManager.IP4Config">
+    <property name="AddressData" type="aa{sv}" access="read"/>
+    <property name="Gateway" type="s" access="read"/>
+  </interface>
+</node>"""
+
+LOGIN_XML = """
+<node>
+  <interface name="org.freedesktop.login1.Manager">
+    <method name="Inhibit">
+      <arg type="s" direction="in"/><arg type="s" direction="in"/>
+      <arg type="s" direction="in"/><arg type="s" direction="in"/>
+      <arg type="h" direction="out"/>
+    </method>
+    <method name="GetUser"><arg type="u" direction="in"/><arg type="o" direction="out"/></method>
+    <signal name="PrepareForSleep"><arg type="b"/></signal>
+  </interface>
+  <interface name="org.freedesktop.login1.User">
+    <property name="Sessions" type="a(so)" access="read"/>
+  </interface>
+  <interface name="org.freedesktop.login1.Session">
+    <property name="LockedHint" type="b" access="read"/>
   </interface>
 </node>"""
 
@@ -125,6 +160,11 @@ class FakeWorld:
         self.conn = connect(address)
         self.ac_state = AC_ACTIVATING
         self.unit_state = "inactive"
+        self.nm_state = 70
+        self.primary_state = AC_ACTIVATED
+        self.address = "192.168.1.20"
+        self.locked = False
+        self.inhibit_fds = []
         self.signals = []
         self.jobs = 0
         self.calls = []
@@ -137,7 +177,17 @@ class FakeWorld:
         self.conn.register_object("/org/freedesktop/systemd1", sd.interfaces[0],
                                   self.on_call, self.on_prop, None)
         self.conn.register_object(UNIT_PATH, sd.interfaces[1], self.on_call, self.on_prop, None)
-        for name in ("org.freedesktop.NetworkManager", "org.freedesktop.systemd1"):
+        self.conn.register_object(PRIMARY_PATH, nm.interfaces[1], self.on_call, self.on_prop, None)
+        self.conn.register_object(IP4_PATH, nm.interfaces[3], self.on_call, self.on_prop, None)
+        lg = Gio.DBusNodeInfo.new_for_xml(LOGIN_XML)
+        self.conn.register_object("/org/freedesktop/login1", lg.interfaces[0], self.on_call,
+                                  self.on_prop, None)
+        self.conn.register_object("/org/freedesktop/login1/user/_1000", lg.interfaces[1],
+                                  self.on_call, self.on_prop, None)
+        self.conn.register_object(SESSION_PATH, lg.interfaces[2], self.on_call, self.on_prop,
+                                  None)
+        for name in ("org.freedesktop.NetworkManager", "org.freedesktop.systemd1",
+                     "org.freedesktop.login1"):
             self.conn.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus",
                                 "org.freedesktop.DBus", "RequestName",
                                 GLib.Variant("(su)", (name, 4)), None,
@@ -149,12 +199,28 @@ class FakeWorld:
     # what NetworkManager and systemd answer
     def on_prop(self, conn, sender, path, iface, prop):
         values = {
-            "ActiveConnections": GLib.Variant("ao", [AC_PATH]),
-            "Uuid": GLib.Variant("s", "uuid-1"),
+            "ActiveConnections": GLib.Variant("ao", [PRIMARY_PATH, AC_PATH]),
+            "Uuid": GLib.Variant("s", "uuid-1" if path == AC_PATH else "wifi-1"),
+            "Vpn": GLib.Variant("b", path == AC_PATH),
+            "Type": GLib.Variant("s", "vpn" if path == AC_PATH else "802-11-wireless"),
+            "StateFlags": GLib.Variant("u", 0),
             "ActiveState": GLib.Variant("s", self.unit_state),
             "InvocationID": GLib.Variant("ay", bytes(16)),
+            "Connectivity": GLib.Variant("u", 4),
+            "PrimaryConnection": GLib.Variant("o", PRIMARY_PATH),
+            "Version": GLib.Variant("s", "1.56.1"),
+            "Ip4Config": GLib.Variant("o", IP4_PATH if path == PRIMARY_PATH else "/"),
+            "AddressData": GLib.Variant("aa{sv}", [{"address": GLib.Variant("s", self.address),
+                                                    "prefix": GLib.Variant("u", 24)}]),
+            "Gateway": GLib.Variant("s", "192.168.1.1"),
+            "Sessions": GLib.Variant("a(so)", [("2", SESSION_PATH)]),
+            "LockedHint": GLib.Variant("b", self.locked),
         }
         if prop == "State":
+            if path == "/org/freedesktop/NetworkManager":
+                return GLib.Variant("u", self.nm_state)
+            if path == PRIMARY_PATH:
+                return GLib.Variant("u", self.primary_state)
             return GLib.Variant("u", self.ac_state if path == AC_PATH else 10)
         return values.get(prop)
 
@@ -162,6 +228,13 @@ class FakeWorld:
         self.calls.append(method)
         if method == "GetDeviceByIpIface":
             inv.return_value(GLib.Variant("(o)", (DEV_PATH,)))
+        elif method == "GetUser":
+            inv.return_value(GLib.Variant("(o)", ("/org/freedesktop/login1/user/_1000",)))
+        elif method == "Inhibit":
+            r, w = os.pipe()
+            self.inhibit_fds.append(w)
+            inv.return_value_with_unix_fd_list(GLib.Variant("(h)", (0,)),
+                                               Gio.UnixFDList.new_from_array([r]))
         elif method in ("StartUnit", "StopUnit"):
             self.jobs += 1
             job = f"/org/freedesktop/systemd1/job/{self.jobs}"
@@ -186,10 +259,15 @@ class FakeWorld:
                               GLib.Variant("(sa{sv}as)", ("org.freedesktop.systemd1.Unit",
                                            {"ActiveState": GLib.Variant("s", state)}, [])))
 
+    def props_changed(self, path, iface, props):
+        self.conn.emit_signal(None, path, "org.freedesktop.DBus.Properties", "PropertiesChanged",
+                              GLib.Variant("(sa{sv}as)", (iface, props, [])))
+
     def set_ac(self, state, reason=0):
         self.ac_state = state
-        self.conn.emit_signal(None, AC_PATH, "org.freedesktop.NetworkManager.Connection.Active",
-                              "StateChanged", GLib.Variant("(uu)", (state, reason)))
+        self.conn.emit_signal(None, AC_PATH, AC_IFACE, "StateChanged",
+                              GLib.Variant("(uu)", (state, reason)))
+        self.props_changed(AC_PATH, AC_IFACE, {"State": GLib.Variant("u", state)})
 
     # what NetworkManager sees from the plugin
     def on_plugin_signal(self, conn, sender, path, iface, name, params):
@@ -249,6 +327,8 @@ def world(bus, monkeypatch, tmp_path):
     monkeypatch.setattr(guard, "install_guard", lambda n, e: host["ops"].append("guard"))
     monkeypatch.setattr(guard, "remove_guard", lambda: host["ops"].append("unguard"))
     monkeypatch.setattr(tunnel, "sweep", lambda: None)
+    monkeypatch.setattr(tunnel, "nft_health", lambda: {"guard": True, "sshuttle": True})
+    monkeypatch.setattr(service.pwd, "getpwnam", fake_getpwnam)
     monkeypatch.setattr(service.Service, "run_cleanup", lambda self, done: done())
     monkeypatch.setattr(service.Service, "write_tunnel_spec", lambda self, spec: None)
 
@@ -343,3 +423,102 @@ def test_need_secrets_and_state_property(world):
                                                       "State")),
                          iface="org.freedesktop.DBus.Properties")
     assert r.unpack() == (1,)
+
+
+def test_network_and_logind_watchers(world):
+    fake, svc, host = world
+    sup = svc.sup
+    iterate_until(lambda: sup.net_key is not None)
+    assert sup.uplink is True and sup.connectivity == 4 and sup.nm_version == "1.56.1"
+    assert sup.net_key == ("wifi-1", ("192.168.1.20/24",), "192.168.1.1")
+
+    fake.call_plugin("Connect", settings_variant())
+    iterate_until(lambda: sup.phase == "up" and svc.inhibit_fd is not None)
+    iterate_until(lambda: f"State{ST_STARTED}" in fake.names())   # all of it arrived
+    fake.set_ac(AC_ACTIVATED)
+    iterate_until(lambda: sup.ac_state == AC_ACTIVATED)
+
+    # a new address on the primary connection: a drop, STARTING, and an at-once
+    # attempt. NM's global State reads CONNECTING meanwhile; it does not matter.
+    fake.signals.clear()
+    fake.nm_state = 40
+    fake.address = "10.20.0.7"
+    fake.props_changed(IP4_PATH, "org.freedesktop.NetworkManager.IP4Config",
+                       {"AddressData": GLib.Variant("aa{sv}", [])})
+    iterate_until(lambda: sup.net_key[1] == ("10.20.0.7/24",))
+    iterate_until(lambda: f"State{ST_STARTED}" in fake.names(), timeout=2)
+    assert fake.names()[0] == f"State{ST_STARTING}" and sup.uplink is True
+    fake.nm_state = 70
+    fake.set_ac(AC_ACTIVATED)
+    iterate_until(lambda: sup.phase == "up")
+
+    # the uplink goes away: offline, and the tunnel drops
+    fake.signals.clear()
+    fake.primary_state = AC_DEACTIVATED
+    fake.props_changed(PRIMARY_PATH, AC_IFACE, {"State": GLib.Variant("u", AC_DEACTIVATED)})
+    iterate_until(lambda: sup.uplink is False and sup.phase == "gap")
+    iterate_until(lambda: fake.names() == [f"State{ST_STARTING}"])
+    fake.primary_state = AC_ACTIVATED
+    fake.props_changed(PRIMARY_PATH, AC_IFACE, {"State": GLib.Variant("u", AC_ACTIVATED)})
+    iterate_until(lambda: sup.uplink is True)
+    iterate_until(lambda: f"State{ST_STARTED}" in fake.names(), timeout=5)
+    fake.set_ac(AC_ACTIVATED)
+    iterate_until(lambda: sup.phase == "up")
+
+    # suspend: the inhibitor goes once the tunnel is stopped; resume takes it again
+    fake.conn.emit_signal(None, "/org/freedesktop/login1", "org.freedesktop.login1.Manager",
+                          "PrepareForSleep", GLib.Variant("(b)", (True,)))
+    iterate_until(lambda: sup.asleep and svc.inhibit_fd is None)
+    fake.conn.emit_signal(None, "/org/freedesktop/login1", "org.freedesktop.login1.Manager",
+                          "PrepareForSleep", GLib.Variant("(b)", (False,)))
+    iterate_until(lambda: not sup.asleep and svc.inhibit_fd is not None)
+
+    # the lock state, read through the user's sessions
+    answers = []
+    svc.session_locked("alice", answers.append)
+    iterate_until(lambda: answers)
+    fake.locked = True
+    svc.session_locked("alice", answers.append)
+    iterate_until(lambda: len(answers) == 2)
+    assert answers == [False, True]
+    seen = []
+    sup.on_lock_changed = lambda: seen.append(1)
+    svc.logind.on_lock_changed = sup.on_lock_changed
+    fake.props_changed(SESSION_PATH, "org.freedesktop.login1.Session",
+                       {"LockedHint": GLib.Variant("b", True)})
+    iterate_until(lambda: seen)
+
+
+def test_probe_needs_data_from_the_far_end():
+    svc = service.Service(None, None)
+    banner, silent = socket.socket(), socket.socket()
+    for s in (banner, silent):
+        s.bind(("127.0.0.1", 0))
+        s.listen(1)
+    closed = socket.socket()
+    closed.bind(("127.0.0.1", 0))
+    closed_port = closed.getsockname()[1]
+    closed.close()
+
+    def serve():
+        try:
+            c, _ = banner.accept()
+            c.sendall(b"SSH-2.0-test\r\n")
+            c.close()
+        except BlockingIOError:
+            return True
+        return False
+    banner.setblocking(False)
+    GLib.timeout_add(5, serve)
+
+    results = {}
+    svc.probe("127.0.0.1", banner.getsockname()[1], 2, lambda ok, d: results.update(banner=ok))
+    svc.probe("127.0.0.1", silent.getsockname()[1], 0.3,
+              lambda ok, d: results.update(silent=(ok, d)))
+    svc.probe("127.0.0.1", closed_port, 2, lambda ok, d: results.update(closed=ok))
+    iterate_until(lambda: len(results) == 3)
+    assert results["banner"] is True
+    assert results["silent"] == (False, "no data within 0.3 s")
+    assert results["closed"] is False
+    banner.close()
+    silent.close()

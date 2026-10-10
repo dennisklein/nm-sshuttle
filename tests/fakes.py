@@ -48,6 +48,15 @@ class FakeEffects:
         self.auto_device = True
         self.quit_called = False
         self.raise_on = {}
+        # kept out of events, so that the sequences the tests compare stay as they are
+        self.inhibited = False
+        self.inhibit_calls = 0
+        self.invisible = set()
+        self.health = {"guard": True, "sshuttle": True}
+        self.unit_active = True       # None: no answer yet (tunnel_cbs)
+        self.tunnel_cbs = []
+        self.probe_cbs = []
+        self.lock_cbs = []
 
     # recording helpers
     def _rec(self, *event):
@@ -93,6 +102,37 @@ class FakeEffects:
     def device_state(self, path, done):
         self._rec("device_state", path)
         self.device_state_cbs.append(done)
+
+    def invisible_versions(self):
+        return set(self.invisible)
+
+    def mark_invisible(self, version):
+        self._rec("mark_invisible", version)
+        self.invisible.add(version)
+
+    # logind
+    def inhibit_sleep(self):
+        self.inhibit_calls += 1
+        self.inhibited = True
+
+    def release_sleep(self):
+        self.inhibited = False
+
+    def session_locked(self, user, done):
+        self.lock_cbs.append(done)
+
+    # health
+    def nft_health(self):
+        return None if self.health is None else dict(self.health)
+
+    def tunnel_active(self, done):
+        if self.unit_active is None:
+            self.tunnel_cbs.append(done)
+        else:
+            done(self.unit_active)
+
+    def probe(self, host, port, timeout, done):
+        self.probe_cbs.append(((host, port), done))
 
     # systemd
     def start_tunnel(self, done):
