@@ -1,0 +1,20 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+#
+# Prototype of the privilege bridge: sshuttle runs as root and uses this as
+# its ssh command (sshuttle -e "ssh-as-user USER AGENT_SOCK"). ssh itself
+# runs as USER, so it uses that user's ~/.ssh/config (ProxyJump, aliases),
+# known_hosts and agent. Only the sshuttle client and its firewall helper
+# keep root.
+#
+# In the proposed design the agent socket comes from the user's systemd
+# manager environment instead of an argument.
+set -eu
+user=$1
+sock=$2
+shift 2
+home=$(getent passwd "$user" | cut -d: -f6)
+exec setpriv --reuid="$user" --regid="$user" --init-groups --reset-env \
+    env HOME="$home" USER="$user" LOGNAME="$user" \
+        PATH=/usr/local/bin:/usr/bin:/bin SSH_AUTH_SOCK="$sock" \
+    ssh -o BatchMode=yes -o ControlMaster=no -o ControlPath=none "$@"
