@@ -11,8 +11,15 @@ not an option.
 
 ## Status
 
-**Design phase.** Nothing installable yet.
+**M2, lifecycle, in progress.** The plugin runs its lifecycle and passes the
+first VM run on Fedora 44 (`test-vm/`, 226 checks). There is no profile CLI or
+distribution package yet.
 
+- [`nm_sshuttle/`](nm_sshuttle) is the plugin (design §4.9): the VPN D-Bus
+  service, its lifecycle state machine, the guard table and `nmss0`, and the
+  commands the systemd units run. [`data/`](data) holds the files it
+  installs, among them the NetworkManager `conf.d` snippet that keeps
+  `nmss0` unmanaged.
 - [`docs/design.md`](docs/design.md) is the design proposal. It covers the
   research findings, the options considered, the proposed architecture, and
   the risks to retire first.
@@ -27,6 +34,21 @@ not an option.
 - [`docs/upstream/`](docs/upstream) holds draft bug reports for
   NetworkManager, GNOME Shell and sshuttle, found along the way and not yet
   filed.
+
+## Building and testing
+
+```console
+$ python3 -m pytest                 # needs python3-gobject and dbus-daemon for the D-Bus test
+$ meson setup build --prefix=/usr
+$ sudo meson install -C build
+$ sudo /usr/libexec/nm-sshuttle/nm-sshuttle post-install
+```
+
+`post-install` reloads NetworkManager's configuration so that `nmss0` is
+unmanaged, unless an nm-sshuttle VPN is active; then the setting takes
+effect at NetworkManager's next start. Until M3's CLI exists, a profile is
+created with `nmcli` as in [`spike/spike.sh`](spike/spike.sh), plus
+`vpn.persistent yes` (design §4.2).
 
 ## Proposed shape, in short
 
