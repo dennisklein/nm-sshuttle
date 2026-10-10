@@ -1,0 +1,15 @@
+#!/usr/bin/make -f
+# SPDX-License-Identifier: MIT
+
+# The plugin looks for its helpers in /usr/libexec/nm-sshuttle (const.py), not
+# in debhelper's default /usr/lib/<multiarch>.
+%:
+	dh $@ --buildsystem=meson --with python3
+
+override_dh_auto_configure:
+	dh_auto_configure -- --libexecdir=libexec
+
+# The units have no [Install] section: NetworkManager starts the plugin over
+# D-Bus, and the plugin starts the tunnel unit.
+override_dh_installsystemd:
+	dh_installsystemd --no-enable --no-start --no-restart-after-upgrade

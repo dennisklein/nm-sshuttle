@@ -1,0 +1,6 @@
+/.debhelper/
+/files
+/*.debhelper*
+/*.substvars
+/nm-sshuttle/
+/debhelper-build-stamp

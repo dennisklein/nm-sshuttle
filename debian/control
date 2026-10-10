@@ -1,0 +1,37 @@
+Source: nm-sshuttle
+Section: net
+Priority: optional
+Maintainer: Dennis Klein <ilmt2000@googlemail.com>
+Build-Depends:
+ debhelper-compat (= 13),
+ dh-python,
+ meson (>= 0.64),
+ python3,
+ python3-gi,
+ python3-pytest,
+Standards-Version: 4.7.0
+Rules-Requires-Root: no
+Homepage: https://github.com/dennisklein/nm-sshuttle
+
+Package: nm-sshuttle
+Architecture: all
+Depends:
+ ${misc:Depends},
+ ${python3:Depends},
+ dbus,
+ iproute2,
+ network-manager (>= 1.42),
+ nftables,
+ openssh-client,
+ python3 (>= 3.10),
+ python3-gi,
+ sshuttle (>= 1.3.1),
+Recommends:
+ systemd-resolved,
+Description: NetworkManager VPN plugin that tunnels with sshuttle
+ nm-sshuttle runs sshuttle as a NetworkManager VPN connection. The tunnel is
+ brought up, supervised and torn down by a small root service. ssh runs as the
+ logged-in user, so the user's keys, agent and ~/.ssh/config apply.
+ .
+ The design needs systemd-resolved for per-link DNS; without it the DNS
+ settings of a profile degrade to "every lookup goes to the VPN's servers".

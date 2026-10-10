@@ -1,0 +1,9 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = configure ]; then
+    # Apply the conf.d snippet that leaves nmss0 unmanaged, unless a VPN is active.
+    /usr/libexec/nm-sshuttle/nm-sshuttle post-install || true
+fi
+
+#DEBHELPER#
