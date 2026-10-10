@@ -1,0 +1,938 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: MIT
+"""Bare NetworkManager VPN service plugin for the nm-sshuttle spike.
+
+Implements org.freedesktop.NetworkManager.VPN.Plugin directly with Gio,
+starts sshuttle in a systemd unit and reports the result to NetworkManager.
+It exists to answer the questions in docs/design.md section 6, not to be the
+real plugin: no reconnect policy, no guard table, no health checks beyond
+"is the tunnel unit still active".
+
+Rules learned from the Fedora 44 runs (docs/design.md §2.1):
+- every GLib callback and D-Bus handler is guarded: an exception becomes
+  Failure + StateChanged(STOPPED), never silence (NetworkManager only acts on
+  STOPPED);
+- Config is sent only after NetworkManager has a device for the tundev, and
+  the tundev is never replaced while the VPN is active, except in the
+  deliberately risky "relink-wait" test mode;
+- the plugin tears down when NetworkManager's bus name vanishes.
+
+Debug hook: SIGUSR1 simulates a dropped tunnel. The profile key
+"spike-reconnect" picks how the plugin tells NetworkManager:
+  identical    STARTING, then the same Config + Ip4Config + STARTED
+               (NetworkManager >= 1.36 never completes this)
+  nbns         as identical, but one extra Ip4Config with a sentinel WINS
+               entry before the real one, so NetworkManager commits
+  nbns2        the sentinel Ip4Config alone, then the real one once
+               NetworkManager shows the connection as activated
+  perturb      STARTING, then a config whose address alternates between
+               192.0.0.8 and 192.0.0.9
+  invisible    nothing: NetworkManager keeps showing the VPN as connected
+  relink-wait  STARTING, recreate nmss0, wait for NetworkManager's device,
+               then Config + Ip4Config (crashed NetworkManager 1.56.1 when
+               done without the wait)
+  giveup       STARTING, then instead of reconnecting: Failure, remove nmss0,
+               STOPPED (the order of runs 1-3)
+  giveup-stopped  ... Failure, STOPPED, then remove nmss0 once NetworkManager
+               has deactivated the connection (or after 2 s)
+  giveup-config   ... re-send the unchanged Config first (NetworkManager
+               leaves "connect" for ip-config-get), then as giveup-stopped
+  giveup-linklost ... delete nmss0 halfway through the gap, then give up as
+               giveup-config does (design §4.4, branch 4)
+
+SIGTERM during a gap gives up as giveup-config does before exiting.
+
+The profile key "spike-idle-quit" (seconds, default 10) sets how long a
+stopped plugin waits before it exits. "spike-link-delay" (seconds, default
+0.1) is how long a give-up keeps nmss0 after NetworkManager has deactivated
+the connection, so that a test can read resolved while the link exists.
+"""
+
+import functools
+import ipaddress
+import json
+import os
+import pwd
+import re
+import signal
+import socket
+import struct
+import subprocess
+import sys
+import time
+import traceback
+import warnings
+
+import gi
+
+gi.require_version("Gio", "2.0")
+gi.require_version("GLib", "2.0")
+from gi.repository import Gio, GLib  # noqa: E402
+
+# GLib.unix_signal_add and DBusConnection.register_object are deprecated in
+# recent PyGObject but still work everywhere; keep the journal readable.
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+BUS_NAME = "org.freedesktop.NetworkManager.sshuttle"
+OBJ_PATH = "/org/freedesktop/NetworkManager/VPN/Plugin"
+IFACE = "org.freedesktop.NetworkManager.VPN.Plugin"
+NM_NAME = "org.freedesktop.NetworkManager"
+NM_PATH = "/org/freedesktop/NetworkManager"
+AC_IFACE = "org.freedesktop.NetworkManager.Connection.Active"
+VPN_ERROR_LAUNCH_FAILED = "org.freedesktop.NetworkManager.VPN.Error.LaunchFailed"
+
+LIBEXEC = os.path.dirname(os.path.abspath(__file__))
+STATE_DIR = "/run/nm-sshuttle-spike"
+TUNNEL_UNITS = ("nm-sshuttle-spike-tunnel.service",
+                "NetworkManager-sshuttle-spike-tunnel.service")
+LINK = "nmss0"
+LINK_ADDRS = ("192.0.0.8", "192.0.0.9")   # RFC 7600 dummy address, and a twin for "perturb"
+NBNS_SENTINEL = "192.0.0.10"
+VOID_NETNS = "nmss-void"     # peer namespace for the veth fallback
+IDLE_QUIT_S = 10
+START_TIMEOUT_S = 45
+NM_DEVICE_TIMEOUT_S = 10
+RECONNECT_DELAY_S = int(os.environ.get("NMSS_RECONNECT_DELAY", "20"))
+# Local smoke tests without systemd: run exec-tunnel as a child process.
+NO_SYSTEMD = os.environ.get("NMSS_SPIKE_NO_SYSTEMD") == "1"
+
+# NMVpnServiceState and NMVpnPluginFailure (nm-vpn-dbus-interface.h)
+ST_INIT, ST_STARTING, ST_STARTED, ST_STOPPING, ST_STOPPED = 1, 3, 4, 5, 6
+STATE_NAMES = {1: "INIT", 3: "STARTING", 4: "STARTED", 5: "STOPPING", 6: "STOPPED"}
+FAIL_LOGIN, FAIL_CONNECT, FAIL_BAD_IP = 0, 1, 2
+RECONNECT_MODES = ("identical", "nbns", "nbns2", "perturb", "invisible", "relink-wait",
+                   "giveup", "giveup-stopped", "giveup-config", "giveup-linklost")
+AC_STATES = {0: "unknown", 1: "activating", 2: "activated", 3: "deactivating", 4: "deactivated"}
+
+INTROSPECTION = """
+<node>
+  <interface name="org.freedesktop.NetworkManager.VPN.Plugin">
+    <method name="Connect">
+      <arg name="connection" type="a{sa{sv}}" direction="in"/>
+    </method>
+    <method name="ConnectInteractive">
+      <arg name="connection" type="a{sa{sv}}" direction="in"/>
+      <arg name="details" type="a{sv}" direction="in"/>
+    </method>
+    <method name="NeedSecrets">
+      <arg name="settings" type="a{sa{sv}}" direction="in"/>
+      <arg name="setting_name" type="s" direction="out"/>
+    </method>
+    <method name="Disconnect"/>
+    <method name="SetConfig">
+      <arg name="config" type="a{sv}" direction="in"/>
+    </method>
+    <method name="SetIp4Config">
+      <arg name="config" type="a{sv}" direction="in"/>
+    </method>
+    <method name="SetIp6Config">
+      <arg name="config" type="a{sv}" direction="in"/>
+    </method>
+    <method name="SetFailure">
+      <arg name="reason" type="s" direction="in"/>
+    </method>
+    <method name="NewSecrets">
+      <arg name="connection" type="a{sa{sv}}" direction="in"/>
+    </method>
+    <property name="State" type="u" access="read"/>
+    <signal name="StateChanged"><arg name="state" type="u"/></signal>
+    <signal name="SecretsRequired">
+      <arg name="message" type="s"/>
+      <arg name="secrets" type="as"/>
+    </signal>
+    <signal name="Config"><arg name="config" type="a{sv}"/></signal>
+    <signal name="Ip4Config"><arg name="ip4config" type="a{sv}"/></signal>
+    <signal name="Ip6Config"><arg name="ip6config" type="a{sv}"/></signal>
+    <signal name="LoginBanner"><arg name="banner" type="s"/></signal>
+    <signal name="Failure"><arg name="reason" type="u"/></signal>
+  </interface>
+</node>
+"""
+
+REMOTE_RE = re.compile(r"^[A-Za-z0-9._@:%\[\]-]+$")
+DOMAIN_RE = re.compile(r"^~?(\.|[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.?)$")
+
+
+def log(msg):
+    line = f"nm-sshuttle-spike[{os.getpid()}]: {msg}"
+    try:
+        print(line, file=sys.stderr, flush=True)
+    except OSError:
+        pass
+    try:
+        with open(os.path.join(STATE_DIR, "plugin.log"), "a") as f:
+            now = time.time()
+            stamp = time.strftime("%H:%M:%S", time.localtime(now)) + f".{int(now % 1 * 1000):03d} "
+            f.write(stamp + line + "\n")
+    except OSError:
+        pass
+
+
+def ip4_u32(addr):
+    """NM wants IPv4 addresses as uint32 in network byte order."""
+    return struct.unpack("=I", socket.inet_aton(addr))[0]
+
+
+def run(argv, check=False, timeout=30):
+    """Run a command; never raises unless check=True (then RuntimeError)."""
+    log("run: " + " ".join(argv))
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log(f"  -> {e}")
+        if check:
+            raise RuntimeError(f"{argv[0]}: {e}") from e
+        return subprocess.CompletedProcess(argv, 255, "", str(e))
+    if p.returncode:
+        log(f"  -> exit {p.returncode}: {(p.stderr or p.stdout).strip()}")
+        if check:
+            raise RuntimeError(f"{argv[0]} failed: {(p.stderr or p.stdout).strip()}")
+    return p
+
+
+def parse_profile(conn):
+    """Validate the profile; it is untrusted input to a root process."""
+    s_con = conn.get("connection", {})
+    data = conn.get("vpn", {}).get("data", {})
+
+    remote = data.get("remote", "")
+    if not REMOTE_RE.match(remote) or remote.startswith("-"):
+        raise ValueError(f"invalid remote {remote!r}")
+
+    user = data.get("local-user", "")
+    try:
+        pw = pwd.getpwnam(user)
+    except KeyError:
+        raise ValueError(f"local-user {user!r} does not exist")
+    if pw.pw_uid < 1000:
+        raise ValueError(f"local-user {user!r} is not a regular user")
+
+    perms = [p.rstrip(":") for p in s_con.get("permissions", [])]
+    if perms != [f"user:{user}"]:
+        raise ValueError(f"connection.permissions must be exactly user:{user}, got {perms}")
+
+    subnets = [str(ipaddress.ip_network(s, strict=False))
+               for s in data.get("subnets", "").split()]
+    if not subnets:
+        raise ValueError("no subnets")
+
+    dns = data.get("dns", "none")
+    if dns not in ("none", "split", "all"):
+        raise ValueError(f"invalid dns mode {dns!r}")
+    servers = [str(ipaddress.IPv4Address(s)) for s in data.get("dns-servers", "").split()]
+    domains = data.get("dns-domains", "").split()
+    for d in domains:
+        if not DOMAIN_RE.match(d):
+            raise ValueError(f"invalid domain {d!r}")
+    if dns != "none" and not servers:
+        raise ValueError("dns-servers required for dns=split/all")
+    if dns == "split" and not domains:
+        # The link gets DefaultRoute=no, so without domains resolved never uses it.
+        raise ValueError("dns-domains required for dns=split")
+    if dns == "all":
+        domains = ["~."]
+
+    gateway = data.get("gateway")
+    if gateway:
+        gateway = str(ipaddress.IPv4Address(gateway))
+
+    reconnect = data.get("spike-reconnect", "identical")
+    if reconnect not in RECONNECT_MODES:
+        raise ValueError(f"invalid spike-reconnect {reconnect!r}")
+    tundev = data.get("spike-tundev", "dns")
+    if tundev not in ("dns", "always"):
+        raise ValueError(f"invalid spike-tundev {tundev!r}")
+    unit = data.get("spike-tunnel-unit", TUNNEL_UNITS[0])
+    if unit not in TUNNEL_UNITS:
+        raise ValueError(f"invalid spike-tunnel-unit {unit!r}")
+    idle_quit = int(data.get("spike-idle-quit", IDLE_QUIT_S))
+    if not 1 <= idle_quit <= 600:
+        raise ValueError(f"invalid spike-idle-quit {idle_quit}")
+    link_delay = float(data.get("spike-link-delay", "0.1"))
+    if not 0 <= link_delay <= 10:
+        raise ValueError(f"invalid spike-link-delay {link_delay}")
+
+    return {"id": s_con.get("id", "?"), "remote": remote, "user": user,
+            "subnets": subnets, "dns": dns, "dns_servers": servers,
+            "dns_domains": domains, "gateway": gateway, "reconnect": reconnect,
+            "tundev": dns != "none" or tundev == "always", "unit": unit,
+            "idle_quit": idle_quit, "link_delay": link_delay}
+
+
+def guarded(fn):
+    """Turn any exception in a callback into a reported failure."""
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        try:
+            return fn(self, *args, **kwargs)
+        except Exception as e:  # noqa: BLE001 - every exception must reach NM
+            log(f"unexpected error in {fn.__name__}: {e!r}\n{traceback.format_exc()}")
+            self.fail(FAIL_CONNECT, f"internal error in {fn.__name__}: {e}")
+            return False   # also removes a GLib source
+    return wrapper
+
+
+class Plugin:
+    def __init__(self, loop):
+        self.loop = loop
+        self.conn = None
+        self.state = ST_INIT
+        self.profile = None
+        self.child = None            # NO_SYSTEMD only
+        self.watch_id = 0
+        self.quit_id = 0
+        self.reconnecting = False
+        self.generation = 0          # bumped on every start/teardown; stale results are ignored
+        self.cancellable = None
+        self.addr_index = 0
+        self.gateway = None
+        self.nm_seen = False
+        self.uuid = None
+        self.reconnect_id = 0
+        self.startup_quit_id = 0
+        self.link_ifindex = None
+        self.idle_quit = IDLE_QUIT_S
+        self.node = Gio.DBusNodeInfo.new_for_xml(INTROSPECTION)
+
+    # ---------------------------------------------------------------- D-Bus
+    def on_bus_acquired(self, conn, name):
+        self.conn = conn
+        conn.register_object(OBJ_PATH, self.node.interfaces[0],
+                             self.on_method_call, self.on_get_property, None)
+        # For the log only: how NM shows the active connections.
+        conn.signal_subscribe(NM_NAME, AC_IFACE, "StateChanged", None, None,
+                              Gio.DBusSignalFlags.NONE, self.on_ac_state)
+
+    def on_ac_state(self, conn, sender, path, iface, signal_name, params):
+        if self.state == ST_INIT:
+            return
+        state, reason = params.unpack()
+        log(f"NM: active connection {path.rsplit('/', 1)[-1]} is {AC_STATES.get(state, state)} "
+            f"(reason {reason})")
+
+    def ac_state(self):
+        """NM's state for this profile's active connection, or None."""
+        def call(path, method, args, rtype):
+            return self.conn.call_sync(NM_NAME, path, "org.freedesktop.DBus.Properties", method,
+                                       args, GLib.VariantType(rtype),
+                                       Gio.DBusCallFlags.NONE, 1000, None).unpack()[0]
+        for path in call(NM_PATH, "Get", GLib.Variant("(ss)", (NM_NAME, "ActiveConnections")), "(v)"):
+            props = call(path, "GetAll", GLib.Variant("(s)", (AC_IFACE,)), "(a{sv})")
+            if props.get("Uuid") == self.uuid:
+                return props.get("State")
+        return None
+
+    def on_name_acquired(self, conn, name):
+        log(f"owns {name}")
+
+    def on_name_lost(self, conn, name):
+        log(f"lost or could not own {name}; exiting")
+        self.shutdown()
+
+    def on_nm_appeared(self, conn, name, owner):
+        log(f"NetworkManager is {owner}")
+        self.nm_seen = True
+
+    def on_nm_vanished(self, conn, name):
+        if not self.nm_seen:
+            return
+        log("NetworkManager vanished (crash or restart); tearing down, nobody else will")
+        # nmss0 first, so that a quickly restarted NetworkManager cannot pick it up.
+        self.shutdown(link_first=True)
+
+    def on_get_property(self, conn, sender, path, iface, prop):
+        if prop == "State":
+            return GLib.Variant("u", self.state)
+        return None
+
+    def on_method_call(self, conn, sender, path, iface, method, params, inv):
+        try:
+            log(f"D-Bus call {method} from {sender}")
+            if method in ("Connect", "ConnectInteractive"):
+                settings = params.unpack()[0]
+                inv.return_value(None)
+                GLib.idle_add(self.connect, settings)
+            elif method == "NeedSecrets":
+                inv.return_value(GLib.Variant("(s)", ("",)))   # agent holds the keys
+            elif method == "Disconnect":
+                inv.return_value(None)
+                GLib.idle_add(self.disconnect)
+            else:
+                inv.return_value(None)
+        except Exception as e:  # noqa: BLE001
+            log(f"D-Bus handler error: {e!r}")
+            try:
+                inv.return_dbus_error(VPN_ERROR_LAUNCH_FAILED, str(e))
+            except Exception:  # noqa: BLE001 - already replied
+                pass
+
+    def emit(self, name, sig, args):
+        if self.conn:
+            self.conn.emit_signal(None, OBJ_PATH, IFACE, name, GLib.Variant(sig, args))
+
+    def set_state(self, state):
+        log(f"state {STATE_NAMES.get(self.state)} -> {STATE_NAMES.get(state)}")
+        self.state = state
+        try:
+            self.emit("StateChanged", "(u)", (state,))
+        except Exception as e:  # noqa: BLE001
+            log(f"could not emit StateChanged: {e!r}")
+        if state == ST_STOPPED:
+            self.schedule_quit()
+
+    def fail(self, reason, msg):
+        if self.state == ST_STOPPED:
+            log(f"(already stopped) {msg}")
+            return
+        log(f"FAILURE ({reason}): {msg}")
+        self.cancel_reconnect()
+        try:
+            self.emit("Failure", "(u)", (reason,))
+        except Exception as e:  # noqa: BLE001
+            log(f"could not emit Failure: {e!r}")
+        try:
+            self.teardown()
+        finally:
+            self.reconnecting = False
+            self.set_state(ST_STOPPED)
+
+    def schedule_quit(self):
+        if self.quit_id:
+            GLib.source_remove(self.quit_id)
+        self.quit_id = GLib.timeout_add_seconds(self.idle_quit, self.quit_if_idle)
+
+    def startup_quit(self):
+        self.startup_quit_id = 0
+        return self.quit_if_idle()
+
+    def quit_if_idle(self):
+        self.quit_id = 0
+        if self.state in (ST_INIT, ST_STOPPED):
+            log("idle; exiting")
+            self.loop.quit()
+        return False
+
+    def shutdown(self, link_first=False):
+        self.cancel_reconnect()
+        try:
+            self.teardown(link_first)
+        except Exception as e:  # noqa: BLE001
+            log(f"teardown error during shutdown: {e!r}")
+        finally:
+            self.loop.quit()
+
+    # ---------------------------------------------------------------- flow
+    @guarded
+    def connect(self, settings):
+        for attr in ("quit_id", "startup_quit_id"):
+            if getattr(self, attr):
+                GLib.source_remove(getattr(self, attr))
+                setattr(self, attr, 0)
+        self.set_state(ST_STARTING)
+        try:
+            self.profile = parse_profile(settings)
+        except ValueError as e:
+            self.fail(FAIL_CONNECT, f"bad profile: {e}")
+            return False
+        self.uuid = settings.get("connection", {}).get("uuid")
+        self.idle_quit = self.profile["idle_quit"]
+        log(f"profile: {json.dumps(self.profile)}")
+        with open(os.path.join(STATE_DIR, "tunnel.json"), "w") as f:
+            json.dump(self.profile, f)
+        self.addr_index = 0
+        # Leftovers of a plugin that died (create_link also replaces a stale
+        # nmss0). Only this profile's unit: probing the other unit name would
+        # itself be an SELinux denial in direct mode.
+        if not NO_SYSTEMD and self.tunnel_active():
+            log(f"stopping leftover {self.profile['unit']}")
+            self.stop_tunnel()
+        if self.profile["tundev"]:
+            self.create_link()
+        self.start_tunnel(self.on_tunnel_started)
+        return False
+
+    @guarded
+    def on_tunnel_started(self, ok, detail):
+        if not ok:
+            reason = FAIL_LOGIN if "Permission denied" in detail else FAIL_CONNECT
+            self.fail(reason, f"tunnel did not start: {detail}")
+            return
+        self.gateway = self.profile["gateway"] or open(
+            os.path.join(STATE_DIR, "first-hop")).read().strip()
+        ipaddress.IPv4Address(self.gateway)
+        self.configure(sentinel=False)
+
+    def configure(self, sentinel, two_phase=False, stale_device=None):
+        """Send Config (+ Ip4Config) once NM has a device for the tundev, then STARTED."""
+        def go(found):
+            if not found:
+                self.fail(FAIL_CONNECT, f"NetworkManager never created a device for {LINK}")
+                return
+            self.send_config(sentinel, real=not two_phase)
+            self.set_state(ST_STARTED)
+            if two_phase:
+                self.send_real_when_activated()
+            if not self.watch_id:
+                self.watch_id = GLib.timeout_add_seconds(2, self.check_tunnel)
+        if self.profile["tundev"]:
+            self.wait_nm_device(LINK, go, stale_device)
+        else:
+            go(True)
+
+    def nm_device_path(self, iface):
+        return self.conn.call_sync(
+            NM_NAME, NM_PATH, NM_NAME, "GetDeviceByIpIface",
+            GLib.Variant("(s)", (iface,)), GLib.VariantType("(o)"),
+            Gio.DBusCallFlags.NONE, 1000, None).unpack()[0]
+
+    def wait_nm_device(self, iface, cb, stale=None):
+        """Poll until NM has a device for iface. After a relink, NM can still
+        return the old link's device for a moment, and the Device interface has
+        no ifindex to tell them apart, so a known stale path does not count."""
+        gen = self.generation
+        deadline = time.monotonic() + NM_DEVICE_TIMEOUT_S
+        t0 = time.monotonic()
+
+        @guarded
+        def poll(_self):
+            if gen != self.generation:
+                return False
+            try:
+                path = self.nm_device_path(iface)
+                if path == stale:
+                    raise GLib.Error("still the old device")
+            except GLib.Error:
+                if time.monotonic() > deadline:
+                    cb(False)
+                    return False
+                return True
+            log(f"NetworkManager has {iface} as {path} after {time.monotonic() - t0:.2f} s")
+            cb(True)
+            return False
+
+        GLib.timeout_add(100, lambda: poll(self))
+
+    def send_real_when_activated(self):
+        """nbns2: the sentinel went out alone; send the real Ip4Config once NM shows
+        "activated" (or after 5 s). NM still applies an Ip4Config while activated."""
+        gen = self.generation
+        t0 = time.monotonic()
+
+        @guarded
+        def poll(_self):
+            if gen != self.generation or self.state != ST_STARTED:
+                return False
+            st = self.ac_state()
+            waited = time.monotonic() - t0
+            if st != 2 and waited < 5:
+                return True
+            log(f"active connection is {AC_STATES.get(st, st)} {waited:.2f} s after the sentinel; "
+                "sending the real Ip4Config")
+            self.emit("Ip4Config", "(a{sv})", (self.ip4_config(),))
+            return False
+
+        GLib.timeout_add(100, lambda: poll(self))
+
+    def ip4_config(self):
+        p = self.profile
+        ip4 = {
+            "address": GLib.Variant("u", ip4_u32(LINK_ADDRS[self.addr_index])),
+            "prefix": GLib.Variant("u", 32),
+            "never-default": GLib.Variant("b", True),
+        }
+        if p["dns"] != "none":
+            ip4["dns"] = GLib.Variant("au", [ip4_u32(s) for s in p["dns_servers"]])
+            ip4["domains"] = GLib.Variant("as", p["dns_domains"])
+        return ip4
+
+    def send_config(self, sentinel, real=True):
+        p = self.profile
+        cfg = {
+            "gateway": GLib.Variant("u", ip4_u32(self.gateway)),
+            "tundev": GLib.Variant("s", LINK if p["tundev"] else ""),
+            "has-ip4": GLib.Variant("b", p["tundev"]),
+            "has-ip6": GLib.Variant("b", False),
+            "can-persist": GLib.Variant("b", True),
+        }
+        log(f"Config: gateway={self.gateway} tundev={LINK if p['tundev'] else ''} has-ip4={p['tundev']}")
+        self.emit("Config", "(a{sv})", (cfg,))
+        if not p["tundev"]:
+            return
+        addr = LINK_ADDRS[self.addr_index]
+        ip4 = self.ip4_config()
+        if sentinel:
+            extra = dict(ip4)
+            extra["nbns"] = GLib.Variant("au", [ip4_u32(NBNS_SENTINEL)])
+            log(f"Ip4Config (sentinel nbns {NBNS_SENTINEL})")
+            self.emit("Ip4Config", "(a{sv})", (extra,))
+        if not real:
+            return
+        log(f"Ip4Config: address={addr}/32 dns={p['dns_servers'] if p['dns'] != 'none' else []} "
+            f"domains={p['dns_domains'] if p['dns'] != 'none' else []} never-default=true")
+        self.emit("Ip4Config", "(a{sv})", (ip4,))
+
+    @guarded
+    def disconnect(self):
+        if self.state in (ST_INIT, ST_STOPPED):
+            # NM also sends Disconnect after a failure we already reported.
+            log("disconnect requested; already stopped")
+            return False
+        log("disconnect requested")
+        self.cancel_reconnect()
+        self.set_state(ST_STOPPING)
+        try:
+            self.teardown()
+        finally:
+            self.reconnecting = False
+            self.set_state(ST_STOPPED)
+        return False
+
+    @guarded
+    def check_tunnel(self):
+        # Runs only while STARTED; configure() re-arms it after a reconnect.
+        if self.state != ST_STARTED or self.reconnecting:
+            self.watch_id = 0
+            return False
+        if not self.tunnel_active():
+            self.watch_id = 0
+            self.fail(FAIL_CONNECT, "tunnel unit stopped while connected")
+            return False
+        return True
+
+    # ------------------------------------------------- simulated reconnect
+    @guarded
+    def on_usr1(self):
+        if self.state != ST_STARTED or self.reconnecting:
+            log("SIGUSR1 ignored (not connected)")
+            return True
+        mode = self.profile["reconnect"]
+        log(f"SIGUSR1: simulating a drop (mode {mode}), reconnecting in {RECONNECT_DELAY_S} s")
+        self.reconnecting = True
+        if mode != "invisible":
+            self.set_state(ST_STARTING)
+        self.stop_tunnel()
+        self.reconnect_id = GLib.timeout_add_seconds(RECONNECT_DELAY_S, self.reconnect)
+        if mode == "giveup-linklost":
+            GLib.timeout_add_seconds(max(1, RECONNECT_DELAY_S // 2), self.lose_link)
+        return True
+
+    def cancel_reconnect(self):
+        if self.reconnect_id:
+            GLib.source_remove(self.reconnect_id)
+            self.reconnect_id = 0
+            log("cancelled the pending reconnect")
+
+    @guarded
+    def reconnect(self):
+        self.reconnect_id = 0
+        if not self.reconnecting:
+            log("reconnect timer fired, but no reconnect is pending")
+            return False
+        mode = self.profile["reconnect"]
+        if mode.startswith("giveup"):
+            self.give_up(mode)
+            return False
+
+        @guarded
+        def done(_self, ok, detail):
+            self.reconnecting = False
+            if not ok:
+                self.fail(FAIL_CONNECT, f"reconnect failed: {detail}")
+                return
+            if mode == "invisible":
+                log("tunnel is back; NetworkManager was never told")
+                if not self.watch_id:
+                    self.watch_id = GLib.timeout_add_seconds(2, self.check_tunnel)
+                return
+            stale = None
+            if mode == "relink-wait":
+                try:
+                    stale = self.nm_device_path(LINK)
+                except GLib.Error:
+                    pass
+                self.remove_link()
+                self.create_link()
+            elif mode == "perturb":
+                self.addr_index ^= 1
+            self.configure(sentinel=mode in ("nbns", "nbns2"), two_phase=mode == "nbns2",
+                           stale_device=stale)
+
+        self.start_tunnel(lambda ok, detail: done(self, ok, detail))
+        return False
+
+    def link_intact(self):
+        """nmss0 still has the ifindex recorded at creation, and NM has a device for it."""
+        try:
+            with open(f"/sys/class/net/{LINK}/ifindex") as f:
+                if int(f.read()) != self.link_ifindex:
+                    return False
+            self.nm_device_path(LINK)
+            return True
+        except (OSError, ValueError, GLib.Error):
+            return False
+
+    def give_up(self, mode, then_quit=False):
+        """Simulated give-up from "connect", in one of the orders of design §4.4."""
+        self.reconnecting = False
+        self.cancel_reconnect()
+        if mode == "giveup":
+            self.fail(FAIL_CONNECT, "simulated give-up after a drop (link removed before STOPPED)")
+            if then_quit:
+                self.loop.quit()
+            return
+        try:
+            st = self.ac_state()
+        except GLib.Error:
+            st = None
+        log(f"give-up ({mode}) from NM state {AC_STATES.get(st, st)}")
+        if mode in ("giveup-config", "giveup-linklost"):
+            if self.link_intact():
+                log("give-up: re-sending the unchanged Config first (link intact)")
+            elif not os.path.exists(f"/sys/class/net/{LINK}"):
+                log(f"give-up: {LINK} is gone; re-sending the unchanged Config anyway (branch 4)")
+            else:
+                log(f"give-up: {LINK} has another ifindex; not sending Config")
+                mode = "giveup-stopped"
+            if mode != "giveup-stopped":
+                self.send_config(sentinel=False, real=False)
+        log(f"FAILURE ({FAIL_CONNECT}): simulated give-up after a drop ({mode})")
+        self.emit("Failure", "(u)", (FAIL_CONNECT,))
+        self.set_state(ST_STOPPED)
+        try:
+            self.stop_tunnel()
+        except Exception as e:  # noqa: BLE001
+            log(f"stop_tunnel failed: {e!r}")
+        gen = self.generation
+        t_stop = time.monotonic()
+        delay = self.profile["link_delay"]
+        state = {"deactivated_at": None}
+
+        @guarded
+        def remove_when_deactivated(_self):
+            if gen != self.generation:
+                return False
+            now = time.monotonic()
+            if state["deactivated_at"] is None:
+                try:
+                    st = self.ac_state()
+                except GLib.Error:
+                    st = None
+                if st not in (None, 4) and now - t_stop < 2:
+                    return True
+                state["deactivated_at"] = now
+                log(f"active connection is {AC_STATES.get(st, 'gone') if st else 'gone'}; "
+                    f"removing {LINK} in {delay:.1f} s")
+            if now - state["deactivated_at"] < delay:
+                return True
+            self.remove_link()
+            if then_quit:
+                self.loop.quit()
+            return False
+
+        GLib.timeout_add(100, lambda: remove_when_deactivated(self))
+
+    def lose_link(self):
+        """giveup-linklost: the link disappears in the middle of the gap.
+
+        Deleting the link makes NM commit on the dead ifindex and flip the VPN
+        to "activated" (design §2.1). Bounce it back to "connect" with STARTED
+        then STARTING, as the real plugin's health check does, so that the
+        give-up runs from "connect" (design §4.4, branch 4)."""
+        if not self.reconnecting:
+            return False
+        log(f"deleting {LINK} in the gap (simulated link loss)")
+        run(["ip", "link", "del", LINK])
+        gen = self.generation
+        t0 = time.monotonic()
+
+        @guarded
+        def bounce(_self):
+            if gen != self.generation or not self.reconnecting:
+                return False
+            try:
+                st = self.ac_state()
+            except GLib.Error:
+                st = None
+            if st != 2:
+                if time.monotonic() - t0 < 3:
+                    return True
+                log(f"NM did not flip to activated after the link loss (it shows {AC_STATES.get(st, st)})")
+                return False
+            log("NM flipped to activated after the link loss; bouncing it back to connect")
+            self.set_state(ST_STARTED)
+            self.set_state(ST_STARTING)
+            return False
+
+        GLib.timeout_add(100, lambda: bounce(self))
+        return False
+
+    # ------------------------------------------------------------ tunnel
+    def start_tunnel(self, cb):
+        self.generation += 1
+        gen = self.generation
+        self.cancellable = Gio.Cancellable()
+        if NO_SYSTEMD:
+            self.start_tunnel_child(cb, gen)
+            return
+        unit = self.profile["unit"]
+        run(["systemctl", "reset-failed", unit])
+        log(f"systemctl start {unit}")
+        try:
+            proc = Gio.Subprocess.new(["systemctl", "start", unit],
+                                      Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE)
+        except GLib.Error as e:
+            cb(False, f"cannot run systemctl: {e.message}")
+            return
+
+        def finished(p, res):
+            try:
+                _, _, err = p.communicate_utf8_finish(res)
+                ok = p.get_successful()
+            except GLib.Error as e:
+                if e.matches(Gio.io_error_quark(), Gio.IOErrorEnum.CANCELLED):
+                    return
+                ok, err = False, e.message
+            if gen != self.generation:
+                log("ignoring the result of a superseded tunnel start")
+                return
+            detail = ""
+            if not ok:
+                inv = run(["systemctl", "show", "-p", "InvocationID", "--value", unit]).stdout.strip()
+                journal = run(["journalctl", f"_SYSTEMD_INVOCATION_ID={inv}", "-o", "cat",
+                               "--no-pager", "-n", "40"]).stdout if inv else ""
+                detail = f"systemctl: {(err or '').strip()}\n{journal[-2000:]}"
+            try:
+                cb(ok, detail)
+            except Exception as e:  # noqa: BLE001
+                log(f"error after tunnel start: {e!r}\n{traceback.format_exc()}")
+                self.fail(FAIL_CONNECT, f"internal error after tunnel start: {e}")
+
+        proc.communicate_utf8_async(None, self.cancellable, finished)
+
+    def start_tunnel_child(self, cb, gen):
+        logf = os.path.join(STATE_DIR, "tunnel-child.log")
+        with open(logf, "w") as out:
+            self.child = subprocess.Popen([os.path.join(LIBEXEC, "exec-tunnel")],
+                                          stdout=out, stderr=subprocess.STDOUT)
+        deadline = time.monotonic() + START_TIMEOUT_S
+
+        @guarded
+        def poll(_self):
+            if gen != self.generation:
+                return False
+            with open(logf) as f:
+                text = f.read()
+            if "Connected to server" in text:
+                cb(True, "")
+                return False
+            if self.child.poll() is not None or time.monotonic() > deadline:
+                cb(False, text[-2000:])
+                return False
+            return True
+
+        GLib.timeout_add(500, lambda: poll(self))
+
+    def stop_tunnel(self):
+        self.generation += 1
+        if self.cancellable:
+            self.cancellable.cancel()
+        if NO_SYSTEMD:
+            if self.child and self.child.poll() is None:
+                self.child.terminate()
+                try:
+                    self.child.wait(15)
+                except subprocess.TimeoutExpired:
+                    self.child.kill()
+            self.child = None
+            return
+        unit = self.profile["unit"] if self.profile else TUNNEL_UNITS[0]
+        run(["systemctl", "stop", unit])
+        if run(["systemctl", "is-active", "--quiet", unit]).returncode == 0:
+            log(f"LEAK: {unit} still active after stop; killing it")
+            run(["systemctl", "kill", "--signal=SIGKILL", unit])
+
+    def tunnel_active(self):
+        if NO_SYSTEMD:
+            return self.child is not None and self.child.poll() is None
+        return run(["systemctl", "is-active", "--quiet", self.profile["unit"]]).returncode == 0
+
+    # -------------------------------------------------------------- link
+    def create_link(self):
+        run(["ip", "link", "del", LINK])
+        kind = "dummy"
+        if run(["ip", "link", "add", LINK, "type", "dummy"]).returncode:
+            # No dummy module (minimal kernels): a veth whose peer sits in an
+            # empty namespace behaves the same for this purpose.
+            kind = "veth"
+            run(["ip", "netns", "add", VOID_NETNS])
+            run(["ip", "link", "add", LINK, "type", "veth", "peer", "name",
+                 LINK + "p", "netns", VOID_NETNS], check=True)
+            run(["ip", "-n", VOID_NETNS, "link", "set", LINK + "p", "up"])
+        run(["ip", "link", "set", LINK, "up"], check=True)
+        try:
+            with open(os.path.join(STATE_DIR, "link-kind"), "w") as f:
+                f.write(kind + "\n")
+        except OSError:
+            pass
+        try:
+            with open(f"/sys/class/net/{LINK}/ifindex") as f:
+                self.link_ifindex = int(f.read())
+        except OSError:
+            self.link_ifindex = None
+        log(f"created {LINK} ({kind}, ifindex {self.link_ifindex})")
+
+    def remove_link(self):
+        if os.path.exists(f"/sys/class/net/{LINK}"):
+            run(["ip", "link", "del", LINK])
+        if os.path.exists(f"/run/netns/{VOID_NETNS}"):
+            run(["ip", "netns", "del", VOID_NETNS])
+
+    def teardown(self, link_first=False):
+        """Best effort, step by step: a failing step must not skip the rest."""
+        steps = (self.stop_tunnel, self.remove_link)
+        for step in reversed(steps) if link_first else steps:
+            try:
+                step()
+            except Exception as e:  # noqa: BLE001
+                log(f"teardown step {step.__name__} failed: {e!r}")
+
+    def on_term(self):
+        if self.reconnecting and self.state == ST_STARTING:
+            log("SIGTERM/SIGINT during a gap: giving up first (design §4.4)")
+            try:
+                self.give_up("giveup-config", then_quit=True)
+                GLib.timeout_add_seconds(5, self.loop.quit)   # whatever happens, exit
+                return False
+            except Exception as e:  # noqa: BLE001
+                log(f"give-up on SIGTERM failed: {e!r}")
+        log("SIGTERM/SIGINT: tearing down")
+        self.shutdown()
+        return False
+
+
+def main():
+    bus_name = BUS_NAME
+    if "--bus-name" in sys.argv:
+        bus_name = sys.argv[sys.argv.index("--bus-name") + 1]
+    os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+    with open(os.path.join(STATE_DIR, "plugin.pid"), "w") as f:
+        f.write(f"{os.getpid()}\n")
+    log(f"starting (argv={sys.argv[1:]}, no_systemd={NO_SYSTEMD})")
+
+    loop = GLib.MainLoop()
+    plugin = Plugin(loop)
+    Gio.bus_own_name(Gio.BusType.SYSTEM, bus_name, Gio.BusNameOwnerFlags.NONE,
+                     plugin.on_bus_acquired, plugin.on_name_acquired, plugin.on_name_lost)
+    Gio.bus_watch_name(Gio.BusType.SYSTEM, NM_NAME, Gio.BusNameWatcherFlags.NONE,
+                       plugin.on_nm_appeared, plugin.on_nm_vanished)
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, sig, plugin.on_term)
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGUSR1, plugin.on_usr1)
+    # NetworkManager may spawn us and then give up; do not linger forever.
+    plugin.startup_quit_id = GLib.timeout_add_seconds(60, plugin.startup_quit)
+    loop.run()
+    log("exited")
+
+
+if __name__ == "__main__":
+    main()

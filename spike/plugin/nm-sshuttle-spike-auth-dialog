@@ -1,0 +1,22 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+#
+# [GNOME] auth-dialog= of the spike's .name file. nm-sshuttle needs no
+# NetworkManager secrets (keys live in the user's ssh agent), but GNOME asks
+# a VPN's auth dialog whenever anything requests the "vpn" secrets, for
+# example GNOME Settings opening the connection editor. Without an auth
+# dialog, GNOME Shell 50 fails that request without answering it, and
+# Settings shows a spinner until the D-Bus timeout.
+#
+# Old-style protocol (gnome-shell js/ui/components/networkAgent.js): read
+# DATA_KEY/DATA_VAL/SECRET_KEY/SECRET_VAL lines up to "DONE", answer with
+# key/value line pairs ended by two empty lines (none here), wait for "QUIT",
+# exit 0.
+while IFS= read -r line; do
+    [ "$line" = DONE ] && break
+done
+printf '\n\n'
+while IFS= read -r line; do
+    [ "$line" = QUIT ] && break
+done
+exit 0

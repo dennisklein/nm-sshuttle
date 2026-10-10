@@ -1,0 +1,82 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: MIT
+"""ExecStart of nm-sshuttle-spike-tunnel.service.
+
+Reads the profile the plugin wrote to /run/nm-sshuttle-spike/tunnel.json,
+works out the first SSH hop *as the user* (ssh -G sees the user's config,
+aliases and ProxyJump), records it for the plugin, then execs sshuttle so
+that sshuttle is the unit's main process and its own READY=1 counts.
+"""
+
+import json
+import os
+import shutil
+import socket
+import subprocess
+import sys
+
+STATE_DIR = "/run/nm-sshuttle-spike"
+LIBEXEC = os.path.dirname(os.path.abspath(__file__))
+BRIDGE = os.path.join(LIBEXEC, "ssh-as-user")
+
+
+def log(msg):
+    print(f"exec-tunnel: {msg}", file=sys.stderr, flush=True)
+
+
+def host_of(spec):
+    """'user@host:port' or '[v6]:port' -> host"""
+    spec = spec.rsplit("@", 1)[-1]
+    if spec.startswith("["):
+        return spec[1:spec.index("]")]
+    return spec.split(":", 1)[0]
+
+
+def first_hop(spec):
+    if spec.get("gateway"):
+        return spec["gateway"]
+    p = subprocess.run([BRIDGE, spec["user"], "-G", spec["remote"]],
+                       capture_output=True, text=True, timeout=20)
+    if p.returncode:
+        raise SystemExit(f"exec-tunnel: ssh -G failed: {p.stderr.strip()}")
+    hostname = jump = None
+    for line in p.stdout.splitlines():
+        key, _, value = line.partition(" ")
+        if key == "hostname":
+            hostname = value
+        elif key == "proxyjump" and value != "none":
+            jump = host_of(value.split(",")[0])
+        elif key == "proxycommand" and value != "none":
+            raise SystemExit("exec-tunnel: ProxyCommand in use; set 'gateway' in the profile")
+    target = jump or hostname
+    ip = socket.getaddrinfo(target, 22, socket.AF_INET, socket.SOCK_STREAM)[0][4][0]
+    log(f"first hop: {target} -> {ip} ({'ProxyJump' if jump else 'direct'})")
+    return ip
+
+
+def main():
+    with open(os.path.join(STATE_DIR, "tunnel.json")) as f:
+        spec = json.load(f)
+    hop = first_hop(spec)
+    with open(os.path.join(STATE_DIR, "first-hop"), "w") as f:
+        f.write(hop + "\n")
+
+    sshuttle = shutil.which("sshuttle",
+                            path="/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin")
+    if not sshuttle:
+        raise SystemExit("exec-tunnel: sshuttle not found")
+    subnets = list(spec["subnets"])
+    argv = [sshuttle, "-v", "--method", "nft", "--disable-ipv6",
+            "-r", spec["remote"], "-x", hop,
+            "-e", f"{BRIDGE} {spec['user']}"]
+    servers = spec.get("dns_servers") or []
+    if spec.get("dns") != "none" and servers:
+        argv += ["--ns-hosts", ",".join(servers), "--to-ns", servers[0]]
+        subnets += [f"{s}/32" for s in servers]   # DNS over TCP goes through too
+    argv += subnets
+    log("exec " + " ".join(argv))
+    os.execv(sshuttle, argv)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,9 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+#
+# program= of the VPN .name file in "shim" mode. NetworkManager spawns this
+# inside its own cgroup and SELinux domain and then waits for the plugin's
+# bus name. All it does is ask the bus to activate the plugin, which
+# D-Bus-activates nm-sshuttle-spike.service through systemd.
+exec busctl --system call org.freedesktop.DBus /org/freedesktop/DBus \
+    org.freedesktop.DBus StartServiceByName su org.freedesktop.NetworkManager.sshuttle 0

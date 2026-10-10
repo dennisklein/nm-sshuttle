@@ -1,0 +1,15 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+#
+# ExecStartPre/ExecStopPost of the tunnel unit: delete sshuttle nft tables
+# whose redirect port has no listener. Such a table is stale (left by a
+# SIGKILL) and can only black-hole traffic; sshuttle names its tables after
+# that port (inet sshuttle-ipv4-PORT).
+for t in $(nft list tables 2>/dev/null |
+           awk '$2 == "inet" && $3 ~ /^sshuttle-ipv[46]-[0-9]+$/ {print $3}'); do
+    port=${t##*-}
+    if ! ss -ltnH "sport = :$port" | grep -q .; then
+        nft delete table inet "$t" && echo "sweep: deleted stale table $t"
+    fi
+done
+exit 0
