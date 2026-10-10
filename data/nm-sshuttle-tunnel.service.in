@@ -14,5 +14,7 @@ ExecStart=@LIBEXECDIR@/nm-sshuttle exec-tunnel
 # Required, not a safety net: the stop can kill sshuttle's own nft cleanup.
 ExecStopPost=@LIBEXECDIR@/nm-sshuttle sweep
 Restart=no
-TimeoutStartSec=45
+# The plugin gives an attempt 45 s and stops the unit itself; only its one
+# retry after an unlock waits up to 110 s for the agent's prompt (design §4.3).
+TimeoutStartSec=120
 TimeoutStopSec=15

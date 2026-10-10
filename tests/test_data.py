@@ -41,3 +41,9 @@ def test_name_file():
     assert vpn["program"].endswith("/nm-sshuttle-activate")
     assert vpn["supports-safe-private-file-access"] == "true"
     assert cp["GNOME"]["auth-dialog"].endswith("/nm-sshuttle-auth-dialog")
+
+
+def test_tunnel_unit_outlasts_the_plugins_longest_attempt():
+    from nm_sshuttle.supervisor import Supervisor
+    timeout = int(ini("nm-sshuttle-tunnel.service.in")["Service"]["TimeoutStartSec"])
+    assert timeout > Supervisor.UNLOCK_START_TIMEOUT > Supervisor.TUNNEL_START_TIMEOUT
