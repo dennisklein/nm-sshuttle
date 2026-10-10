@@ -55,6 +55,7 @@ export PATH=/usr/bin:$PATH
 %files
 %license LICENSE
 %doc README.md
+%{_bindir}/nm-sshuttle
 %{python3_sitelib}/nm_sshuttle/
 %{_libexecdir}/nm-sshuttle/
 %{nm_libdir}/VPN/nm-sshuttle-service.name
