@@ -29,6 +29,19 @@ block is lifted. Each scenario has an id `M2-NN`; its checks are `M2-NNx`.
 | M2-13 | NetworkManager restart under an active VPN |
 | M2-14 | `ExecStopPost` removes leftovers |
 | M2-15 | no SELinux denials during the run |
+| M2-16 | `kill -9` of sshuttle while up: a reconnect without a block |
+| M2-17 | `nft flush ruleset` while up: the health check restores the guard and restarts the tunnel |
+| M2-18 | `ip link del nmss0` while activated: give-up branch 4, no DNS left |
+| M2-19 | `ip link del nmss0` right after the first `Ip4Config` (pre-up); the state hit is recorded |
+| M2-20 | `nmcli device set nmss0 managed yes` in a gap |
+| M2-21 | `systemctl stop` in a gap with the user override in place (a managed `nmss0`) |
+| M2-22 | `nmcli general reload conf` under an active VPN, with and without the override |
+| M2-23 | roaming: a second uplink becomes NM's primary connection and goes again; the plugin reconnects at once |
+| M2-24 | the uplink without a default route: not offline, DNS after a reconnect; traffic to the subnets is INFO, since it has no route |
+| M2-25 | lock screen: an authentication failure while locked waits for the unlock and retries once; unlocked it fails at once |
+| M2-26 | the park-in-ip-config-get candidate (design §7): no early flip, and a kill in the gap drops NM's DNS entry |
+| M2-27 | the probe: the sshuttle server on the jump host is stopped, the probe fails twice and the plugin reconnects |
+| M2-28 | suspend and resume (only with `--suspend`) |
 
 `PASS` and `FAIL` are asserted. `INFO` prints something the design marks as
 unobserved (for example firewalld's zone binding after a link loss, or what
@@ -49,8 +62,9 @@ VM (about as long as the spike's), installs meson and firewalld in it, copies
 the repository in, runs `meson setup build --prefix=/usr`, `meson install -C
 build` and `nm-sshuttle post-install`, and runs `test-vm/run.sh` as root. The
 VM uses `~/.cache/nm-sshuttle-test-vm`, SSH port 2245 and VNC display 45, so a
-spike VM can stay. A full run takes about 20 minutes; the kill scenario waits
-for the plugin's 60 s idle timer.
+spike VM can stay. The tests take about 12 minutes on a CI runner with KVM;
+the kill scenario waits for the plugin's 60 s idle timer. CI runs them on
+demand and weekly (the VM tests workflow), without M2-28.
 
 After a change to the plugin, `test-vm/vm.sh run` copies, installs and tests
 again. `test-vm/vm.sh ssh` opens a shell; `down` and `destroy` stop and delete
@@ -82,11 +96,40 @@ scenario). Every scenario starts from a clean state and sets up its own
 activation. `--keep` leaves the topology in place; `sudo test-vm/run.sh cleanup`
 removes it. The plugin itself stays installed.
 
+Suspend is opt-in, because a VM that does not wake from its RTC alarm ends the
+run without a report:
+
+    test-vm/vm.sh run --only M2-28 --suspend
+
 ## Limits
 
 - The 10 s and 60 s escalation of design §4.4 starts after the reconnect burst,
   and only if NM does not show "activated". NM 1.56 does within milliseconds, so
   M2-05 checks a long gap and records whether the escalation ran; it cannot
   force it.
-- The plugin has no health probe yet: it notices a drop when the tunnel unit
-  stops, so the gap is made by killing the unit.
+- Most gaps are made by killing the tunnel unit. M2-17 and M2-27 make the
+  health check find them instead.
+- The lock screen is simulated: the VM is headless, so M2-25 sets `LockedHint`
+  on a logind session of the user as root, and makes the login fail by
+  removing the user's key from the jump host. The agent's prompt behind a real
+  GNOME lock screen is a manual check (below).
+- M2-19's race between NM's "activated" and the link's removal is not
+  controlled; the INFO line says which state the plugin gave up from.
+- NetworkManager writing `/etc/resolv.conf` itself (`dns=default`, as on
+  Debian) is not tested on Fedora; it belongs to a Debian or Ubuntu VM.
+
+## Manual checks with GNOME
+
+Provision with `test-vm/vm.sh up --gnome`, log in as `tester` on the VNC
+display (`test-vm/vm.sh viewer`), and create the profile as in
+`test-vm/lib.sh` (`create_profile`). Then:
+
+1. The toggle in Quick Settings switches the VPN on and off.
+2. With a passphrase key that is not loaded in the agent: switch on, type the
+   passphrase in the prompt; the tunnel comes up.
+3. Unload the key (`ssh-add -D`), lock the screen (Super+L), kill the tunnel (`sudo systemctl kill -s KILL
+   nm-sshuttle-tunnel.service`), wait 30 s: the toggle shows "acquiring", and
+   `journalctl -u nm-sshuttle` says it waits for the unlock. Unlock: the prompt
+   appears, the tunnel comes back.
+4. With automatic screen lock on, suspend (`systemctl suspend`) and resume:
+   the tunnel comes back after the unlock.
