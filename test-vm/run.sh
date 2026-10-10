@@ -4,7 +4,7 @@
 # M2 scenario driver for the installed nm-sshuttle plugin. Run as root inside
 # the throwaway Fedora 44 VM (test-vm/vm.sh does it), after test-vm/install.sh:
 #
-#   sudo test-vm/run.sh --user tester [--only M2-05,M2-06] [--report DIR] [--keep]
+#   sudo test-vm/run.sh --user tester [--only M2-05,M2-06] [--report DIR] [--keep] [--suspend]
 #   sudo test-vm/run.sh cleanup
 #
 # It builds the spike's topology (jump host sshd, DNS and web in namespaces,
@@ -19,6 +19,13 @@
 #   M2-07 link loss     M2-08 SIGTERM/restart  M2-09 kill -9
 #   M2-10 off in a gap  M2-11 connect/disconnect  M2-12 user override
 #   M2-13 NM restart    M2-14 ExecStopPost     M2-15 SELinux denials (always)
+#   M2-16 kill sshuttle while up   M2-17 nft flush ruleset (health)
+#   M2-18 link loss while activated   M2-19 link loss before activated
+#   M2-20 managed yes in a gap     M2-21 stop in a gap, user override
+#   M2-22 reload conf while up     M2-23 roaming between two uplinks
+#   M2-24 no default route         M2-25 lock screen (LockedHint set by root)
+#   M2-26 park candidate           M2-27 probe with forwarding dead
+#   M2-28 suspend and resume (only with --suspend: the VM must wake by RTC)
 #
 # Result ids are M2-NN (scenario) and M2-NNx (a check in it). PASS and FAIL are
 # asserted; INFO prints something the design marks unobserved. A FAIL prints
@@ -35,6 +42,7 @@ USER_NAME=${SUDO_USER:-}
 REPORT=/var/tmp/nm-sshuttle-test-report
 ONLY=""
 KEEP=0
+SUSPEND=0
 CMD=run
 while [ $# -gt 0 ]; do
     case $1 in
@@ -42,8 +50,9 @@ while [ $# -gt 0 ]; do
         --report) REPORT=$2; shift 2 ;;
         --only) ONLY=$2; shift 2 ;;
         --keep) KEEP=1; shift ;;
+        --suspend) SUSPEND=1; shift ;;
         cleanup) CMD=cleanup; shift ;;
-        -h|--help) sed -n '3,26p' "$0"; exit 0 ;;
+        -h|--help) sed -n '3,33p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -613,9 +622,385 @@ s_selinux() {
     else
         result M2-15 FAIL "$n SELinux denial records during the run (raw/avc.txt)"
         echo "$out" > "$REPORT/raw/avc.txt"
+        # On the console too: a CI run's log may be all there is to read
         sed -E 's/^(type=[A-Z_]+) msg=audit\([^)]*\): pid=[0-9]+ uid=[0-9]+ auid=[0-9]+ ses=[0-9]+/\1/' <<< "$out" |
-            sort | uniq -c | sort -rn | detail M2-15 "SELinux denials (deduplicated)"
+            sort | uniq -c | sort -rn | tee >(detail M2-15 "SELinux denials (deduplicated)") |
+            head -n 20 | cut -c1-400 | sed 's/^/          /'
     fi
+}
+
+# --------------------------------------------------- M2 completion scenarios
+reconnected_quickly() {  # the last reconnect, as the plugin measured it, took at most $1 s
+    local l
+    l=$(plog | grep -o 'reconnected after [0-9.]*' | tail -n 1 | awk '{print $3}')
+    echo "the plugin measured ${l:-no reconnect} s"
+    [ -n "$l" ] && awk -v l="$l" -v m="$1" 'BEGIN {exit !(l <= m)}'
+}
+
+s_kill_sshuttle() {
+    begin M2-16 "kill -9 of sshuttle while up"
+    connect_ok M2-16 "activation before the kill" || return
+    local ifi
+    ifi=$(link_ifindex)
+    log_mark
+    drop_tunnel
+    # NM still shows the old activation until the plugin sees the unit stop
+    wait_for 15 plog_has "tunnel dropped"
+    recovery_checks M2-16r "$ifi"
+    check M2-16a "plugin log: the tunnel unit stopped, then a reconnect" plog_show "tunnel dropped (the tunnel unit stopped)"
+    end_checks M2-16
+}
+
+s_flush() {
+    begin M2-17 "nft flush ruleset while up: the health check restores the guard"
+    connect_ok M2-17 "activation before the flush" || return
+    local ifi t0 v=""
+    ifi=$(link_ifindex)
+    t0=$(now_ms)
+    nft flush ruleset
+    if WAIT_POLL=0.2 wait_for 15 guard_present; then v=$(( $(now_ms) - t0 )); fi
+    check_le M2-17a "the guard table is back after the flush (health runs every 10 s)" "$v" 11000 ms
+    check M2-17b "plugin log: the guard table is gone; installing it again" plog_show "the guard table is gone"
+    check M2-17c "plugin log: no sshuttle table with a listener, so a reconnect" plog_show "no sshuttle table with a listener"
+    recovery_checks M2-17r "$ifi"
+    if fw_running; then
+        firewall-cmd --reload > /dev/null 2>&1
+        result M2-17z INFO "firewalld reloaded after the flush: $(fw_running && echo running)"
+    fi
+    end_checks M2-17
+}
+
+s_link_loss_up() {
+    begin M2-18 "link loss while activated: branch 4"
+    connect_ok M2-18 "activation before the link loss" || return
+    local t0 v=""
+    t0=$(now_ms)
+    ip link del "$LINK"
+    if wait_for 10 con_gone; then v=$(( $(now_ms) - t0 )); fi
+    check_le M2-18a "the VPN goes to disconnected after 'ip link del $LINK' while activated" "$v" 2300 ms
+    sleep 1
+    check M2-18b "plugin log: give-up branch 4" plog_show "giving up (branch 4"
+    check M2-18c "resolved has no $LINK link and no $DNS_IP" resolved_no_vpn
+    dns_snap
+    check M2-18d "NM DnsManager has no VPN entry" dns_no_vpn_entry
+    check M2-18e "NM DnsManager has no entry without an interface" dns_no_bare_entry
+    check M2-18f "no $LINK, guard or tunnel unit left" wait_for 10 all_clean
+    clear_leaked_dns
+    end_checks M2-18
+}
+
+s_link_loss_preup() {
+    begin M2-19 "link loss before the first 'activated' (pre-up)"
+    local mon out
+    # delete nmss0 as soon as the plugin sends its first Ip4Config
+    ( stdbuf -oL busctl --system --no-pager monitor --match "type='signal',sender='$BUS',member='Ip4Config'" 2> /dev/null |
+        while read -r line; do
+            case $line in *Member=Ip4Config*) ip link del "$LINK" 2> /dev/null; echo "deleted at $(date +%T.%N)"; break ;; esac
+        done > "$VARDIR/preup.txt" ) &
+    mon=$!
+    sleep 0.5
+    activate > /dev/null 2>&1
+    out=$ACTIVATE_OUT
+    kill "$mon" 2> /dev/null
+    pkill -f "member='Ip4Config'" 2> /dev/null
+    wait "$mon" 2> /dev/null
+    result M2-19i INFO "link deleted: $(cat "$VARDIR/preup.txt" 2> /dev/null || echo never); nmcli said: $(tr -s '\n' ' ' <<< "$out" | cut -c1-160)"
+    check M2-19a "the VPN is not active afterwards" wait_for 15 con_gone
+    result M2-19b INFO "give-up: $(plog | grep -F 'giving up' | tail -n 1 | cut -d' ' -f6- | cut -c1-200)"
+    check M2-19c "no $LINK, guard or tunnel unit left" wait_for 10 all_clean
+    dns_snap
+    check M2-19d "NM DnsManager has no VPN entry" dns_no_vpn_entry
+    check M2-19e "NM DnsManager has no entry without an interface" dns_no_bare_entry
+    clear_leaked_dns
+    end_checks M2-19
+}
+
+s_managed_yes() {
+    begin M2-20 "nmcli device set $LINK managed yes in a gap"
+    connect_ok M2-20 "activation before the gap" || return
+    local ifi
+    ifi=$(link_ifindex)
+    gap_begin || { result M2-20g FAIL "no gap (state '$(con_state)')"; return; }
+    sleep 2
+    nmcli device set "$LINK" managed yes > "$REPORT/raw/managed-yes.txt" 2>&1
+    result M2-20i INFO "nmcli device set $LINK managed yes said: '$(tr -s '\n' ' ' < "$REPORT/raw/managed-yes.txt")'"
+    sleep 3
+    result M2-20j INFO "3 s later: NM shows '$(con_state)', $LINK device state $(dev_state); bounced: $(plog | grep -c 'bouncing it back')"
+    check M2-20a "guard still present and traffic still refused" guard_and_refused
+    gap_end
+    INFO_ONLY="y g" recovery_checks M2-20r "$ifi"
+    end_checks M2-20
+}
+
+# stop_in_gap ID : systemctl stop of the plugin unit in a gap, and what must follow
+stop_in_gap() {
+    local id=$1 seq stop_pid
+    gap_begin || { result "$id" FAIL "no gap (state '$(con_state)')"; return 1; }
+    sleep 2
+    signals_start "$REPORT/raw/signals-$id.txt"
+    ( sc stop "$PLUGIN_UNIT"; echo $? > "$VARDIR/stop.rc" ) &
+    stop_pid=$!
+    watch_teardown 20
+    wait "$stop_pid"
+    signals_stop
+    seq=$(signal_sequence "$REPORT/raw/signals-$id.txt")
+    check "${id}a" "signals: Config, then Failure, then STOPPED" signals_in_order "$seq"
+    check_le "${id}b" "the VPN goes down after the stop" "$T_CON" 3000 ms
+    check_le "${id}c" "nmss0 is removed" "$T_LINK" 2500 ms
+    check_le "${id}d" "the guard is removed" "$T_GUARD" 3000 ms
+    check_le "${id}f" "the service has exited" "$T_UNIT" 5500 ms
+    check "${id}g" "systemctl stop succeeded" stop_result_ok
+    check "${id}j" "nothing left: no link, guard, tunnel unit" all_clean
+    dns_snap
+    check "${id}k" "NM DnsManager has no VPN entry" dns_no_vpn_entry
+    check "${id}l" "resolved has no $DNS_IP" resolved_no_vpn
+}
+
+write_override() {
+    printf '[keyfile]\nunmanaged-devices=interface-name:nmtest-nosuch\n' | write_file "$NM_OVERRIDE"
+    touch "$VARDIR/override-written"
+}
+remove_override() { rm -f "$NM_OVERRIDE" "$VARDIR/override-written"; }
+
+s_stop_override() {
+    begin M2-21 "service stop in a gap with the user override in place"
+    write_override
+    nmcli general reload conf
+    sleep 1
+    if connect_ok M2-21 "activation with a managed $LINK"; then
+        result M2-21i INFO "$LINK device state $(dev_state)"
+        stop_in_gap M2-21
+    fi
+    reset_state
+    remove_override
+    nmcli general reload conf
+    sleep 1
+    clear_leaked_dns
+    end_checks M2-21
+}
+
+s_reload_conf() {
+    begin M2-22 "nmcli general reload conf under an active VPN"
+    connect_ok M2-22 "activation before the reloads" || return
+    local ifi
+    ifi=$(link_ifindex)
+    write_override
+    nmcli general reload conf
+    sleep 2
+    result M2-22i INFO "with the override reloaded: NM shows '$(con_state)', $LINK device state $(dev_state)"
+    check M2-22a "the VPN stays activated through the reload" con_is activated
+    check M2-22b "traffic still flows" traffic_ok
+    remove_override
+    nmcli general reload conf
+    sleep 2
+    result M2-22j INFO "with the override removed and reloaded: NM shows '$(con_state)', $LINK device state $(dev_state)"
+    check M2-22c "the VPN stays activated through the second reload" con_is activated
+    INFO_ONLY="y g" dns_checks M2-22d
+    INFO_ONLY="y g" reconnect_cycle M2-22e 4
+    end_checks M2-22
+}
+
+s_roam() {
+    begin M2-23 "roaming: NM's primary connection changes to another uplink and back"
+    lanb_setup || { result M2-23 SKIP "cannot create the second uplink"; return; }
+    connect_ok M2-23 "activation on $UPLINK" || { lanb_teardown; return; }
+    local ifi
+    ifi=$(link_ifindex)
+    log_mark
+    if nmcli --wait 30 connection up "$LANB_CON" >> "$REPORT/raw/roam.txt" 2>&1; then
+        result M2-23i INFO "second uplink up; primary connection: $(primary_con); NM: $(nm_general)"
+        check M2-23a "plugin log: the network changed" wait_for 10 plog_has "the network changed"
+        recovery_checks M2-23b "$ifi"
+        check M2-23c "the reconnect took at most 10 s (at once, not after a backoff)" reconnected_quickly 10
+        log_mark
+        nmcli connection down "$LANB_CON" >> "$REPORT/raw/roam.txt" 2>&1
+        result M2-23j INFO "back on $UPLINK; primary connection: $(primary_con)"
+        check M2-23d "plugin log: the network changed again" wait_for 10 plog_has "the network changed"
+        recovery_checks M2-23e "$ifi"
+        check M2-23f "the reconnect took at most 10 s" reconnected_quickly 10
+    else
+        result M2-23 FAIL "cannot activate $LANB_CON: $(tail -n 2 "$REPORT/raw/roam.txt" | tr -s '\n' ' ')"
+    fi
+    lanb_teardown
+    end_checks M2-23
+}
+
+s_no_default_route() {
+    begin M2-24 "the uplink without a default route"
+    connect_ok M2-24 "activation before the default route goes" || return
+    local ifi
+    ifi=$(link_ifindex)
+    log_mark
+    nmcli device modify "$UPLINK" ipv4.never-default yes >> "$REPORT/raw/no-default.txt" 2>&1
+    touch "$VARDIR/never-default"
+    sleep 3
+    result M2-24i INFO "no default route: '$(ip -4 route show default | tr -s '\n' ' ')'; NM state,connectivity: $(nm_general)"
+    check M2-24a "the plugin does not count it as offline" plog_has_not "NetworkManager is offline"
+    check M2-24b "the VPN is activated (after a reconnect if the plugin saw a network change)" \
+        wait_for 30 con_is activated
+    INFO_ONLY="b" dns_checks M2-24c
+    # No route to the subnets either: connect() fails before sshuttle's
+    # redirect can apply, so traffic through the tunnel is INFO here
+    INFO_ONLY="b w" reconnect_cycle M2-24d 4
+    nmcli device modify "$UPLINK" ipv4.never-default no >> "$REPORT/raw/no-default.txt" 2>&1
+    rm -f "$VARDIR/never-default"
+    sleep 3
+    result M2-24j INFO "default route back: '$(ip -4 route show default | tr -s '\n' ' ')'"
+    end_checks M2-24
+}
+
+lock_gap() {  # lock_gap : lock the session, break the key, drop the tunnel
+    set_locked true > /dev/null || return 1
+    keys_off
+    drop_tunnel
+    wait_for 15 con_is activating || return 1
+    wait_for 20 plog_has "waiting for the unlock"
+}
+s_lock() {
+    begin M2-25 "lock screen: a reconnect that needs the user waits for the unlock and retries once"
+    if ! lock_session_start; then
+        result M2-25 SKIP "cannot open a logind session for $USER_NAME"
+        return
+    fi
+    result M2-25i INFO "session $LOCK_SESSION of $USER_NAME"
+    local ifi n
+    if connect_ok M2-25 "activation before the lock"; then
+        ifi=$(link_ifindex)
+        # a: locked, key broken, then the key works again and the screen is unlocked
+        if lock_gap; then
+            result M2-25a PASS "plugin log: authentication failed while locked; waiting for the unlock"
+            n=$(attempts_logged)
+            sleep 12
+            check M2-25b "no attempt while locked (attempt lines stay at $n)" test "$(attempts_logged)" = "$n"
+            check M2-25c "still reconnecting: NM activating, guard present, $LINK kept" still_in_gap "$ifi"
+            keys_on
+            set_locked false > /dev/null
+            check M2-25d "plugin log: unlocked; retrying once" wait_for 10 plog_has "unlocked; retrying once"
+            recovery_checks M2-25r "$ifi"
+        else
+            result M2-25a FAIL "the plugin did not wait for the unlock (state '$(con_state)')"
+            plog | tail -n 20 | detail M2-25a "plugin journal"
+            keys_on
+            set_locked false > /dev/null
+        fi
+        # b: locked, key broken, unlocked with the key still broken: login failed
+        log_mark
+        if con_is activated && lock_gap; then
+            set_locked false > /dev/null
+            check M2-25e "after the unlock the one retry fails and the VPN goes down" wait_for 30 con_gone
+            check M2-25f "plugin log: the retry after the unlock failed" plog_show "the retry after the unlock failed"
+        else
+            result M2-25e FAIL "no locked gap for the second case (state '$(con_state)')"
+        fi
+        keys_on
+        set_locked false > /dev/null
+    fi
+    # c: unlocked, key broken: login failed at once, no waiting
+    reset_state
+    log_mark
+    if connect_ok M2-25g "activation for the unlocked case"; then
+        keys_off
+        drop_tunnel
+        check M2-25h "unlocked: the VPN goes down on the authentication failure" wait_for 30 con_gone
+        check M2-25j "plugin log: reconnect failed on authentication" plog_show "reconnect failed on authentication"
+        check M2-25k "plugin log: no wait for an unlock" plog_has_not "waiting for the unlock"
+        keys_on
+    fi
+    lock_session_stop
+    end_checks M2-25
+}
+
+s_park() {
+    begin M2-26 "candidate: park NM in ip-config-get during a gap"
+    write_file "$PARK_DROPIN" <<< $'[Service]\nEnvironment=NM_SSHUTTLE_PARK_GAP=1'
+    sc daemon-reload
+    local ifi oldpid
+    if connect_ok M2-26 "activation with the candidate on"; then
+        check M2-26a "plugin log: the candidate is on" plog_show "candidate: parking"
+        ifi=$(link_ifindex)
+        if gap_begin; then
+            sleep 4
+            check M2-26b "plugin log: parking NM in ip-config-get" plog_show "parking NM in ip-config-get"
+            check M2-26c "4 s into the parked gap NM still shows activating (no early flip)" con_is activating
+            result M2-26i INFO "plugin signals so far: $(plog | grep -cE 'Config:') Config lines; bounces: $(plog | grep -c 'bouncing it back')"
+            gap_checks M2-26g "$ifi"
+            gap_end
+            recovery_checks M2-26r "$ifi"
+            # a kill in a parked gap: NM should now fail the VPN from ip-config-get and drop its DNS
+            if gap_begin; then
+                sleep 3
+                oldpid=$(plugin_pid)
+                kill -9 "$oldpid"
+                check M2-26k "the VPN goes down after the kill" wait_for 15 con_gone
+                check M2-26l "nmss0, guard and tunnel unit are gone" wait_for 15 all_clean
+                dns_snap
+                check M2-26m "NM DnsManager has no VPN entry after a kill in a parked gap (the candidate's claim; M2-09 leaks it)" dns_no_vpn_entry
+                gap_end
+            fi
+        fi
+    fi
+    reset_state
+    rm -f "$PARK_DROPIN"
+    sc daemon-reload
+    clear_leaked_dns
+    end_checks M2-26
+}
+
+probe_answered_twice() { [ "$(plog | grep -c 'answers through the tunnel')" -ge 2 ]; }
+s_probe() {
+    begin M2-27 "probe: forwarding dead while sshuttle and ssh live"
+    banner_start || { result M2-27 SKIP "cannot start the banner server"; return; }
+    create_profile "$CON" "probe = $WEB_IP:$BANNER_PORT"
+    local ifi pids=()
+    if connect_ok M2-27 "activation with probe = $WEB_IP:$BANNER_PORT"; then
+        ifi=$(link_ifindex)
+        check M2-27a "plugin log: the probe answers through the tunnel" wait_for 25 plog_has "answers through the tunnel"
+        read -ra pids <<< "$(remote_server_pids | xargs)"
+        if [ "${#pids[@]}" -gt 0 ]; then
+            result M2-27i INFO "stopping the sshuttle server on the jump host (pids ${pids[*]}); ssh and sshd keep the session"
+            kill -STOP "${pids[@]}"
+            check M2-27b "plugin log: the probe failed twice, so a reconnect" wait_for 45 plog_has "the probe failed 2 times in a row"
+            recovery_checks M2-27r "$ifi"
+            check M2-27c "the probe answers again after the reconnect" wait_for 25 probe_answered_twice
+            kill -KILL "${pids[@]}" 2> /dev/null
+        else
+            result M2-27b FAIL "cannot find the sshuttle server's processes in netns jump"
+        fi
+    fi
+    reset_state
+    create_profile "$CON"
+    banner_stop
+    end_checks M2-27
+}
+
+s_suspend() {
+    begin M2-28 "suspend and resume"
+    if [ "$SUSPEND" != 1 ]; then
+        result M2-28 SKIP "runs only with --suspend: the VM must wake from its RTC, and a VM that does not wake ends the run"
+        return
+    fi
+    local can ifi t0
+    can=$(bc call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager CanSuspend 2>&1)
+    if [ "$can" != 's "yes"' ]; then
+        result M2-28 SKIP "logind CanSuspend says $can"
+        return
+    fi
+    connect_ok M2-28 "activation before the suspend" || return
+    ifi=$(link_ifindex)
+    sleep 1
+    check M2-28a "the plugin holds a sleep delay inhibitor" inhibitor_held
+    log_mark
+    rtcwake -m no -s 30 > "$REPORT/raw/rtcwake.txt" 2>&1
+    t0=$(date +%s)
+    sc suspend
+    sleep 5
+    WAIT_POLL=1 wait_for 120 plog_has "resumed"
+    result M2-28i INFO "suspend and resume took $(( $(date +%s) - t0 )) s (RTC alarm at 30 s)"
+    check M2-28b "plugin log: suspending, the tunnel stopped before sleep" plog_show "tunnel dropped (the machine is suspending)"
+    check M2-28c "plugin log: resumed" plog_show "resumed"
+    recovery_checks M2-28r "$ifi"
+    check M2-28d "the plugin holds the inhibitor again after the resume" inhibitor_held
+    end_checks M2-28
 }
 
 # ------------------------------------------------------------------ collect
@@ -682,6 +1067,19 @@ want M2-11 && s_reconnect_connect
 want M2-12 && s_override
 want M2-13 && s_nm_restart
 want M2-14 && s_stoppost
+want M2-16 && s_kill_sshuttle
+want M2-17 && s_flush
+want M2-18 && s_link_loss_up
+want M2-19 && s_link_loss_preup
+want M2-20 && s_managed_yes
+want M2-21 && s_stop_override
+want M2-22 && s_reload_conf
+want M2-23 && s_roam
+want M2-24 && s_no_default_route
+want M2-25 && s_lock
+want M2-26 && s_park
+want M2-27 && s_probe
+want M2-28 && s_suspend
 s_selinux
 reset_state
 collect

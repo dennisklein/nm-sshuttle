@@ -19,6 +19,7 @@
 #
 # Options:
 #   --only IDS            run only these scenarios, e.g. M2-05,M2-06
+#   --suspend             also run M2-28 (suspend; the VM must wake from its RTC)
 #   --gnome               provision GNOME too (the tests do not use it)
 #   --workdir DIR         state directory (default ~/.cache/nm-sshuttle-test-vm)
 #   --ssh-port PORT       host port forwarded to the VM's SSH (default 2245)
@@ -37,6 +38,7 @@ REPORT_DIR=/var/tmp/nm-sshuttle-test-report
 
 CMD=all
 ONLY=""
+SUSPEND=""
 GUI_ARGS=(--headless)
 WORKDIR=${XDG_CACHE_HOME:-$HOME/.cache}/nm-sshuttle-test-vm
 SSH_PORT=2245
@@ -50,13 +52,14 @@ esac
 while [ $# -gt 0 ]; do
     case $1 in
         --only) ONLY=$2; shift 2 ;;
+        --suspend) SUSPEND=--suspend; shift ;;
         --gnome) GUI_ARGS=(); shift ;;
         --workdir) WORKDIR=$2; shift 2 ;;
         --ssh-port) SSH_PORT=$2; shift 2 ;;
         --vnc-display) VNC_DISPLAY=$2; shift 2 ;;
         --mem|--cpus|--disk|--image|--mirror|--sshuttle-pip) FWD+=("$1" "$2"); shift 2 ;;
         --) shift; SSH_EXTRA=("$@"); break ;;
-        -h|--help) sed -n '3,28p' "$0"; exit 0 ;;
+        -h|--help) sed -n '3,29p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1 (see --help)" >&2; exit 2 ;;
     esac
 done
@@ -99,6 +102,7 @@ cmd_run() {
     vm "sudo bash $DEST/test-vm/install.sh" || die "installing the plugin failed"
     args="--user $VM_USER --report $REPORT_DIR"
     [ -z "$ONLY" ] || args="$args --only $ONLY"
+    [ -z "$SUSPEND" ] || args="$args $SUSPEND"
     say "running the tests (this takes a while: some scenarios wait for timers of 60 s and more)"
     vm "sudo bash $DEST/test-vm/run.sh $args" || rc=$?
     dest=$REPO/test-vm-results/$(date +%Y%m%d-%H%M%S)

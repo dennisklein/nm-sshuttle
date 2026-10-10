@@ -44,6 +44,10 @@ WEB_IP=10.99.0.10
 DNS_IP=10.99.0.53
 UPLINK=""
 BLOCK_TABLE=nmtest-block
+LANB_CON=nmtest-lanb
+LANB_IF=lb0
+BANNER_PORT=2222
+PARK_DROPIN=/run/systemd/system/nm-sshuttle.service.d/50-nmtest-park.conf
 
 RESULTS=()
 NFAIL=0
@@ -261,6 +265,108 @@ EOF
 }
 unblock_jump() { nft delete table inet "$BLOCK_TABLE" 2> /dev/null; return 0; }
 
+# The user's key stops working on the jump host (the next login is "Permission
+# denied"), and works again.
+keys_off() { mv -f "$SSHD_DIR/authorized_keys/$USER_NAME" "$VARDIR/authorized_keys.off" 2> /dev/null; return 0; }
+keys_on() {
+    [ -f "$VARDIR/authorized_keys.off" ] || return 0
+    mv -f "$VARDIR/authorized_keys.off" "$SSHD_DIR/authorized_keys/$USER_NAME"
+    restorecon -F "$SSHD_DIR/authorized_keys/$USER_NAME" 2> /dev/null
+    return 0
+}
+
+# A second uplink for roaming: NM-managed veth lb0 (192.168.77.2/24, default
+# route at metric 10, so it becomes NM's primary connection while up). Its
+# peer sits in netns lanb. The jump host stays reachable over h-j either way.
+lanb_setup() {
+    ip netns add lanb 2> /dev/null
+    ip link add "$LANB_IF" type veth peer name lb1 || return 1
+    ip link set lb1 netns lanb
+    ip -n lanb addr add 192.168.77.1/24 dev lb1
+    ip -n lanb link set lb1 up
+    nmcli connection delete "$LANB_CON" > /dev/null 2>&1
+    nmcli connection add type ethernet ifname "$LANB_IF" con-name "$LANB_CON" \
+        connection.autoconnect no ipv4.method manual ipv4.addresses 192.168.77.2/24 \
+        ipv4.gateway 192.168.77.1 ipv4.route-metric 10 ipv4.ignore-auto-dns yes \
+        ipv6.method disabled >> "$REPORT/raw/profiles.txt" 2>&1
+}
+lanb_teardown() {
+    nmcli connection down "$LANB_CON" > /dev/null 2>&1
+    nmcli connection delete "$LANB_CON" > /dev/null 2>&1
+    ip link del "$LANB_IF" 2> /dev/null
+    ip netns del lanb 2> /dev/null
+    return 0
+}
+primary_con() {
+    bc get-property org.freedesktop.NetworkManager /org/freedesktop/NetworkManager \
+        org.freedesktop.NetworkManager PrimaryConnection 2>&1
+}
+nm_general() { nmcli -g STATE,CONNECTIVITY general 2>&1; }
+
+# A server in the internal network that speaks first, for the probe
+banner_start() {
+    printf '%s\n' \
+        'import socket, sys' \
+        's = socket.socket()' \
+        's.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)' \
+        's.bind((sys.argv[1], int(sys.argv[2])))' \
+        's.listen(16)' \
+        'while True:' \
+        '    c, _ = s.accept()' \
+        '    try:' \
+        '        c.sendall(b"SSH-2.0-nmtest-banner\r\n")' \
+        '    except OSError:' \
+        '        pass' \
+        '    c.close()' | write_file "$VARDIR/banner.py"
+    restorecon -F "$VARDIR/banner.py" 2> /dev/null
+    systemd-run --quiet --collect --unit=nmtest-banner -p NetworkNamespacePath=/run/netns/internal \
+        /usr/bin/python3 -I "$VARDIR/banner.py" "$WEB_IP" "$BANNER_PORT"
+    wait_for 5 sh -c "ss -N internal -ltnH 'sport = :$BANNER_PORT' | grep -q ."
+}
+banner_stop() { sc stop nmtest-banner > /dev/null 2>&1; return 0; }
+# The sshuttle server on the jump host: the user's processes in netns jump
+# that run sshuttle's assembler
+remote_server_pids() {
+    local p
+    for p in $(ip netns pids jump 2> /dev/null); do
+        [ "$(stat -c %U "/proc/$p" 2> /dev/null)" = "$USER_NAME" ] || continue
+        tr '\0' ' ' < "/proc/$p/cmdline" 2> /dev/null | grep -q 'assembler' && echo "$p"
+    done
+}
+
+# A logind session of the user whose LockedHint the test sets as root (the VM
+# is headless: no GNOME Shell locks it). The plugin counts any locked session.
+LOCK_SESSION=""
+user_sessions() { loginctl --no-legend list-sessions 2> /dev/null | awk -v u="$USER_NAME" '$3 == u {print $1}' | sort; }
+lock_session_start() {
+    local before after
+    before=$(user_sessions)
+    # Without a TTY pam_systemd makes a "background" session, which logind
+    # does not let lock; class "user" can
+    systemd-run --quiet --collect --unit=nmtest-session -p PAMName=login -p User="$USER_NAME" \
+        -p Environment=XDG_SESSION_CLASS=user /usr/bin/sleep 3600 > /dev/null 2>&1 || return 1
+    for _ in $(seq 1 50); do
+        after=$(user_sessions)
+        LOCK_SESSION=$(comm -13 <(echo "$before") <(echo "$after") | head -n 1)
+        [ -n "$LOCK_SESSION" ] && return 0
+        sleep 0.1
+    done
+    return 1
+}
+lock_session_stop() { sc stop nmtest-session > /dev/null 2>&1; LOCK_SESSION=""; return 0; }
+set_locked() {  # set_locked true|false
+    local path
+    path=$(bc call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager \
+        GetSession s "$LOCK_SESSION" 2> /dev/null | sed -n 's/^o "\(.*\)"$/\1/p')
+    [ -n "$path" ] || { echo "no session $LOCK_SESSION"; return 1; }
+    # logind lets root or the session's owner set it
+    bc call org.freedesktop.login1 "$path" org.freedesktop.login1.Session SetLockedHint b "$1" ||
+        as_user busctl --system --no-pager call org.freedesktop.login1 "$path" \
+            org.freedesktop.login1.Session SetLockedHint b "$1"
+}
+attempts_logged() { plog | grep -c 'reconnect attempt [0-9]* in'; }
+inhibitor_held() { systemd-inhibit --list --no-pager 2>&1 | grep -i 'nm-sshuttle'; }
+
 # ----------------------------------------------------------------- profiles
 profile_data() {  # profile_data [EXTRA-KEY=VALUE]
     printf 'remote = %s@%s, local-user = %s, subnets = 10.99.0.0/24, dns = split, dns-servers = %s, dns-domains = ~corp.test%s' \
@@ -420,18 +526,34 @@ outside_lookup_ok() {  # a fresh outside name is not sent to the tunnel's DNS se
 }
 http_ok() { [ "$(curl -s -m 5 -o /dev/null -w '%{http_code}' --noproxy '*' "$1")" = 200 ]; }
 
+# info_or_check ID TEXT CMD... : like check, but only INFO with what CMD saw
+# when INFO_ONLY lists ID's last letter (an answer, not an assertion)
+info_or_check() {
+    local id=$1 text=$2 out rc
+    shift 2
+    if contains " ${INFO_ONLY:-} " " ${id: -1} "; then
+        out=$("$@" 2>&1)
+        rc=$?
+        result "$id" INFO "$text: $([ "$rc" = 0 ] && echo yes || echo no); saw: $(tr -s '\n' ' ' <<< "$out" | cut -c1-200)"
+    else
+        check "$id" "$text" "$@"
+    fi
+}
+
 # dns_checks PREFIX : everything the design's checklist asks for after a
-# (re)configuration: resolved per link, lookups, then NM's DnsManager
+# (re)configuration: resolved per link, lookups, then NM's DnsManager.
+# INFO_ONLY="b g" turns those checks into INFO (no uplink default route; a
+# managed nmss0, where risk 11 is expected).
 dns_checks() {
     local p=$1
     check "$p-a" "resolved: $LINK has $DNS_IP and ~corp.test, default-route no" nmss0_resolved_ok
-    check "$p-b" "resolved: $UPLINK keeps its servers and the default route" uplink_resolved_ok
+    info_or_check "$p-b" "resolved: $UPLINK keeps its servers and the default route" uplink_resolved_ok
     check "$p-c" "a split name resolves through the tunnel" split_lookup_ok
     check "$p-d" "an outside name is not sent to the tunnel's DNS server" outside_lookup_ok
     dns_snap
     check "$p-e" "NM DnsManager: exactly one VPN entry, on $LINK, with $DNS_IP" dns_one_vpn_entry
     check "$p-f" "NM DnsManager: no entry without an interface" dns_no_bare_entry
-    check "$p-g" "NM DnsManager: no non-VPN $LINK entry (risk 11)" dns_no_device_entry
+    info_or_check "$p-g" "NM DnsManager: no non-VPN $LINK entry (risk 11)" dns_no_device_entry
 }
 
 # --------------------------------------------------------------- guard etc.
@@ -491,10 +613,10 @@ recovery_checks() {
     fi
     sleep 1
     check "$p-i" "same ifindex ($2) after the reconnect" test "$(link_ifindex)" = "$2"
-    check "$p-y" "$LINK is unmanaged (device state 10) after the reconnect" test "$(dev_state)" = 10
+    info_or_check "$p-y" "$LINK is unmanaged (device state 10) after the reconnect" test "$(dev_state)" = 10
     check "$p-u" "tunnel unit active and the guard present again" sh -c \
         "[ \"\$(systemctl --no-pager is-active $TUNNEL_UNIT)\" = active ] && nft list table inet $GUARD_TABLE > /dev/null"
-    check "$p-w" "traffic flows through the tunnel again" http_ok "http://$WEB_IP:8080/"
+    info_or_check "$p-w" "traffic flows through the tunnel again" http_ok "http://$WEB_IP:8080/"
     dns_checks "$p"
 }
 
@@ -608,6 +730,14 @@ cleanup() {
     local t
     for t in $(sshuttle_tables); do nft delete table inet "$t"; done
     ip link del h-j 2> /dev/null
+    keys_on
+    if [ -f "$VARDIR/never-default" ] && [ -n "$UPLINK" ]; then
+        nmcli device modify "$UPLINK" ipv4.never-default no > /dev/null 2>&1
+    fi
+    lanb_teardown
+    banner_stop
+    lock_session_stop
+    if [ -f "$PARK_DROPIN" ]; then rm -f "$PARK_DROPIN"; sc daemon-reload; fi
     for t in jump internal; do ip netns del "$t" 2> /dev/null; done
     if [ -d "$HOME_U/.ssh" ]; then
         AGENT_SOCK=${AGENT_SOCK:-$(user_manager_env SSH_AUTH_SOCK)}
