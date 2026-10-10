@@ -34,6 +34,7 @@ python.install_sources(
   'nm_sshuttle/service.py',
   'nm_sshuttle/supervisor.py',
   'nm_sshuttle/tunnel.py',
+  'nm_sshuttle/watch.py',
   subdir: 'nm_sshuttle',
 )
 
@@ -43,6 +44,10 @@ foreach script : ['nm-sshuttle', 'nm-sshuttle-service']
 endforeach
 install_data('data/nm-sshuttle-activate', 'data/nm-sshuttle-auth-dialog',
              install_dir: libexecdir, install_mode: 'rwxr-xr-x')
+# The profile commands (add, check, list, remove) are for users; the rest of
+# the command needs root and is run by the units and the plugin.
+install_symlink('nm-sshuttle', install_dir: prefix / get_option('bindir'),
+                pointing_to: libexecdir / 'nm-sshuttle')
 
 configure_file(input: 'data/nm-sshuttle-service.name.in', output: 'nm-sshuttle-service.name',
                configuration: subst, install: true, install_dir: nm_libdir / 'VPN')
