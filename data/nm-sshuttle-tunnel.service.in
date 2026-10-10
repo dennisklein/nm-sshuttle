@@ -1,0 +1,18 @@
+[Unit]
+Description=sshuttle tunnel for nm-sshuttle
+Documentation=https://github.com/dennisklein/nm-sshuttle
+# No BindsTo= or PartOf= on nm-sshuttle.service: the plugin must see its own
+# SIGTERM before the tunnel goes, so that it gives up in order (design §4.7).
+StopWhenUnneeded=no
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStartPre=@LIBEXECDIR@/nm-sshuttle sweep
+# Reads /run/nm-sshuttle/tunnel.json (written by the plugin) and execs sshuttle.
+ExecStart=@LIBEXECDIR@/nm-sshuttle exec-tunnel
+# Required, not a safety net: the stop can kill sshuttle's own nft cleanup.
+ExecStopPost=@LIBEXECDIR@/nm-sshuttle sweep
+Restart=no
+TimeoutStartSec=45
+TimeoutStopSec=15

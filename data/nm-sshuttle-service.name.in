@@ -1,0 +1,9 @@
+[VPN Connection]
+name=sshuttle
+service=org.freedesktop.NetworkManager.sshuttle
+program=@LIBEXECDIR@/nm-sshuttle-activate
+supports-multiple-connections=false
+supports-safe-private-file-access=true
+
+[GNOME]
+auth-dialog=@LIBEXECDIR@/nm-sshuttle-auth-dialog

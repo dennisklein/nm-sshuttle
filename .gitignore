@@ -1,2 +1,4 @@
 spike-results/
 __pycache__/
+build/
+test-vm-results/

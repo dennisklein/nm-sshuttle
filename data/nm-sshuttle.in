@@ -1,0 +1,7 @@
+#!@PYTHON@
+# SPDX-License-Identifier: MIT
+import sys
+
+from nm_sshuttle.cli import main
+
+sys.exit(main())

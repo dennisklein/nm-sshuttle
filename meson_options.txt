@@ -1,0 +1,4 @@
+option('systemdsystemunitdir', type: 'string', value: '',
+       description: 'systemd system unit directory (default /usr/lib/systemd/system)')
+option('nmlibdir', type: 'string', value: '/usr/lib/NetworkManager',
+       description: 'NetworkManager library directory (VPN/ and conf.d/)')
