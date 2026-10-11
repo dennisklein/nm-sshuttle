@@ -4,3 +4,5 @@ option('nmlibdir', type: 'string', value: '/usr/lib/NetworkManager',
        description: 'NetworkManager library directory (VPN/ and conf.d/)')
 option('gnome-editor', type: 'feature', value: 'auto',
        description: 'Build the editor for GNOME Settings (needs libnm and GTK4)')
+option('nmplugindir', type: 'string', value: '',
+       description: 'Where NetworkManager looks for plugins (default: plugindir of libnm.pc, else libdir/NetworkManager)')
