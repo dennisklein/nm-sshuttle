@@ -34,6 +34,11 @@ $ # Debian, Ubuntu
 $ sudo apt install ./nm-sshuttle_*_all.deb
 ```
 
+To create and edit profiles in GNOME Settings as well, install the editor,
+which is a separate package (`nm-sshuttle-gnome-*.rpm`,
+`nm-sshuttle-gnome_*.deb`). Settings reads its list of VPN types once, so
+restart it afterwards (log out, or `pkill gnome-control-center`).
+
 From source:
 
 ```console
@@ -41,6 +46,10 @@ $ meson setup build --prefix=/usr
 $ sudo meson install -C build
 $ sudo nm-sshuttle post-install
 ```
+
+This builds the editor for GNOME Settings too when `libnm` and GTK4 are
+installed with their development files (`-Dgnome-editor=disabled` leaves it
+out, `=enabled` makes it an error to lack them).
 
 The packages run `post-install` themselves. It reloads NetworkManager's
 configuration so that the tunnel's link, `nmss0`, stays unmanaged. If an
@@ -102,10 +111,44 @@ The options of `add`:
 | `--user` | Whose ssh configuration and agent to use. The default is you. |
 
 `nm-sshuttle list` shows your profiles, and `nm-sshuttle remove corp` deletes
-one. To change a profile, remove it and add it again.
+one. To change a profile, edit it in GNOME Settings (below), or remove it and
+add it again.
 
 The profile is visible only to you. Other users neither see it nor can use
 it: it uses your ssh identity.
+
+## Creating and editing a profile in GNOME Settings
+
+With the `nm-sshuttle-gnome` package installed, the editor does what
+`nm-sshuttle add` does. In Settings, open Network, press **+** next to VPN
+and choose **sshuttle**; or press the gear next to an existing profile and
+open the **Identity** tab. The form has a row for each option of `add`:
+
+| Row | Option |
+|---|---|
+| SSH destination | `--remote` |
+| Networks, Exclude | `--subnets`, `--exclude`; separate several with spaces or commas |
+| DNS, DNS servers, DNS domains | `--dns`, `--dns-servers`, `--dns-domains`; the servers and domains are greyed out when the mode does not use them |
+| First hop, Probe, Method, Block traffic while down | `--gateway`, `--probe`, `--method`, `--fail-closed`, under **Advanced** |
+| Local user | `--user`: you, for a new profile; not editable |
+
+A row that is wrong turns red, and the message appears when you point at it.
+Apply stays off until every row is right. The editor fills in what Settings
+does not: the profile is persistent, never connects by itself, and does not
+get the host route NetworkManager would add.
+
+Two other tabs can still break a profile:
+
+- **Details, "Make available to other users":** the editor refuses at once
+  and says so; switch it off. A profile of nm-sshuttle belongs to one user.
+- **IPv4:** the method must stay **Automatic**. The editor refuses a change
+  to Manual or Disabled, a moment after you make it, and when you connect.
+  Also switch on "Use this connection only for resources on its network"
+  on the IPv4 and IPv6 tabs, so that the tunnel's DNS entry cannot become
+  the default.
+
+A profile made in Settings has not yet logged in from your account, so run
+`nm-sshuttle check corp` once to accept the host key and test the login.
 
 ## Connecting
 
@@ -146,8 +189,9 @@ Common causes:
   `nm-sshuttle check corp` and fix what it reports.
 - **"connection.permissions must be exactly user:…" or "ipv4.method must
   be auto":** GNOME Settings changed the profile. "Make available to other
-  users" on the Details tab and the IPv4 tab both break it. Remove the
-  profile and add it again.
+  users" on the Details tab and the IPv4 tab both break it. With the editor
+  installed, set them back in Settings (permissions private, IPv4 on
+  Automatic); without it, remove the profile and add it again.
 - **Names on the far side do not resolve:** check `resolvectl status
   nmss0`. It should list the `--dns-servers` and the domains. Short names
   are completed only with domains given without a leading `~`.
@@ -175,5 +219,6 @@ Common causes:
 - The tunnelled networks need a route on your machine; a default route is
   enough. On a network without one, the tunnel comes up but connections to
   those networks fail.
-- GNOME Settings has no editor for these profiles yet. Use the commands
-  above.
+- GNOME Settings can edit these profiles only with the `nm-sshuttle-gnome`
+  package. `nm-connection-editor` (GTK3) has no editor yet; use the commands
+  above there.

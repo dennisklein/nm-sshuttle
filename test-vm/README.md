@@ -136,3 +136,31 @@ display (`test-vm/vm.sh viewer`), and create the profile as in
    appears, the tunnel comes back.
 4. With automatic screen lock on, suspend (`systemctl suspend`) and resume:
    the tunnel comes back after the unlock.
+
+### The editor in GNOME Settings
+
+The VM's preparation installs the packages that build the editor (`gcc`,
+`gtk4-devel`, `libnm-devel`, `json-glib-devel`), and `vm.sh run` installs it
+with the plugin. In a VM that was prepared earlier, install them by hand
+first. Restart Settings after each install: it caches the list of VPN
+types. Then, as `tester` on the VNC display:
+
+5. Network, "+" next to VPN: **sshuttle** is offered. Make a profile with
+   the destination, networks and DNS of the test topology, and save it. It
+   connects from the Quick Settings toggle with no `nmcli` step.
+6. On the Details tab, switch on "Make available to other users": Apply goes
+   grey and its tooltip names the permissions.
+7. On the IPv4 tab, change the method to Manual and apply, then change
+   anything else: Apply is refused with a message naming `ipv4.method`.
+   Connecting after the first change fails with the plugin's message naming
+   the field.
+8. Open the gear of a profile made with `nm-sshuttle add`: the Identity tab
+   shows the form at once, without the 25 s wait of design R5d. Change the
+   subnets and apply; `nmcli -f vpn.data connection show` shows them, and an
+   `ssh-options` key added with `nmcli` is still there.
+9. Uninstall the editor package and restart Settings: sshuttle is gone from
+   "Add VPN", and the gear shows today's "unable to load VPN connection
+   editor", and nothing else.
+10. Check that the labels are right-aligned without a colon, that the
+    "Advanced" rows are too, and that the long entries are wide enough in
+    the list row (the FIXME at `ce-page-vpn.c:107`).

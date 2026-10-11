@@ -78,7 +78,9 @@ prepare() {
         return
     fi
     say "installing meson, ninja and firewalld in the VM"
+    # gcc and the -devel packages let meson build the editor for GNOME Settings
     vm "sudo dnf -y install meson ninja-build firewalld nftables iproute python3-gobject-base sshuttle &&
+        sudo dnf -y install gcc gtk4-devel libnm-devel json-glib-devel &&
         sudo systemctl enable --now firewalld &&
         sudo loginctl enable-linger $VM_USER &&
         sudo touch /var/lib/nmtest-prepared" < /dev/null || die "preparing the VM failed"
