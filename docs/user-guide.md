@@ -106,7 +106,7 @@ The options of `add`:
 | `--dns-domains` | The domains `split` sends there, subdomains included. `~corp.example` only routes lookups. A plain `corp.example` also completes short names, so `git` becomes `git.corp.example`. Quote a leading `~` in the shell. |
 | `--gateway` | The address ssh connects to first, when the plugin cannot work it out (`ProxyCommand`). |
 | `--probe` | `ADDRESS:PORT` (or `[IPV6]:PORT`) of a server on the far side that speaks first, such as an ssh server. The plugin connects to it every 10 s and restarts the tunnel after two failures in a row. Without it, a tunnel that is up but stuck is noticed only when sshuttle exits. |
-| `--method` | `nft` (the default) or `nat`. |
+| `--method` | `nft` (the default) or `nat`. `tproxy` also sends UDP through the tunnel, such as QUIC or a DNS server you query directly; it needs `iptables` installed. |
 | `--fail-closed` | `yes` (the default) blocks traffic to the tunnelled networks while the tunnel is down. `no` lets it go out on the local network. |
 | `--user` | Whose ssh configuration and agent to use. The default is you. |
 
@@ -210,7 +210,8 @@ Common causes:
 
 - One tunnel at a time.
 - TCP and DNS go through the tunnel; other UDP traffic, such as QUIC,
-  does not.
+  does so only with `--method tproxy`. A UDP flow that is silent for 30 s
+  starts afresh. `ping` never goes through: it is blocked.
 - DNS servers on the far side must have IPv4 addresses. If a split domain
   answers with IPv6 addresses, list those networks in `--subnets` too, or
   connections to them go around the tunnel.
