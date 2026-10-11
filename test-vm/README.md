@@ -42,6 +42,7 @@ block is lifted. Each scenario has an id `M2-NN`; its checks are `M2-NNx`.
 | M2-26 | the park-in-ip-config-get candidate (design §7): no early flip, and a kill in the gap drops NM's DNS entry |
 | M2-27 | the probe: the sshuttle server on the jump host is stopped, the probe fails twice and the plugin reconnects |
 | M2-28 | suspend and resume (only with `--suspend`) |
+| M2-29 | a ProxyJump host named inside `~corp.test`: resolved from the local network at connect, pinned to that address on the reconnect |
 | V6-01 | an IPv6 subnet through the tunnel, arriving from the jump host; refused at once in a gap ([IPv6](../docs/later/ipv6.md)) |
 | V6-02 | the uplink's IPv6 addresses change: a second address in the prefix is no network change, a new prefix restarts a tunnel whose first hop is IPv6, and not an IPv4 one |
 

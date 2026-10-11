@@ -6,7 +6,11 @@ Answers A queries for *.corp.test with 10.99.0.10, other types in corp.test
 with an empty NOERROR, and REFUSED for everything else. Logs every query so
 tests can see where it came from.
 
-usage: dns_server.py BIND_ADDRESS
+With NAME=ADDRESS arguments it answers A queries for exactly those names
+instead, and REFUSED for everything else: a resolver on the local network that
+knows a few names of the far side (test-vm M2-29).
+
+usage: dns_server.py BIND_ADDRESS [NAME=ADDRESS...]
 """
 import socket
 import struct
@@ -25,6 +29,7 @@ def parse_qname(data, off):
 
 
 def main():
+    fixed = dict(arg.split("=", 1) for arg in sys.argv[2:])
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.bind((sys.argv[1], 53))
     while True:
@@ -34,7 +39,17 @@ def main():
         qtype = struct.unpack("!H", data[off:off + 2])[0]
         question = data[12:off + 4]
         print(f"query from {peer[0]}: {name} type {qtype}", flush=True)
-        if name.endswith("corp.test") and qtype == 1:
+        if fixed:
+            if name in fixed and qtype == 1:
+                hdr = struct.pack("!HHHHHH", tid, 0x8180, 1, 1, 0, 0)
+                ans = (b"\xc0\x0c" + struct.pack("!HHIH", 1, 1, 60, 4)
+                       + socket.inet_aton(fixed[name]))
+                s.sendto(hdr + question + ans, peer)
+            elif name in fixed:
+                s.sendto(struct.pack("!HHHHHH", tid, 0x8180, 1, 0, 0, 0) + question, peer)
+            else:
+                s.sendto(struct.pack("!HHHHHH", tid, 0x8185, 1, 0, 0, 0) + question, peer)
+        elif name.endswith("corp.test") and qtype == 1:
             hdr = struct.pack("!HHHHHH", tid, 0x8180, 1, 1, 0, 0)
             ans = b"\xc0\x0c" + struct.pack("!HHIH", 1, 1, 60, 4) + ANSWER
             s.sendto(hdr + question + ans, peer)
