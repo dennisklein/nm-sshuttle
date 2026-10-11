@@ -1829,8 +1829,9 @@ Later, also propose a hook for an externally provided firewall helper
    - **The park candidate** (M2-26): NM stayed "activating" 4 s into a
      parked gap with no flip, and a kill in a parked gap left no VPN DNS
      entry, unlike M2-09. One run is not enough to turn it on by default.
-   The first CI run logged one SELinux denial that the second did not; its
-   record was not kept.
+   Some CI runs log one SELinux denial that others do not: Fedora's
+   `agetty` reading the console issue file NetworkManager's dispatcher
+   writes. It is not the plugin's, and M2-15 reports it as INFO.
    **Third VM run** (CI, 2026-10-11; 482 checks, no failure, no SELinux
    denial) added M2-29: with a ProxyJump host named inside `~corp.test`,
    the reconnect after a kill found the name unresolvable and came back
