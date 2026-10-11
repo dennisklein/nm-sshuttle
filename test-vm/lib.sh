@@ -20,12 +20,11 @@ jc() { journalctl --no-pager "$@"; }
 bc() { busctl --system --no-pager "$@"; }
 rv() { resolvectl --no-pager "$@"; }
 
-BUS=org.freedesktop.NetworkManager.sshuttle
-PLUGIN_UNIT=nm-sshuttle.service
-TUNNEL_UNIT=nm-sshuttle-tunnel.service
+FIXED_BUS=org.freedesktop.NetworkManager.sshuttle
 LIBEXEC=/usr/libexec/nm-sshuttle
-GUARD_TABLE=nm-sshuttle-guard
-LINK=nmss0
+STATE_DIR=/run/nm-sshuttle
+DISPATCHER_UNIT=nm-sshuttle-dispatcher.service
+PLUGIN_GLOB='nm-sshuttle@*.service'   # every plugin instance
 CON=nmtest-corp
 CON_ZONE=nmtest-corp-zone
 VARDIR=/var/lib/nmtest
@@ -49,16 +48,38 @@ HAVE_IPV6=no
 [ -e /proc/net/if_inet6 ] && HAVE_IPV6=yes
 CON6=nmtest-corp6
 CONTP=nmtest-corptp   # method=tproxy (docs/later/tproxy.md)
+# several tunnels (docs/later/multiple-tunnels.md): a lab network inside
+# 10.99.0.0/24 with its own DNS server and zone, and an sshd for it inside
+# the corporate network
+CONL=nmtest-lab
+CONX=nmtest-overlap
+LAB_WEB=10.99.0.20
+LAB_DNS=10.99.0.54
+LAB_JUMP=10.99.0.40
 UDP_PORT=7777         # UDP echo on $WEB_IP
-TPROXY_MARK=0x4e530000
-TPROXY_TABLE=20051
 LANB6_CON=nmtest-lanb6
 UPLINK=""
 BLOCK_TABLE=nmtest-block
 LANB_CON=nmtest-lanb
 LANB_IF=lb0
 BANNER_PORT=2222
-PARK_DROPIN=/run/systemd/system/nm-sshuttle.service.d/50-nmtest-park.conf
+PARK_DROPIN=/run/systemd/system/nm-sshuttle@.service.d/50-nmtest-park.conf
+
+# Each activation runs in a slot, and everything it creates is named after it
+# (docs/later/multiple-tunnels.md). The checks look at the current slot's
+# names; follow_slot moves them to the newest plugin instance.
+use_slot() {  # use_slot N
+    SLOT=$1
+    PLUGIN_UNIT=nm-sshuttle@$1.service
+    TUNNEL_UNIT=nm-sshuttle-tunnel@$1.service
+    GUARD_TABLE=nm-sshuttle-guard-$1
+    LINK=nmss$1
+    TPROXY_MARK=$(printf '0x%x' $(( 0x4e530000 + $1 )))
+    TPROXY_TABLE=$(( 20051 + $1 ))
+    BUS=$(cat "$STATE_DIR/$1/bus-name" 2> /dev/null)
+    [ -n "$BUS" ] || BUS=$FIXED_BUS
+}
+use_slot 0
 
 RESULTS=()
 NFAIL=0
@@ -136,11 +157,12 @@ diag_state() {
         rv default-route 2>&1
         echo "--- NM DnsManager (after nmcli general reload dns-rc)"
         dns_summary
-        echo "--- connection, device, link, guard, tunnel unit, plugin unit"
+        echo "--- connection, device, link, guard, tunnel unit, plugin unit (slot $SLOT, $BUS)"
         nmcli -f NAME,TYPE,DEVICE,STATE connection show --active 2>&1
         echo "$LINK device state: $(dev_state)  ifindex: $(link_ifindex)"
         echo "guard: $(guard_present && echo present || echo absent); tunnel: $(sc is-active "$TUNNEL_UNIT")" \
             "; plugin: $(sc is-active "$PLUGIN_UNIT") pid $(plugin_pid)"
+        echo "running plugin instances: $(running_slots | xargs)"
         echo "--- plugin journal tail"
         tail -n 3000 "$JOURNAL_LOG" | grep -E "$PLUGIN_LINE" | tail -n 30
     } > "$tmp" 2>&1
@@ -423,9 +445,10 @@ attempts_logged() { plog | grep -c 'reconnect attempt [0-9]* in'; }
 inhibitor_held() { systemd-inhibit --list --no-pager 2>&1 | grep -i 'nm-sshuttle'; }
 
 # ----------------------------------------------------------------- profiles
-profile_data() {  # profile_data [EXTRA-KEY=VALUE] ; REMOTE= and SUBNETS= override
-    printf 'remote = %s, local-user = %s, subnets = %s, dns = split, dns-servers = %s, dns-domains = ~corp.test%s' \
-        "${REMOTE:-$USER_NAME@$JUMP_IP}" "$USER_NAME" "${SUBNETS:-10.99.0.0/24}" "$DNS_IP" "${1:+, $1}"
+profile_data() {  # profile_data [EXTRA-KEY=VALUE] ; REMOTE=, SUBNETS=, DNS_SERVERS= and DOMAINS= override
+    printf 'remote = %s, local-user = %s, subnets = %s, dns = split, dns-servers = %s, dns-domains = %s%s' \
+        "${REMOTE:-$USER_NAME@$JUMP_IP}" "$USER_NAME" "${SUBNETS:-10.99.0.0/24}" \
+        "${DNS_SERVERS:-$DNS_IP}" "${DOMAINS:-~corp.test}" "${1:+, $1}"
 }
 # create_profile NAME [VPN-DATA-EXTRA [NMCLI-ARGS...]]  (design §4.2)
 create_profile() {
@@ -462,10 +485,23 @@ activate() {  # activate [CONNECTION] : nmcli up; 0 when it reached activated
         ACTIVATE_OUT=$(timeout 120 nmcli --wait 90 connection up "$con" 2>&1)
         printf '$ nmcli connection up %s (after NM restart)\n%s\n\n' "$con" "$ACTIVATE_OUT" >> "$REPORT/raw/activate.txt"
     fi
+    follow_slot
     [ "$(con_state "$con")" = activated ]
 }
 
 # ------------------------------------------------------------- plugin, logs
+running_slots() {  # slots whose plugin instance is starting or running
+    sc list-units --plain --no-legend --state=active,activating "$PLUGIN_GLOB" 2> /dev/null |
+        sed -n 's/^nm-sshuttle@\([0-7]\)\.service .*/\1/p'
+}
+follow_slot() {  # follow_slot : use the newest running instance's slot, if there is one
+    local n t best="" bt=-1
+    for n in $(running_slots); do
+        t=$(sc show -p InactiveExitTimestampMonotonic --value "nm-sshuttle@$n.service" 2> /dev/null)
+        [ "${t:-0}" -gt "$bt" ] && { bt=${t:-0}; best=$n; }
+    done
+    [ -z "$best" ] || use_slot "$best"
+}
 plugin_pid() { sc show -p MainPID --value "$PLUGIN_UNIT" 2> /dev/null; }
 dbus_call() { bc call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus "$@"; }
 # Liveness is GetNameOwner and the PID, never 'busctl status' (run 5's R4h-p).
@@ -500,7 +536,7 @@ log_mark() {
     LOGMARK=$(stat -c %s "$JOURNAL_LOG" 2> /dev/null || echo 0)
     MARK_EPOCH=$(date +%s)
 }
-plog() { journal_since_mark | grep -E "$PLUGIN_LINE"; }  # the plugin's journal since log_mark (or since the run began)
+plog() { journal_since_mark | grep -E "$PLUGIN_LINE"; }  # every plugin instance's journal since log_mark (or since the run began)
 plog_has() { plog | grep -q -F -- "$1"; }
 plog_has_not() { ! plog | grep -q -F -- "$1"; }
 # journald tells followers about new entries in batches, so a line shows up in
@@ -515,6 +551,10 @@ plog_show() {  # plog_show PATTERN : the matching lines (a check's evidence); fa
     journal_catch_up
     wait_for 2 plog_has "$1"
     plog | grep -F -- "$1" | tail -n 8 | grep .
+}
+alog() {  # the activation path since log_mark: NetworkManager on the VPN, the dispatcher, the bus
+    journal_since_mark | grep -E ' (NetworkManager|nm-sshuttle-dispatcher|dbus-broker[a-z-]*)\[[0-9]+\]: ' |
+        grep -i -e sshuttle -e vpn
 }
 # Python errors and the supervisor's own error paths, since log_mark
 plog_errors() {
@@ -643,10 +683,15 @@ tproxy_rule() { ip rule list 2> /dev/null | grep "fwmark $TPROXY_MARK lookup $TP
 tproxy_route() { ip route show table $TPROXY_TABLE 2> /dev/null | grep '^local default dev lo'; }
 tunnel_active() { [ "$(tunnel_state)" = active ]; }
 tunnel_gone() { case $(tunnel_state) in inactive|failed|unknown) return 0 ;; *) return 1 ;; esac; }
-all_clean() {  # no link, no guard, no tunnel unit, no stale sshuttle table
-    echo "link: $(link_exists && echo present || echo gone); guard: $(guard_present && echo present || echo gone);" \
-        "tunnel: $(tunnel_state); sshuttle tables: '$(sshuttle_tables | xargs)'"
-    link_gone && guard_gone && tunnel_gone && [ -z "$(sshuttle_tables)" ]
+# In every slot: links, guard tables, running tunnel units
+any_links() { ip -o link show 2> /dev/null | awk -F': ' '$2 ~ /^nmss[0-7](@|$)/ {sub(/@.*/, "", $2); print $2}'; }
+any_guards() { nft list tables 2> /dev/null | awk '$3 ~ /^nm-sshuttle-guard/ {print $3}'; }
+any_tunnels() { sc list-units --plain --no-legend --state=active,activating,deactivating 'nm-sshuttle-tunnel@*.service' 2> /dev/null | awk '{print $1}'; }
+any_tproxy_rules() { ip rule list 2> /dev/null | grep -E 'fwmark 0x4e53000[0-7] lookup 2005[1-8]'; }
+all_clean() {  # in no slot a link, a guard or a tunnel unit; no stale sshuttle table
+    echo "links: '$(any_links | xargs)'; guards: '$(any_guards | xargs)';" \
+        "tunnels: '$(any_tunnels | xargs)'; sshuttle tables: '$(sshuttle_tables | xargs)'"
+    [ -z "$(any_links)$(any_guards)$(any_tunnels)$(sshuttle_tables)" ]
 }
 fw_running() { command -v firewall-cmd > /dev/null && sc is-active --quiet firewalld; }
 fw_zone_of_link() { firewall-cmd --get-zone-of-interface="$LINK" 2>&1; }
@@ -701,11 +746,13 @@ recovery_checks() {
 }
 
 SIGMON_PID=""
+# By interface, not by sender: an activation's bus name is known only once it runs.
+SIGMATCH="type='signal',interface='org.freedesktop.NetworkManager.VPN.Plugin'"
 signals_start() {  # signals_start FILE : record the plugin's D-Bus signals
     if command -v stdbuf > /dev/null; then
-        stdbuf -oL busctl --system --no-pager monitor --match "sender=$BUS" > "$1" 2>&1 &
+        stdbuf -oL busctl --system --no-pager monitor --match "$SIGMATCH" > "$1" 2>&1 &
     else
-        busctl --system --no-pager monitor --match "sender=$BUS" > "$1" 2>&1 &
+        busctl --system --no-pager monitor --match "$SIGMATCH" > "$1" 2>&1 &
     fi
     SIGMON_PID=$!
     sleep 0.5
@@ -744,14 +791,29 @@ watch_teardown() {
 # ------------------------------------------------------------ reset, cleanup
 # Between scenarios: VPN down, plugin stopped, every leftover removed.
 leftovers() {
-    local l=""
-    link_exists && l="$l nmss0"
-    guard_present && l="$l guard"
-    tunnel_gone || l="$l tunnel-unit($(tunnel_state))"
+    local l="" x
+    for x in $(any_links) $(any_guards) $(any_tunnels); do l="$l $x"; done
     [ -z "$(sshuttle_tables)" ] || l="$l sshuttle-table"
     [ -z "$(mangle_chains)" ] || l="$l sshuttle-mangle-chain"
-    [ -z "$(tproxy_rule)$(tproxy_route)" ] || l="$l tproxy-routing"
+    [ -z "$(any_tproxy_rules)" ] || l="$l tproxy-routing"
     echo "${l# }"
+}
+remove_all() {  # stop every plugin instance and tunnel unit and remove what they left, in all slots
+    local x
+    sc stop "$PLUGIN_GLOB" 'nm-sshuttle-tunnel@*.service' > /dev/null 2>&1
+    sc reset-failed "$PLUGIN_GLOB" 'nm-sshuttle-tunnel@*.service' > /dev/null 2>&1
+    for x in $(any_links); do
+        fw_running && firewall-cmd --remove-interface="$x" > /dev/null 2>&1
+        ip link del "$x" 2> /dev/null
+    done
+    for x in $(any_guards); do nft delete table inet "$x" 2> /dev/null; done
+    for x in $(sshuttle_tables); do nft delete table inet "$x"; done
+    while read -r x; do
+        # shellcheck disable=SC2086  # the rule's words
+        [ -n "$x" ] && ip rule del ${x#*:} 2> /dev/null
+    done <<< "$(any_tproxy_rules)"
+    rm -f "$STATE_DIR"/[0-7]/claim.json
+    use_slot 0
 }
 clear_leaked_dns() {  # a leaked VPN DNS entry would spoil later DNS checks
     dns_snap
@@ -765,20 +827,14 @@ clear_leaked_dns() {  # a leaked VPN DNS entry would spoil later DNS checks
 reset_state() {
     local c left
     unblock_jump
-    for c in "$CON" "$CON_ZONE" "$CON6" "$CONTP"; do
+    for c in "$CON" "$CON_ZONE" "$CON6" "$CONTP" "$CONL" "$CONX"; do
         [ -n "$(con_state "$c")" ] && nmcli connection down "$c" > /dev/null 2>&1
     done
     wait_for 30 con_gone
     sleep 1
     left=$(leftovers)
-    [ -z "$left" ] || result "${SCENARIO:-M2-00}-L" INFO "left over from the previous scenario, now removed:$left"
-    sc stop "$PLUGIN_UNIT" "$TUNNEL_UNIT" > /dev/null 2>&1
-    sc reset-failed "$PLUGIN_UNIT" "$TUNNEL_UNIT" > /dev/null 2>&1
-    ip link del "$LINK" 2> /dev/null
-    nft delete table inet "$GUARD_TABLE" 2> /dev/null
-    local t
-    for t in $(sshuttle_tables); do nft delete table inet "$t"; done
-    fw_running && firewall-cmd --remove-interface="$LINK" > /dev/null 2>&1
+    [ -z "$left" ] || result "${SCENARIO:-M2-00}-L" INFO "left over from the previous scenario, now removed: $left"
+    remove_all
     return 0
 }
 
@@ -800,9 +856,11 @@ cleanup() {
     nmcli connection down "$CON_ZONE" > /dev/null 2>&1
     nmcli connection down "$CON6" > /dev/null 2>&1
     nmcli connection down "$CONTP" > /dev/null 2>&1
-    nmcli connection delete "$CON" "$CON_ZONE" "$CON6" "$CONTP" > /dev/null 2>&1
-    sc stop "$PLUGIN_UNIT" "$TUNNEL_UNIT" > /dev/null 2>&1
-    sc stop nmtest-sshd nmtest-dns nmtest-web nmtest-web6 nmtest-dns-local nmtest-udp > /dev/null 2>&1
+    nmcli connection down "$CONL" > /dev/null 2>&1
+    nmcli connection delete "$CON" "$CON_ZONE" "$CON6" "$CONTP" "$CONL" "$CONX" > /dev/null 2>&1
+    remove_all
+    sc stop nmtest-sshd nmtest-dns nmtest-web nmtest-web6 nmtest-dns-local nmtest-udp \
+        nmtest-sshd2 nmtest-dns2 nmtest-web2 > /dev/null 2>&1
     rv revert h-j > /dev/null 2>&1
     if [ -f "$VARDIR/ssh-config-written" ]; then
         rm -f "$HOME_U/.ssh/config" "$VARDIR/ssh-config-written"
@@ -814,10 +872,7 @@ cleanup() {
     rm -f "$NM_TEST_CONF"
     nmcli general reload conf > /dev/null 2>&1
     [ -f "$VARDIR/firewalld-stopped" ] && sc start firewalld
-    ip link del "$LINK" 2> /dev/null
-    nft delete table inet "$GUARD_TABLE" 2> /dev/null
     local t
-    for t in $(sshuttle_tables); do nft delete table inet "$t"; done
     ip link del h-j 2> /dev/null
     keys_on
     if [ -f "$VARDIR/never-default" ] && [ -n "$UPLINK" ]; then
@@ -836,6 +891,7 @@ cleanup() {
         rm -f "$HOME_U"/.ssh/nmtest_auto*
         as_user ssh-keygen -R "$JUMP_IP" > /dev/null 2>&1
         as_user ssh-keygen -R "$JUMP_IP6" > /dev/null 2>&1
+        as_user ssh-keygen -R "$LAB_JUMP" > /dev/null 2>&1
     fi
     if [ -f "$VARDIR/started-agent" ]; then
         as_user systemctl --user --no-pager stop nmtest-agent 2> /dev/null

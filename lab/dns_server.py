@@ -2,21 +2,20 @@
 # SPDX-License-Identifier: MIT
 """Tiny DNS responder for the lab.
 
-Answers A queries for *.corp.test with 10.99.0.10, other types in corp.test
-with an empty NOERROR, and REFUSED for everything else. Logs every query so
-tests can see where it came from.
+Answers A queries for *.ZONE with ADDRESS, other types in ZONE with an empty
+NOERROR, and REFUSED for everything else. Logs every query so tests can see
+where it came from.
 
 With NAME=ADDRESS arguments it answers A queries for exactly those names
 instead, and REFUSED for everything else: a resolver on the local network that
 knows a few names of the far side (test-vm M2-29).
 
-usage: dns_server.py BIND_ADDRESS [NAME=ADDRESS...]
+usage: dns_server.py BIND_ADDRESS [ZONE [ADDRESS]]   (corp.test, 10.99.0.10)
+       dns_server.py BIND_ADDRESS NAME=ADDRESS...
 """
 import socket
 import struct
 import sys
-
-ANSWER = socket.inet_aton("10.99.0.10")
 
 
 def parse_qname(data, off):
@@ -29,7 +28,10 @@ def parse_qname(data, off):
 
 
 def main():
-    fixed = dict(arg.split("=", 1) for arg in sys.argv[2:])
+    args = sys.argv[2:]
+    fixed = dict(arg.split("=", 1) for arg in args if "=" in arg)
+    zone = args[0] if args and not fixed else "corp.test"
+    answer = socket.inet_aton(args[1] if len(args) > 1 and not fixed else "10.99.0.10")
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.bind((sys.argv[1], 53))
     while True:
@@ -49,11 +51,11 @@ def main():
                 s.sendto(struct.pack("!HHHHHH", tid, 0x8180, 1, 0, 0, 0) + question, peer)
             else:
                 s.sendto(struct.pack("!HHHHHH", tid, 0x8185, 1, 0, 0, 0) + question, peer)
-        elif name.endswith("corp.test") and qtype == 1:
+        elif name.endswith(zone) and qtype == 1:
             hdr = struct.pack("!HHHHHH", tid, 0x8180, 1, 1, 0, 0)
-            ans = b"\xc0\x0c" + struct.pack("!HHIH", 1, 1, 60, 4) + ANSWER
+            ans = b"\xc0\x0c" + struct.pack("!HHIH", 1, 1, 60, 4) + answer
             s.sendto(hdr + question + ans, peer)
-        elif name.endswith("corp.test"):
+        elif name.endswith(zone):
             # other types in the zone: NOERROR without answers, like a real server
             hdr = struct.pack("!HHHHHH", tid, 0x8180, 1, 0, 0, 0)
             s.sendto(hdr + question, peer)
