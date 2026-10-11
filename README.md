@@ -17,8 +17,8 @@ the lock screen and the fail-closed guard. The profile commands are on PATH,
 RPM packages (Fedora 43, 44) and deb packages (Debian 13, Ubuntu 26.04) are
 built in CI, and the VM tests run in CI too. The
 [user guide](docs/user-guide.md) covers installing, creating a profile and
-troubleshooting. Still open from M2 are the checks CI cannot run: suspend,
-GNOME by hand, and DNS without systemd-resolved (design §7).
+troubleshooting. Suspend and the GNOME checks passed by hand on a Fedora 44
+notebook; still open from M2 is DNS without systemd-resolved (design §7).
 
 ```console
 $ nm-sshuttle add corp --remote corp --subnets 10.0.0.0/8 \
