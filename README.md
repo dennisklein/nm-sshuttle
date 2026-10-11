@@ -38,6 +38,14 @@ $ sudo dnf install https://dennisklein.github.io/nm-sshuttle/nm-sshuttle-release
 $ sudo dnf install nm-sshuttle nm-sshuttle-gnome
 ```
 
+Packages and repository metadata are signed with this key
+([`RPM-GPG-KEY-nm-sshuttle`](packaging/nm-sshuttle-release/RPM-GPG-KEY-nm-sshuttle)),
+fingerprint:
+
+```
+62D4 5023 2396 EDB4 9BFF 8E71 109A 2C1B D34D 4A1C
+```
+
 `nm-sshuttle-gnome` adds sshuttle to GNOME Settings' VPN list; leave it out
 to use the command line only. Restart Settings afterwards (log out, or
 `pkill gnome-control-center`).
