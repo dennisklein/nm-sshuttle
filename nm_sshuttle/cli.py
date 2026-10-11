@@ -30,7 +30,7 @@ import re
 import subprocess
 import sys
 
-from . import guard, profile, tunnel
+from . import claims, guard, profile, tunnel
 from .const import (SERVICE_TYPE, SLOTS, V1_GUARD_TABLE, V1_PLUGIN_UNIT, V1_TUNNEL_SPEC,
                     V1_TUNNEL_UNIT, Slot, slot_number)
 
@@ -76,6 +76,7 @@ def cleanup_slot(n):
         ok &= guard.remove_guard(slot.guard_table)
     ok &= guard.remove_policy_routing(n)
     _remove(slot.spec)
+    claims.release(n)
     return ok
 
 
@@ -262,6 +263,23 @@ def ssh_g_as_self(_user, target):
     return p.stdout
 
 
+def active_conflict(uuid, prof, hops, nmcli, ssh_g):
+    """Whether prof would conflict with the nm-sshuttle VPNs active now (the
+    ones this user can see), as the plugin would refuse it."""
+    others = []
+    for other in active_sshuttle_vpns(nmcli):
+        if other == uuid:
+            continue
+        try:
+            o = profile.parse(read_settings(other, nmcli), lambda n: pwd.getpwnam(n))
+            o_hops = [o.gateway] if o.gateway else tunnel.first_hop(o.user, o.remote, ssh_g)
+        except (profile.ProfileError, OSError, ValueError, RuntimeError,
+                subprocess.TimeoutExpired):
+            continue
+        others.append(claims.make_claim(o, o_hops))
+    return claims.conflict(claims.make_claim(prof, hops), others)
+
+
 def check(args, nmcli=nmcli_run, ssh_g=ssh_g_as_self, run=subprocess.run,
           iptables_available=None):
     """Check a profile as the user it belongs to (design §4.2, §4.3).
@@ -292,12 +310,19 @@ def check(args, nmcli=nmcli_run, ssh_g=ssh_g_as_self, run=subprocess.run,
         return 1
     try:
         if prof.gateway:
+            hops = [prof.gateway]
             print(f"ok   ssh -G skipped; gateway is {prof.gateway}")
         else:
             hops = tunnel.first_hop(prof.user, prof.remote, ssh_g)
             print(f"ok   ssh -G; first hop {', '.join(hops)}")
     except (OSError, ValueError, subprocess.TimeoutExpired) as e:
         print(f"FAIL ssh -G: {e}")
+        return 1
+    # The plugin refuses a profile that conflicts with an active one, and GNOME
+    # only shows "Connection failed" (docs/later/multiple-tunnels.md).
+    why = active_conflict(uuid, prof, hops, nmcli, ssh_g)
+    if why:
+        print(f"FAIL {why}")
         return 1
     # Not BatchMode: this is where the host key gets accepted once.
     p = run(["ssh", "-o", "ConnectTimeout=15", "--", prof.remote, "true"])
@@ -309,9 +334,11 @@ def check(args, nmcli=nmcli_run, ssh_g=ssh_g_as_self, run=subprocess.run,
 
 
 def list_profiles(nmcli=nmcli_run, out=print):
+    active = set(active_sshuttle_vpns(nmcli))
     for uuid, name in profile_connections(nmcli):
         data = parse_vpn_data(show_field(nmcli, "vpn.data", uuid))
-        out(f"{name}\t{data.get('remote', '?')}\t{data.get('subnets', '?')}")
+        line = f"{name}\t{data.get('remote', '?')}\t{data.get('subnets', '?')}"
+        out(line + ("\tactive" if uuid in active else ""))
     return 0
 
 

@@ -63,6 +63,9 @@ class FakeEffects:
         self.routing = None           # families with tproxy policy routing, or None
         self.health_methods = []
         self.slot = Slot(0)
+        self.claims = []              # claims taken, in order
+        self.conflict = None          # what take_claim answers
+        self.released = 0
 
     # recording helpers
     def _rec(self, *event):
@@ -187,6 +190,15 @@ class FakeEffects:
     def install_guard(self, networks, exclude, mark=None):
         self._rec("install_guard", list(networks), list(exclude))
         self.guard_mark = mark
+
+    # claims: not events, so that event sequences stay as without them
+    def take_claim(self, claim):
+        if self.conflict is None:
+            self.claims.append(claim)
+        return self.conflict
+
+    def release_claim(self):
+        self.released += 1
 
     def install_policy_routing(self, families):
         self._rec("install_routing", list(families))

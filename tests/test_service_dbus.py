@@ -346,6 +346,8 @@ def world(bus, monkeypatch, tmp_path):
     monkeypatch.setattr(tunnel, "nft_health",
                         lambda method, table, ports=None: {"guard": True, "sshuttle": {4, 6}})
     monkeypatch.setattr(tunnel, "unit_ports", lambda unit: None)
+    monkeypatch.setattr(service.Service, "take_claim", lambda self, claim: None)
+    monkeypatch.setattr(service.Service, "release_claim", lambda self: None)
     monkeypatch.setattr(tunnel, "ipv6_available", lambda: True)
     monkeypatch.setattr(service.pwd, "getpwnam", fake_getpwnam)
     monkeypatch.setattr(service.Service, "run_cleanup", lambda self, done: done())

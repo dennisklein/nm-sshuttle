@@ -33,12 +33,13 @@ def terse(value):
 class Nmcli:
     """Records `connection add`/`delete`; answers queries from a table, escaped
     as `nmcli -g` escapes them."""
-    def __init__(self, conns=None):
-        self.conns, self.calls = conns or {}, []
+    def __init__(self, conns=None, active=()):
+        self.conns, self.calls, self.active = conns or {}, [], set(active)
 
     def __call__(self, *args):
         if args[:3] == ("-g", "UUID,TYPE", "connection"):
-            return "".join(f"{u}:vpn\n" for u in self.conns)
+            shown = self.active if "--active" in args else self.conns
+            return "".join(f"{u}:vpn\n" for u in self.conns if u in shown)
         if args[0] == "-g" and args[2:4] == ("connection", "show"):
             return terse(self.conns[args[4]].get(args[1], "")) + "\n"
         self.calls.append(args)

@@ -27,6 +27,7 @@ import functools
 import logging
 import traceback
 
+from . import claims
 from . import profile as profile_mod
 from .const import (AC_ACTIVATED, AC_ACTIVATING, AC_DEACTIVATED, AC_DEACTIVATING,
                     AC_NAMES, AC_UNKNOWN, CONN_PORTAL, DEVICE_UNMANAGED, FAIL_CONNECT,
@@ -121,6 +122,7 @@ class Supervisor:
         self.last_config = None
         self.guard_installed = False
         self.routing_installed = False  # method=tproxy (docs/later/tproxy.md)
+        self.claimed = False           # claim.json written (docs/later/multiple-tunnels.md)
         self.activated_once = False
         self.link_managed = None       # result of the unmanaged check (design §4.1)
         self.stopped_sent = False
@@ -161,6 +163,7 @@ class Supervisor:
         self.state = state
         if state == ST_STOPPED:
             self.stopped_sent = True
+            self._release_claim()
         self.fx.emit_state(state)
 
     def _timer(self, name, seconds, fn, *args):
@@ -235,6 +238,7 @@ class Supervisor:
     def _quit_now(self):
         if self.phase == "exited":
             return
+        self._release_claim()
         self._cancel_all()
         self.phase = "exited"
         self.fx.release_sleep()
@@ -267,6 +271,19 @@ class Supervisor:
             # Same address, dns and domains: NM keeps whichever it commits (design §2.1).
             cfg["nbns"] = [NBNS_SENTINEL]
         return cfg
+
+    def _take_claim(self):
+        """Check this activation against the other active profiles and claim
+        its networks, DNS and first hop; the conflict, or None."""
+        why = self.fx.take_claim(claims.make_claim(self.profile, self.hops))
+        if why is None:
+            self.claimed = True
+        return why
+
+    def _release_claim(self):
+        if self.claimed:
+            self.claimed = False
+            self.fx.release_claim()
 
     def _install_guard(self):
         mark = self.slot.tproxy_mark if self.profile.method == "tproxy" else None
@@ -480,6 +497,13 @@ class Supervisor:
                                 self._callback(self._leftover_device, self.activation_id))
             return
         self.stale_device = stale_device
+        try:
+            why = self._take_claim()
+        except (OSError, ValueError) as e:
+            why = f"cannot check the other active profiles: {e}"
+        if why:
+            self.give_up(FAIL_CONNECT, why)
+            return
         try:
             self.fx.sweep()
             self.ifindex = self.fx.create_link()
@@ -836,6 +860,14 @@ class Supervisor:
         elif list(addrs) != self.hops:
             log.info("the first hop is now %s (was %s)", ", ".join(addrs), ", ".join(self.hops))
             self._set_hops(addrs)
+            try:
+                # A new first hop may now run over another tunnel in a loop.
+                why = self._take_claim()
+            except (OSError, ValueError) as e:
+                why = f"cannot check the other active profiles: {e}"
+            if why:
+                self.give_up(FAIL_CONNECT, why)
+                return
             try:
                 if self.profile.fail_closed:
                     self._install_guard()

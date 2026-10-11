@@ -27,6 +27,7 @@ subst.set('PYTHON', python.full_path())
 python.install_sources(
   'nm_sshuttle/__init__.py',
   'nm_sshuttle/__main__.py',
+  'nm_sshuttle/claims.py',
   'nm_sshuttle/cli.py',
   'nm_sshuttle/const.py',
   'nm_sshuttle/dispatcher.py',
