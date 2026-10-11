@@ -2,6 +2,7 @@
 """sshuttle side: the tunnel unit's ExecStart, the ssh bridge, the first hop
 and the sweep of stale sshuttle tables (design §2.2, §4.3, §4.7)."""
 
+import ipaddress
 import json
 import logging
 import os
@@ -12,8 +13,9 @@ import socket
 import stat
 import subprocess
 import sys
+import threading
 
-from .const import GUARD_TABLE, LIBEXEC, TUNNEL_SPEC
+from .const import GUARD_TABLE, LIBEXEC, SSH_CONFIG, TUNNEL_SPEC
 from .profile import collapse, family
 
 log = logging.getLogger("nm-sshuttle")
@@ -26,10 +28,13 @@ SEARCH_PATH = "/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin"
 AUTH_MARKERS = ("Permission denied", "Host key verification failed",
                 "agent refused operation")
 SSHUTTLE_TABLE_RE = re.compile(r"^sshuttle-ipv([46])-(\d+)$")
+# What may go into the generated ssh config unquoted.
+SSH_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
-def bridge_command(user):
-    return f"{os.path.join(LIBEXEC, 'nm-sshuttle')} ssh-as-user {user}"
+def bridge_command(user, ssh_config=None):
+    cmd = f"{os.path.join(LIBEXEC, 'nm-sshuttle')} ssh-as-user {user}"
+    return f"{cmd} -F {ssh_config}" if ssh_config else cmd
 
 
 def first_hops(spec):
@@ -39,8 +44,9 @@ def first_hops(spec):
     return [hops] if isinstance(hops, str) else list(hops)
 
 
-def sshuttle_argv(spec, sshuttle):
-    """sshuttle's command line for a tunnel spec written by the plugin.
+def sshuttle_argv(spec, sshuttle, ssh_config=None):
+    """sshuttle's command line for a tunnel spec written by the plugin; ssh
+    reads ssh_config instead of the usual files when it is given.
 
     Without spec["ipv6"] sshuttle runs with --disable-ipv6 and gets no IPv6
     network at all, which it would only drop with a warning; the guard still
@@ -56,7 +62,7 @@ def sshuttle_argv(spec, sshuttle):
     argv += ["-r", spec["remote"]]
     for net in wanted(first_hops(spec) + list(spec.get("exclude", []))):
         argv += ["-x", net]
-    argv += ["-e", bridge_command(spec["user"])]
+    argv += ["-e", bridge_command(spec["user"], ssh_config)]
     servers = spec.get("dns_servers") or []
     if spec.get("dns", "none") != "none" and servers:
         # --to-ns pins the remote resolver and avoids the crash of lab T9.
@@ -87,7 +93,13 @@ def exec_tunnel():
     if not sshuttle:
         print("exec-tunnel: sshuttle not found", file=sys.stderr)
         return 1
-    argv = sshuttle_argv(spec, sshuttle)
+    ssh_config = None
+    text = pinned_ssh_config(spec)
+    if text:
+        ssh_config = write_ssh_config(text)
+        print(f"exec-tunnel: the first hop's name does not resolve; ssh gets its address "
+              f"from connect through {ssh_config}", file=sys.stderr, flush=True)
+    argv = sshuttle_argv(spec, sshuttle, ssh_config)
     print("exec-tunnel: exec " + " ".join(argv), file=sys.stderr, flush=True)
     os.execv(sshuttle, argv)
 
@@ -181,23 +193,34 @@ def ssh_g(user, target):
     return p.stdout
 
 
-def first_hop(user, remote, ssh_g=ssh_g, getaddrinfo=socket.getaddrinfo):
-    """Every address of the first hop, worked out as the user (design §2.2).
+def first_hop_config(user, remote, ssh_g=ssh_g):
+    """(name, settings): the first hop as ssh is given it, and its 'ssh -G'
+    settings, worked out as the user.
 
     A ProxyJump host may itself be an alias from the user's config, and may have
-    a ProxyJump of its own, so follow the chain with 'ssh -G' as the user. ssh
-    connects to whichever of the name's addresses works first, of either family,
-    so all of them are returned (docs/later/ipv6.md)."""
+    a ProxyJump of its own, so follow the chain."""
     target = remote
     for _ in range(5):
         if target.startswith("-"):
             raise ValueError(f"unusable ssh destination {target!r}")
-        hostname, jump = parse_ssh_g(ssh_g(user, target))
+        out = ssh_g(user, target)
+        _, jump = parse_ssh_g(out)
         if not jump:
-            break
+            settings = {}
+            for line in out.splitlines():
+                key, _, value = line.partition(" ")
+                settings.setdefault(key, value)
+            return target, settings
         target = jump
-    else:
-        raise ValueError("too many nested ProxyJump hosts; set 'gateway' in the profile")
+    raise ValueError("too many nested ProxyJump hosts; set 'gateway' in the profile")
+
+
+def first_hop(user, remote, ssh_g=ssh_g, getaddrinfo=socket.getaddrinfo):
+    """Every address of the first hop, worked out as the user (design §2.2).
+
+    ssh connects to whichever of the name's addresses works first, of either
+    family, so all of them are returned (docs/later/ipv6.md)."""
+    hostname = first_hop_config(user, remote, ssh_g)[1]["hostname"]
     addrs = []
     for *_, sockaddr in getaddrinfo(hostname, 22, socket.AF_UNSPEC, socket.SOCK_STREAM):
         addr = sockaddr[0].split("%", 1)[0]       # no scope id: it is no network
@@ -206,6 +229,73 @@ def first_hop(user, remote, ssh_g=ssh_g, getaddrinfo=socket.getaddrinfo):
     if not addrs:
         raise ValueError(f"{hostname} has no address")
     return addrs
+
+
+def resolves(name, timeout=5.0, getaddrinfo=socket.getaddrinfo):
+    """Whether name resolves within timeout seconds."""
+    found = []
+
+    def look():
+        try:
+            found.append(bool(getaddrinfo(name, 22, socket.AF_UNSPEC, socket.SOCK_STREAM)))
+        except OSError:
+            found.append(False)
+    t = threading.Thread(target=look, daemon=True)
+    t.start()
+    t.join(timeout)
+    return bool(found and found[0])
+
+
+def pinned_ssh_config(spec, ssh_g=ssh_g, resolves=resolves, getpwnam=pwd.getpwnam):
+    """An ssh config that gives ssh the first hop's address, or None.
+
+    The first hop's name may lie in a domain that the tunnel's own DNS answers,
+    such as a bastion inside ~corp.example. During a reconnect that DNS is down,
+    so ssh cannot look the name up. The address looked up at connect still
+    works: pin it, and read the user's and the system's config after it, as ssh
+    would (design §4.3). When the name resolves, ssh runs as usual."""
+    if spec.get("dns", "none") == "none" or not first_hops(spec):
+        return None
+    try:
+        name, settings = first_hop_config(spec["user"], spec["remote"], ssh_g)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+    hostname = settings.get("hostname", "")
+    try:
+        ipaddress.ip_address(hostname)
+        return None
+    except ValueError:
+        pass
+    keyalias = settings.get("hostkeyalias", hostname)
+    if not all(SSH_NAME_RE.match(n) for n in (name, hostname, keyalias)):
+        return None
+    if resolves(hostname):
+        return None
+    home = getpwnam(spec["user"]).pw_dir
+    hops = first_hops(spec)
+    # One address only: IPv4 when there is one, which every uplink can reach.
+    addr = next((a for a in hops if family(a) == 4), hops[0])
+    return (f"# Written by nm-sshuttle: {hostname} did not resolve when the tunnel\n"
+            f"# started, so ssh gets the address looked up at connect.\n"
+            f"Host {name}\n"
+            f"    HostName {addr}\n"
+            f"    HostKeyAlias {keyalias}\n\n"
+            f"Match all\n"
+            f"Include {home}/.ssh/config\n"
+            f"Include /etc/ssh/ssh_config\n")
+
+
+def write_ssh_config(text, path=SSH_CONFIG):
+    """Write it where ssh, running as the user, can read it, whatever the umask."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    os.chmod(os.path.dirname(path), 0o755)
+    tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
+    os.fchmod(fd, 0o644)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    os.replace(tmp, path)
+    return path
 
 
 # ------------------------------------------------------------------ sweep

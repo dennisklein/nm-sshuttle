@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: MIT
 import socket
 import subprocess
+import time
+from types import SimpleNamespace
 
 from nm_sshuttle import tunnel
 
@@ -127,6 +129,69 @@ def test_first_hop_gives_up_on_a_loop_and_on_option_like_hosts():
         tunnel.first_hop("u", "a", ssh_g=lambda u, t: "hostname x\nproxyjump a\n")
     with pytest.raises(ValueError, match="unusable"):
         tunnel.first_hop("u", "a", ssh_g=lambda u, t: "hostname x\nproxyjump -oFoo=bar\n")
+
+
+BASTION = {"corp": "hostname gw.corp.example\nproxyjump bastion\n",
+           "bastion": "user alice\nhostname bastion.corp.example\nproxyjump none\n"}
+
+
+def pinned(spec=SPEC, config=BASTION, resolves=lambda name: False):
+    return tunnel.pinned_ssh_config(spec, lambda u, t: config[t], resolves,
+                                    lambda u: SimpleNamespace(pw_dir="/home/alice"))
+
+
+def test_a_first_hop_that_does_not_resolve_gets_its_address_from_connect():
+    looked_up = []
+    text = pinned(resolves=lambda name: looked_up.append(name))
+    assert looked_up == ["bastion.corp.example"]
+    assert ("Host bastion\n    HostName 203.0.113.7\n    HostKeyAlias bastion.corp.example\n"
+            "\nMatch all\nInclude /home/alice/.ssh/config\nInclude /etc/ssh/ssh_config\n") in text
+
+
+def test_no_pin_when_the_first_hop_resolves_or_cannot_be_shadowed():
+    assert pinned(resolves=lambda name: True) is None
+    assert pinned(dict(SPEC, dns="none")) is None
+    assert pinned(config={"corp": "hostname 192.0.2.9\nproxyjump none\n"}) is None
+    assert pinned(config={"corp": "hostname gw\nproxycommand nc %h %p\n"}) is None
+
+    def ssh_g_fails(u, t):
+        raise ValueError("ssh -G corp failed")
+    assert tunnel.pinned_ssh_config(SPEC, ssh_g_fails, lambda name: False) is None
+    assert pinned(config={"corp": "hostname a%h\nproxyjump none\n"}) is None
+
+
+def test_a_pin_prefers_an_ipv4_address():
+    text = pinned(dict(SPEC, first_hop=["2001:db8::7", "203.0.113.7"]))
+    assert "    HostName 203.0.113.7\n" in text
+    assert "    HostName 2001:db8::7\n" in pinned(dict(SPEC, first_hop=["2001:db8::7"]))
+
+
+def test_a_pin_keeps_the_users_host_key_alias():
+    text = pinned(config={"corp": "hostname gw.corp.example\nhostkeyalias gw-key\n"
+                                  "proxyjump none\n"})
+    assert "Host corp\n    HostName 203.0.113.7\n    HostKeyAlias gw-key\n" in text
+
+
+def test_the_pinned_config_goes_to_ssh(tmp_path):
+    path = tunnel.write_ssh_config("Host x\n", str(tmp_path / "ssh" / "ssh_config"))
+    assert open(path).read() == "Host x\n"
+    assert (tmp_path / "ssh" / "ssh_config").stat().st_mode & 0o777 == 0o644
+    argv = tunnel.sshuttle_argv(SPEC, "sshuttle", path)
+    assert argv[argv.index("-e") + 1].endswith(f"/nm-sshuttle ssh-as-user alice -F {path}")
+
+
+def test_resolves():
+    assert tunnel.resolves("a", getaddrinfo=lambda *a: [("x",)])
+    assert not tunnel.resolves("a", getaddrinfo=lambda *a: [])
+
+    def fails(*a):
+        raise socket.gaierror(-3, "Temporary failure in name resolution")
+    assert not tunnel.resolves("a", getaddrinfo=fails)
+
+    def hangs(*a):
+        time.sleep(1)
+        return [("x",)]
+    assert not tunnel.resolves("a", timeout=0.05, getaddrinfo=hangs)
 
 
 def test_classify_failure():

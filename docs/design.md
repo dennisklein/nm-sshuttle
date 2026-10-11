@@ -910,6 +910,35 @@ user's config for this connection only:
   from hiding the tunnel's liveness.
 - `BatchMode=yes` means ssh itself never prompts.
 
+**The first hop's name during a reconnect.** A jump host is often named
+inside the domain that the tunnel's DNS answers (`bastion.corp.example`
+under `~corp.example`). During a reconnect that DNS is down, so ssh cannot
+look the name up and every attempt fails at once (seen on a notebook:
+"Could not resolve hostname"). The first connect is not affected:
+`nmss0` has no DNS yet. So `exec-tunnel` checks whether the first hop's
+name resolves, in at most 5 s, when the profile sends DNS through the
+tunnel. If it does not, it writes `/run/nm-sshuttle-ssh/ssh_config` and
+the bridge runs ssh with `-F` on it:
+
+```
+Host bastion
+    HostName 203.0.113.7
+    HostKeyAlias bastion.corp.example
+
+Match all
+Include /home/alice/.ssh/config
+Include /etc/ssh/ssh_config
+```
+
+- The address is the one looked up at connect. ssh passes `-F` on to its
+  `ProxyJump` commands **[src]**, so the pin applies whichever hop needs it.
+- `HostKeyAlias` keeps the `known_hosts` lookup on the name, or on the
+  user's own alias if the config sets one.
+- Caveat: a `Match host` block in the user's config sees the address, not
+  the name, while the pin is in use.
+- When the name resolves, ssh runs as before, with the user's config only.
+  VM test M2-29 covers it.
+
 **How a key gets unlocked.** Unlocking happens in the agent: gcr-ssh-agent
 prompts in the session when a key is first used. With plain `ssh-agent`,
 the user runs `ssh-add` once, or the system relies on `AddKeysToAgent` from
