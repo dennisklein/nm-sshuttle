@@ -2,7 +2,7 @@
 
 The [design](../design.md)'s roadmap (§7) ends with work left out of v1.
 Each item has a design here. They build on the architecture of §4 and
-change nothing in it unless they say so. Implemented: IPv6.
+change nothing in it unless they say so. Implemented: IPv6 and the GNOME editor.
 
 | Design | What it adds | Size |
 |---|---|---|

@@ -32,6 +32,10 @@ $ nmcli connection up corp         # or the VPN toggle in Quick Settings
   watchers, the guard table and `nmss0`, and the commands the systemd units
   and users run. [`data/`](data) holds the files it installs, among them
   the NetworkManager `conf.d` snippet that keeps `nmss0` unmanaged.
+- [`gnome/`](gnome) is the editor for GNOME Settings (C, GTK4): "Add VPN"
+  offers sshuttle and the Identity tab edits every profile key. It is its
+  own package, `nm-sshuttle-gnome`. Its validation reads the same
+  [test cases](tests/profile-cases.json) as the plugin's.
 - [`packaging/rpm/`](packaging/rpm) and [`debian/`](debian) build the
   Fedora and Debian/Ubuntu packages.
 - [`docs/design.md`](docs/design.md) is the design: the research findings,
@@ -56,6 +60,11 @@ $ sudo meson install -C build
 $ sudo nm-sshuttle post-install
 $ test-vm/vm.sh                     # on a Fedora 44 host with KVM; see test-vm/README.md
 ```
+
+The editor for GNOME Settings is built when `libnm` and GTK4 are installed
+with their development files (`-Dgnome-editor=enabled` requires them). Its
+form is tested under a virtual display:
+`xvfb-run -a meson test -C build --suite gnome-editor`.
 
 `post-install` reloads NetworkManager's configuration so that `nmss0` is
 unmanaged, unless an nm-sshuttle VPN is active; then the setting takes

@@ -1,7 +1,10 @@
 # GTK4 editor plugin for GNOME Settings
 
-Status: design, not implemented. One of the "Later" items of the
-[design](../design.md) (§7); the index is in [README.md](README.md).
+Status: implemented in `gnome/`, with the changes listed under
+"Differences from the design" at the end, and checked by the unit tests and a
+form test under Xvfb. The checks in GNOME Settings itself (§Tests, "VM, by
+hand") are still open. One of the "Later" items of the [design](../design.md)
+(§7); the index is in [README.md](README.md).
 
 v1 has no editor plugin (§1, option B in §3). Profiles come from `nm-sshuttle
 add`; GNOME Settings lists them with a switch and a gear button, but its
@@ -160,17 +163,20 @@ It refuses, with a message that becomes Apply's tooltip:
 What it cannot hold:
 
 - **`ipv4.method`.** The IPv4 page writes it *after* the VPN page has
-  validated. A change to "Manual" or "Disabled" therefore passes the
-  editor's check on that change, and is caught only at the next one.
-  Apply may stay sensitive for that one change. The plugin's own check at
-  `Connect` and `nm-sshuttle check` (§4.2) still catch it, with a message
-  that names the field.
+  validated, so the editor judges the method as it was one validation ago.
+  Left alone, the verdict would lag: Apply stayed unavailable after the
+  method went back to "Automatic" (found with the laptop protocol, 7.6).
+  The editor therefore asks Settings for one more validation (the
+  `changed` signal, from an idle handler) whenever the method it finds has
+  changed since the last time. The plugin's own check at `Connect` and
+  `nm-sshuttle check` (§4.2) still catch it, with a message that names the
+  field.
 - **`ipv4.never-default`.** The IPv4 page writes it from its "Use this
   connection only for resources on its network" switch, which is off for
   a new profile. The plugin does not depend on it: `split` needs domains,
   which keep resolved's default route off `nmss0`, and `all` sets `~.`
-  on purpose (§2.1, §4.1). The editor's hint text tells the user to
-  switch it on; `check` reports it as a warning.
+  on purpose (§2.1, §4.1). The editor's note at the top of the form tells
+  the user to switch it on; `check` reports it as a warning.
 - **Addresses, routes and DNS on the IPv4 and IPv6 pages.** Settings lets
   a user add them to any VPN, and the plugin does not check them today
   either. With a route there, NM would send that route's traffic into
@@ -243,3 +249,31 @@ NetworkManager or the plugin.
 - Whether a hint in the editor is enough for `never-default`, or the
   plugin should start to require it for new profiles; that would reject
   profiles some users already have.
+
+## Differences from the design
+
+- **Rows under "Advanced" sit in a `GtkRevealer`,** which an expander row
+  toggles, not in the `GtkExpander` itself. A collapsed `GtkExpander` takes
+  its child out of the widget tree, so Settings' pass over the labels (see "What the
+  research found") would not reach "First hop" and the others.
+- **The checks are split in two.** `nm-sshuttle-validate.c` has the rules on
+  GLib only; `nm-sshuttle-connection.c` reads and writes an `NMConnection`
+  through them, so that both can be tested without a display. The shared
+  cases are read by the first.
+- **A DNS mode or method that this version does not know** is shown, kept
+  and refused, instead of being replaced by the first entry of the drop-down.
+- **DNS servers and domains the mode does not use** are left out of
+  `vpn.data` when the profile is saved.
+- **The `nm-sshuttle` meson test suite `gnome-editor`** holds the C tests;
+  the editor's install targets carry the tag `gnome-editor`, which the Fedora
+  spec uses to install only them.
+- **Shared cases found a gap in the plugin:** `$` in a Python regex also
+  matches before a trailing newline, so `profile.parse` accepted
+  `remote="corp\n"`. It now matches the whole value.
+- **IPv6 networks** (subnets, exclude, first hop, probe) are accepted, as in
+  the plugin; DNS servers stay IPv4. The IPv6 tab has the same "Use this
+  connection only for resources on its network" switch, so the note names
+  both tabs.
+- **Not done yet:** `method=tproxy` and the keys of several tunnels. Each is
+  a change to `nm-sshuttle-validate.c` and to the cases when the plugin gets
+  it; the shared cases fail on whichever side is behind.
