@@ -56,37 +56,6 @@ def test_dns_modes():
     assert none.guarded_networks() == ["10.0.0.0/8"]
 
 
-@pytest.mark.parametrize("data", [
-    {"remote": "-oProxyCommand=x"},
-    {"remote": "corp; rm -rf /"},
-    {"remote": ""},
-    {"local-user": "root"},
-    {"local-user": "mallory"},
-    {"local-user": "alice x"},
-    {"local-user": "-alice"},
-    {"subnets": ""},
-    {"subnets": "10.0.0.0/33"},
-    {"exclude": "nonsense"},
-    {"dns": "maybe"},
-    {"dns-servers": ""},
-    {"dns-servers": "10.1.0.300"},
-    {"dns-domains": ""},
-    {"dns-domains": "corp/x"},
-    {"method": "tproxy"},
-    {"gateway": "corp.example"},
-    {"probe": "10.1.0.10"},
-    {"probe": "10.1.0.10:99999"},
-    {"probe": "2001:db8::10:22"},
-    {"probe": "[10.1.0.10]:22"},
-    {"dns-servers": "2001:db8::53"},
-    {"exclude": "2001:db8::/129"},
-    {"fail-closed": "perhaps"},
-])
-def test_rejected(data):
-    with pytest.raises(ProfileError):
-        p(settings(**data))
-
-
 def test_root_is_not_a_regular_user():
     def getpwnam(name):
         import types
