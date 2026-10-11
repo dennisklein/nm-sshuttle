@@ -3,7 +3,7 @@
 # The editor for GNOME Settings, from the same tarball as nm-sshuttle.spec. It
 # has its own spec because it is compiled code and nm-sshuttle is noarch.
 Name:           nm-sshuttle-gnome
-Version:        0.1.0~dev0
+Version:        0.1.0
 Release:        1%{?dist}
 Summary:        GNOME Settings editor for nm-sshuttle profiles
 License:        MIT
@@ -53,5 +53,5 @@ xvfb-run -a %{__meson} test -C %{_vpath_builddir} --no-rebuild --print-errorlogs
 %{_libdir}/NetworkManager/libnm-vpn-plugin-sshuttle.so
 
 %changelog
-* Sun Oct 11 2026 Dennis Klein <ilmt2000@googlemail.com> - 0.1.0~dev0-1
+* Sun Oct 11 2026 Dennis Klein <ilmt2000@googlemail.com> - 0.1.0-1
 - Initial package

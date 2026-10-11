@@ -29,7 +29,7 @@ than "Expect" is a finding, even if it looks harmless: write down what you saw.
 $ sudo dnf install git rpm-build dnf5-plugins
 $ git clone -b claude/project-thread-c5oyfl https://github.com/dennisklein/nm-sshuttle ~/src/nm-sshuttle
 $ cd ~/src/nm-sshuttle
-$ version=0.1.0~dev0
+$ version=0.1.0
 $ mkdir -p ~/rpmbuild/SOURCES
 $ git archive --format=tar.gz --prefix="nm-sshuttle-$version/" \
       -o ~/rpmbuild/SOURCES/"nm-sshuttle-$version.tar.gz" HEAD
