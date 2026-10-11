@@ -64,11 +64,12 @@ class NetworkWatcher:
     NM's global State is no use for "offline": an activating VPN, the plugin's
     own during a reconnect included, turns it into CONNECTING."""
 
-    def __init__(self, conn, call, on_network, on_version):
+    def __init__(self, conn, call, on_network, on_version, on_vpns=None):
         self.conn = conn
         self.call = call            # Service._call
         self.on_network = on_network
         self.on_version = on_version
+        self.on_vpns = on_vpns      # the activated VPNs' paths, every time NM is read
         self.primary = None
         self.ip4 = None
         self.ip6 = None
@@ -147,6 +148,9 @@ class NetworkWatcher:
     def _got_acs(self, gen, nm, acs):
         conn, primary = nm
         uplink = any(is_uplink(ac) for ac in acs.values())
+        if self.on_vpns:
+            self.on_vpns([p for p, ac in sorted(acs.items())
+                          if ac.get("Vpn") and ac.get("State") == AC_ACTIVATED])
         ac = acs.get(primary) if primary and primary != "/" else None
         if not ac:
             self.primary = self.ip4 = self.ip6 = None

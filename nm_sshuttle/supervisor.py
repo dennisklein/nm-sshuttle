@@ -104,6 +104,7 @@ class Supervisor:
         self.net_key = None            # the primary connection and its IPv4 config
         self.nm_version = None
         self.health_id = 0             # health results of an earlier "up" are ignored
+        self.vpns = None               # other activated VPNs' paths; None until NM is read
         self._reset_activation()
 
     def _reset_activation(self):
@@ -1155,6 +1156,17 @@ class Supervisor:
                 return
         if (changed or back) and self.phase == "gap":
             self._kick("the network changed" if changed else "the network is back")
+
+    @guarded
+    def on_vpns(self, paths):
+        """The activated VPN connections. Another one becoming activated may be
+        the tunnel this one's ssh runs over, back again: try at once
+        (docs/later/multiple-tunnels.md, "One tunnel over another")."""
+        others = set(paths) - {self.ac_path}
+        new = others - self.vpns if self.vpns is not None else set()
+        self.vpns = others
+        if new and self.phase == "gap":
+            self._kick("another VPN was activated")
 
     @guarded
     def on_nm_version(self, version):
