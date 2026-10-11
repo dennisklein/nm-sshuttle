@@ -550,8 +550,11 @@ class Service:
 
     def nft_health(self, method="nft"):
         # Only this tunnel's own listeners count, never another tunnel's.
-        return tunnel.nft_health(method, self.slot.guard_table,
+        snap = tunnel.nft_health(method, self.slot.guard_table,
                                  tunnel.unit_ports(self.tunnel_unit))
+        if snap is not None:
+            snap["ssh"] = tunnel.unit_runs(self.tunnel_unit, "ssh")
+        return snap
 
     def ipv6_available(self):
         return tunnel.ipv6_available()

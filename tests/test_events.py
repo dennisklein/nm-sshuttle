@@ -315,6 +315,22 @@ def test_health_drops_without_a_live_sshuttle_table(up):
     assert sup.phase == "gap" and ("state", ST_STARTING) in fx.events
 
 
+def test_health_drops_when_sshuttle_outlives_its_ssh(up):
+    fx, sup = up
+    fx.health = {"guard": True, "sshuttle": {4}, "ssh": False}
+    fx.advance(10)
+    assert sup.phase == "gap" and ("state", ST_STARTING) in fx.events
+
+
+def test_health_keeps_a_tunnel_whose_ssh_runs_or_cannot_be_read(up):
+    fx, sup = up
+    fx.health = {"guard": True, "sshuttle": {4}, "ssh": True}
+    fx.advance(10)
+    fx.health = {"guard": True, "sshuttle": {4}, "ssh": None}
+    fx.advance(10)
+    assert sup.phase == "up"
+
+
 def test_health_skips_the_table_check_for_the_nat_method():
     fx, sup = make()
     bring_up(fx, sup, method="nat")
