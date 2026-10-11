@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: MIT
+import socket
 import subprocess
 
 from nm_sshuttle import tunnel
 
 SPEC = {"remote": "corp", "user": "alice", "subnets": ["10.0.0.0/8"], "exclude": ["10.0.5.0/24"],
         "dns": "split", "dns_servers": ["10.1.0.53", "10.1.0.54"], "method": "nft",
-        "first_hop": "203.0.113.7"}
+        "first_hop": ["203.0.113.7"]}
 
 
 def test_sshuttle_argv():
@@ -18,6 +19,43 @@ def test_sshuttle_argv():
     assert argv[argv.index("--ns-hosts") + 1] == "10.1.0.53,10.1.0.54"
     assert argv[-1] == "10.0.0.0/8"      # the DNS /32s lie inside it and are merged
     assert "--dns" not in argv and "--auto-nets" not in argv
+
+
+def test_sshuttle_argv_reads_a_spec_from_before_ipv6():
+    argv = tunnel.sshuttle_argv(dict(SPEC, first_hop="203.0.113.7"), "sshuttle")
+    assert "--disable-ipv6" in argv and argv[argv.index("-x") + 1] == "203.0.113.7"
+
+
+def test_sshuttle_argv_with_ipv6():
+    spec = dict(SPEC, subnets=["10.0.0.0/8", "2001:db8:10::/48"], exclude=["2001:db8:10:5::/64"],
+                first_hop=["203.0.113.7", "2001:db8:ffff::7"], ipv6=True)
+    argv = tunnel.sshuttle_argv(spec, "sshuttle")
+    assert "--disable-ipv6" not in argv
+    xs = [argv[i + 1] for i, a in enumerate(argv) if a == "-x"]
+    assert xs == ["203.0.113.7", "2001:db8:ffff::7", "2001:db8:10:5::/64"]
+    assert argv[-2:] == ["10.0.0.0/8", "2001:db8:10::/48"]
+
+
+def test_sshuttle_argv_with_ipv6_off_on_the_host():
+    # The plugin found IPv6 off: sshuttle gets no IPv6 at all, the guard still has it.
+    spec = dict(SPEC, subnets=["10.0.0.0/8", "2001:db8:10::/48"], exclude=["2001:db8:10:5::/64"],
+                first_hop=["203.0.113.7", "2001:db8:ffff::7"], ipv6=False)
+    argv = tunnel.sshuttle_argv(spec, "sshuttle")
+    assert "--disable-ipv6" in argv
+    assert [argv[i + 1] for i, a in enumerate(argv) if a == "-x"] == ["203.0.113.7"]
+    assert argv[-1] == "10.0.0.0/8"
+
+
+def test_ipv6_available(tmp_path):
+    lo, inet6 = tmp_path / "disable_ipv6", tmp_path / "if_inet6"
+    lo.write_text("0\n")
+    inet6.write_text("")
+    assert tunnel.ipv6_available(str(lo), str(inet6))
+    lo.write_text("1\n")
+    assert not tunnel.ipv6_available(str(lo), str(inet6))
+    lo.write_text("0\n")
+    assert not tunnel.ipv6_available(str(lo), str(tmp_path / "missing"))
+    assert not tunnel.ipv6_available(str(tmp_path / "missing"), str(inet6))
 
 
 def test_sshuttle_argv_merges_a_dns_server_inside_a_subnet():
@@ -54,16 +92,33 @@ def test_first_hop_follows_a_jump_alias_from_the_users_config():
     def ssh_g(user, target):
         asked.append((user, target))
         return config[target]
-    assert tunnel.first_hop("alice", "corp", ssh_g=ssh_g) == "127.0.0.2"
+    assert tunnel.first_hop("alice", "corp", ssh_g=ssh_g) == ["127.0.0.2"]
     assert asked == [("alice", "corp"), ("alice", "bastion")]
 
 
 def test_first_hop_direct_and_nested_jumps():
     assert tunnel.first_hop("a", "h", ssh_g=lambda u, t: "hostname 127.0.0.3\nproxyjump none\n") \
-        == "127.0.0.3"
+        == ["127.0.0.3"]
     chain = {"a": "hostname x\nproxyjump b\n", "b": "hostname y\nproxyjump c\n",
              "c": "hostname 127.0.0.4\nproxyjump none\n"}
-    assert tunnel.first_hop("u", "a", ssh_g=lambda u, t: chain[t]) == "127.0.0.4"
+    assert tunnel.first_hop("u", "a", ssh_g=lambda u, t: chain[t]) == ["127.0.0.4"]
+
+
+def test_first_hop_returns_every_address_of_either_family():
+    def gai(answers):
+        def getaddrinfo(host, port, family, kind):
+            assert (host, family) == ("gw.example", socket.AF_UNSPEC)
+            return [(socket.AF_INET6 if ":" in a else socket.AF_INET, kind, 6, "",
+                     (a, port, 0, 0) if ":" in a else (a, port)) for a in answers]
+        return getaddrinfo
+
+    def ssh_g(u, t):
+        return "hostname gw.example\nproxyjump none\n"
+    assert tunnel.first_hop("u", "h", ssh_g, gai(["198.51.100.1"])) == ["198.51.100.1"]
+    assert tunnel.first_hop("u", "h", ssh_g, gai(["2001:db8::1"])) == ["2001:db8::1"]
+    assert tunnel.first_hop("u", "h", ssh_g, gai(["2001:db8::1", "198.51.100.1",
+                                                  "2001:db8::1", "fe80::1%eth0"])) == [
+        "2001:db8::1", "198.51.100.1", "fe80::1"]
 
 
 def test_first_hop_gives_up_on_a_loop_and_on_option_like_hosts():
@@ -100,9 +155,13 @@ def test_nft_health(monkeypatch):
     monkeypatch.setattr(tunnel.subprocess, "run",
                         lambda *a, **k: subprocess.CompletedProcess(a, 0, out, ""))
     monkeypatch.setattr(tunnel, "listening_ports", lambda: {12305})
-    assert tunnel.nft_health() == {"guard": True, "sshuttle": True}
+    assert tunnel.nft_health() == {"guard": True, "sshuttle": {4}}
     monkeypatch.setattr(tunnel, "listening_ports", lambda: set())
-    assert tunnel.nft_health() == {"guard": True, "sshuttle": False}
+    assert tunnel.nft_health() == {"guard": True, "sshuttle": set()}
+    out = ("table inet sshuttle-ipv4-12305\ntable inet sshuttle-ipv6-12305\n"
+           "table inet sshuttle-ipv6-12300\n")
+    monkeypatch.setattr(tunnel, "listening_ports", lambda: {12305})
+    assert tunnel.nft_health() == {"guard": False, "sshuttle": {4, 6}}
     monkeypatch.setattr(tunnel.subprocess, "run",
                         lambda *a, **k: subprocess.CompletedProcess(a, 1, "", "denied"))
     assert tunnel.nft_health() is None

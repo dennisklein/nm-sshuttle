@@ -70,7 +70,7 @@ def test_sigterm_during_startup_cleanup_exits_once_it_is_done():
 def test_first_connect_order_and_content():
     fx, sup = make()
     sup.connect(settings(exclude="10.0.5.0/24"), NM)
-    fx.first_hop_cbs.pop(0)("203.0.113.7", None)
+    fx.first_hop_cbs.pop(0)(["203.0.113.7"], None)
     assert fx.names() == ["state", "find_ac", "first_hop", "sweep", "create_link",
                           "install_guard", "spec", "start_tunnel"]
     assert fx.events[0] == ("state", ST_STARTING)

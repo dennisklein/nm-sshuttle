@@ -82,7 +82,7 @@ def test_resume_takes_the_inhibitor_and_reconnects_at_once(up):
     fx.advance(0)
     # the first hop is resolved again first: the network may be another one
     assert fx.names() == ["first_hop"]
-    fx.first_hop_cbs.pop(0)("203.0.113.7", None)
+    fx.first_hop_cbs.pop(0)(["203.0.113.7"], None)
     assert starts(fx) == 1
     reconnect(fx, sup)
     assert sup.phase == "up"
@@ -133,7 +133,7 @@ def test_asleep_time_does_not_count_against_the_reconnect_timeout(up):
     fx.advance(3600)                                  # ... then a long sleep
     sup.on_prepare_sleep(False)
     fx.advance(0)
-    fx.first_hop_cbs.pop(0)("203.0.113.7", None)
+    fx.first_hop_cbs.pop(0)(["203.0.113.7"], None)
     assert sup.phase == "gap" and "failure" not in fx.names()
 
 
@@ -149,9 +149,9 @@ def test_network_change_while_up_restarts_at_once_with_a_new_first_hop(up):
     fx.finish_stops()
     assert fx.names()[-1] == "first_hop"
     fx.clear()
-    fx.first_hop_cbs.pop(0)("198.51.100.200", None)
+    fx.first_hop_cbs.pop(0)(["198.51.100.200"], None)
     assert fx.events[0] == ("install_guard", ["10.0.0.0/8"], ["198.51.100.200"])
-    assert fx.events[1][0] == "spec" and fx.events[1][1]["first_hop"] == "198.51.100.200"
+    assert fx.events[1][0] == "spec" and fx.events[1][1]["first_hop"] == ["198.51.100.200"]
     fx.finish_start(True)
     config = [e[1] for e in fx.events if e[0] == "config"]
     assert config and config[0]["gateway"] == "198.51.100.200"
@@ -164,7 +164,7 @@ def test_give_up_before_the_new_first_hop_was_sent_repeats_the_old_config(up):
     answer_starting(sup)
     fx.finish_stops()
     fx.advance(0)
-    fx.first_hop_cbs.pop(0)("198.51.100.200", None)
+    fx.first_hop_cbs.pop(0)(["198.51.100.200"], None)
     fx.clear()
     sup.give_up(FAIL_CONNECT, "test")
     config = [e[1] for e in fx.events if e[0] == "config"]
@@ -179,7 +179,7 @@ def test_first_hop_answer_after_nm_began_deactivating_starts_nothing(up):
     fx.advance(0)
     sup.on_ac_state(AC, AC_DEACTIVATING, 0)
     fx.clear()
-    fx.first_hop_cbs.pop(0)("198.51.100.200", None)
+    fx.first_hop_cbs.pop(0)(["198.51.100.200"], None)
     assert fx.events == []
 
 
@@ -301,7 +301,7 @@ def test_health_runs_every_10s_while_up(up):
 
 def test_health_restores_a_flushed_guard(up):
     fx, sup = up
-    fx.health = {"guard": False, "sshuttle": True}
+    fx.health = {"guard": False, "sshuttle": {4}}
     fx.advance(10)
     assert fx.events == [("install_guard", ["10.0.0.0/8"], ["203.0.113.7"])]
     assert sup.phase == "up"
@@ -309,7 +309,7 @@ def test_health_restores_a_flushed_guard(up):
 
 def test_health_drops_without_a_live_sshuttle_table(up):
     fx, sup = up
-    fx.health = {"guard": False, "sshuttle": False}    # nft flush ruleset
+    fx.health = {"guard": False, "sshuttle": set()}    # nft flush ruleset
     fx.advance(10)
     assert fx.names()[0] == "install_guard"
     assert sup.phase == "gap" and ("state", ST_STARTING) in fx.events
@@ -318,7 +318,7 @@ def test_health_drops_without_a_live_sshuttle_table(up):
 def test_health_skips_the_table_check_for_the_nat_method():
     fx, sup = make()
     bring_up(fx, sup, method="nat")
-    fx.health = {"guard": True, "sshuttle": False}
+    fx.health = {"guard": True, "sshuttle": set()}
     fx.advance(10)
     assert sup.phase == "up"
 

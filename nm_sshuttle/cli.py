@@ -8,7 +8,8 @@
                  ExecStartPre and ExecStopPost)
   exec-tunnel    ExecStart of the tunnel unit
   ssh-as-user    sshuttle's ssh command
-  first-hop      print the first hop's IPv4 address, worked out as the user
+  first-hop      print the first hop's addresses, one per line, worked out as
+                 the user
   post-install   reload NetworkManager's configuration unless an nm-sshuttle
                  VPN is active
 
@@ -106,7 +107,7 @@ def post_install():
 
 def first_hop(user, remote):
     try:
-        print(tunnel.first_hop(user, remote))
+        print("\n".join(tunnel.first_hop(user, remote)))
     except (OSError, ValueError, subprocess.TimeoutExpired) as e:
         print(f"first-hop: {e}", file=sys.stderr)
         return 1
@@ -161,12 +162,13 @@ def read_settings(uuid, nmcli=nmcli_run):
     return {"connection": {"id": get("connection.id"), "uuid": uuid, "permissions": perms},
             "vpn": {"data": parse_vpn_data(get("vpn.data")),
                     "persistent": get("vpn.persistent") == "yes"},
-            "ipv4": {"method": get("ipv4.method") or "auto"}}
+            "ipv4": {"method": get("ipv4.method") or "auto"},
+            "ipv6": {"auto-route-ext-gw": get("ipv6.auto-route-ext-gw")}}
 
 
 # Design §4.1: no host route towards the first hop, and the VPN's DNS entry can
 # never take resolved's default route by itself.
-PROFILE_IP_SETTINGS = ("ipv4.auto-route-ext-gw", "no",
+PROFILE_IP_SETTINGS = ("ipv4.auto-route-ext-gw", "no", "ipv6.auto-route-ext-gw", "no",
                        "ipv4.never-default", "yes", "ipv6.never-default", "yes")
 
 
@@ -225,6 +227,11 @@ def check(args, nmcli=nmcli_run, ssh_g=ssh_g_as_self, run=subprocess.run):
               "fix with nmcli or remove and add again)")
         return 1
     print("ok   profile fields")
+    if settings["ipv6"]["auto-route-ext-gw"] != "no":
+        # Profiles added before IPv6 support lack it; NM then adds a host route
+        # towards an IPv6 first hop (docs/later/ipv6.md).
+        print(f"WARN ipv6.auto-route-ext-gw is not no; fix with: nmcli connection modify "
+              f"{uuid} ipv6.auto-route-ext-gw no")
     if prof.user != pwd.getpwuid(os.getuid()).pw_name:
         print(f"FAIL run this as {prof.user}: ssh must see that user's config, agent "
               "and known_hosts")
@@ -233,7 +240,8 @@ def check(args, nmcli=nmcli_run, ssh_g=ssh_g_as_self, run=subprocess.run):
         if prof.gateway:
             print(f"ok   ssh -G skipped; gateway is {prof.gateway}")
         else:
-            print(f"ok   ssh -G; first hop {tunnel.first_hop(prof.user, prof.remote, ssh_g)}")
+            hops = tunnel.first_hop(prof.user, prof.remote, ssh_g)
+            print(f"ok   ssh -G; first hop {', '.join(hops)}")
     except (OSError, ValueError, subprocess.TimeoutExpired) as e:
         print(f"FAIL ssh -G: {e}")
         return 1
