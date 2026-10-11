@@ -10,6 +10,10 @@
 #
 # The host has no route to 10.99.0.0/24; only the tunnel reaches it.
 #
+# Where the kernel has IPv6, the same links also carry 2001:db8:51::/64 and
+# 2001:db8:99::/64 (HTTP on ::10). The host has a route to 2001:db8:99::/64
+# through the jump host, so that a leak would actually arrive (T11-T13).
+#
 # Run as root on a disposable VM or container. It creates network
 # namespaces, veth links, nft tables and a local user, and it changes the
 # address of its own veth link. Needs: iproute2 (ip, ss), nft, sshd, ssh,
@@ -24,8 +28,16 @@ LAB_USER=${LAB_USER:-nmss-lab}
 JUMP_IP=198.51.100.1
 HOST_IP=198.51.100.2
 ROAM_IP=198.51.100.3
+JUMP_IP6=2001:db8:51::1
+HOST_IP6=2001:db8:51::2
+INTERNAL_IP6=2001:db8:99::10
 TUNNEL_LINK=nmss0     # stands in for the per-tunnel dummy link
 GUARD_TABLE=nm-sshuttle-guard
+REPO=$(cd "$(dirname "$0")/.." && pwd)
+# T11-T13 need IPv6 in the kernel.
+HAVE_IPV6=no
+[ -e /proc/net/if_inet6 ] && HAVE_IPV6=yes
+LO_IPV6_OFF=$(cat /proc/sys/net/ipv6/conf/lo/disable_ipv6 2>/dev/null || echo 1)
 
 [ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 2; }
 [ -x "$SSHUTTLE" ] || { echo "sshuttle not found; set SSHUTTLE=" >&2; exit 2; }
@@ -38,8 +50,10 @@ AGENT_SOCK=$WORK/agent/agent.sock
 
 PASS=0
 FAIL=0
+SKIP=0
 pass() { echo "PASS  $*"; PASS=$((PASS + 1)); }
 fail() { echo "FAIL  $*"; FAIL=$((FAIL + 1)); }
+skip() { echo "SKIP  $*"; SKIP=$((SKIP + 1)); }
 check() { local name=$1; shift; if "$@"; then pass "$name"; else fail "$name"; fi; }
 
 # PIDs of sshuttle clients and firewall helpers started from $SSHUTTLE
@@ -60,7 +74,8 @@ teardown() {
     nft delete table inet "$GUARD_TABLE" 2>/dev/null
     [ -f "$WORK/sshd.pid" ] && kill "$(cat "$WORK/sshd.pid")" 2>/dev/null
     pkill -f "$WORK/dns_server.py" 2>/dev/null
-    pkill -f "http.server --bind 10.99.0.10" 2>/dev/null
+    pkill -f "http.server --bind" 2>/dev/null
+    [ "$HAVE_IPV6" = yes ] && sysctl -qw net.ipv6.conf.lo.disable_ipv6="$LO_IPV6_OFF"
     pkill -KILL -u "$LAB_USER" 2>/dev/null
     ip link del h-j 2>/dev/null
     ip link del "$TUNNEL_LINK" 2>/dev/null
@@ -97,6 +112,15 @@ setup() {
     ip -n internal link set lo up
     ip -n internal route add default via 10.99.0.1
     ip netns exec jump sysctl -qw net.ipv4.ip_forward=1
+    if [ "$HAVE_IPV6" = yes ]; then
+        ip -6 addr add $HOST_IP6/64 dev h-j nodad
+        ip -n jump -6 addr add $JUMP_IP6/64 dev j-h nodad
+        ip -n jump -6 addr add 2001:db8:99::1/64 dev j-i nodad
+        ip -n internal -6 addr add $INTERNAL_IP6/64 dev i-j nodad
+        ip -n internal -6 route add default via 2001:db8:99::1
+        ip netns exec jump sysctl -qw net.ipv6.conf.all.forwarding=1
+        ip -6 route add 2001:db8:99::/64 via $JUMP_IP6
+    fi
 
     # Per-tunnel link. The design uses a dummy link; a veth whose peer sits
     # in an empty namespace behaves the same here (up, carrier, global /32)
@@ -122,14 +146,20 @@ PubkeyAuthentication yes
 UsePAM no
 PidFile $WORK/sshd.pid
 EOF
+    if [ "$HAVE_IPV6" = yes ]; then echo "ListenAddress $JUMP_IP6" >> "$WORK/sshd_config"; fi
     ip netns exec jump /usr/sbin/sshd -f "$WORK/sshd_config" -E "$WORK/sshd.log"
 
     ip netns exec internal python3 "$WORK/dns_server.py" 10.99.0.53 > "$WORK/dns.log" 2>&1 &
     ip netns exec internal python3 -m http.server --bind 10.99.0.10 8080 \
         --directory "$WORK" > "$WORK/http.log" 2>&1 &
-    local i
+    local i http=1
+    if [ "$HAVE_IPV6" = yes ]; then
+        ip netns exec internal python3 -m http.server --bind $INTERNAL_IP6 8080 \
+            --directory "$WORK" > "$WORK/http6.log" 2>&1 &
+        http=2
+    fi
     for i in $(seq 1 50); do
-        ss -N internal -ltnH 'sport = :8080' | grep -q . &&
+        [ "$(ss -N internal -ltnH 'sport = :8080' | wc -l)" -ge $http ] &&
             ss -N internal -lunH 'sport = :53' | grep -q . && break
         sleep 0.2
     done
@@ -166,6 +196,11 @@ write_ssh_config() {
             echo "    ServerAliveInterval 5"
             echo "    ServerAliveCountMax 2"
         fi
+        # The same jump host by its IPv6 address only (T13).
+        echo "Host corp6"
+        echo "    HostName $JUMP_IP6"
+        echo "    User $LAB_USER"
+        echo "    StrictHostKeyChecking accept-new"
     } > "$USER_SSH_CONFIG"
     chown "$LAB_USER:" "$USER_SSH_CONFIG"
 }
@@ -178,6 +213,17 @@ start_tunnel() {
     "$SSHUTTLE" -v --disable-ipv6 --method nft \
         -e "$WORK/ssh-as-user $LAB_USER $AGENT_SOCK" -r corp \
         -x $JUMP_IP "$@" 10.99.0.0/24 > "$log" 2>&1 &
+    echo $!
+}
+
+# start_tunnel6 LOG REMOTE [extra sshuttle args...]  -> prints PID
+# IPv6 on: no --disable-ipv6, both families of the internal network.
+start_tunnel6() {
+    local log=$1 remote=$2
+    shift 2
+    "$SSHUTTLE" -v --method nft \
+        -e "$WORK/ssh-as-user $LAB_USER $AGENT_SOCK" -r "$remote" \
+        -x $JUMP_IP -x $JUMP_IP6 "$@" 10.99.0.0/24 2001:db8:99::/64 > "$log" 2>&1 &
     echo $!
 }
 
@@ -205,7 +251,7 @@ redirect_port() {  # redirect_port LOG -> TCP port sshuttle listened on
 
 # Prints the HTTP status, or 000 if no response arrived within the timeout.
 http_code() {
-    curl -s -m "${2:-5}" -o /dev/null -w '%{http_code}' --noproxy '*' "$1"
+    curl -g -s -m "${2:-5}" -o /dev/null -w '%{http_code}' --noproxy '*' "$1"
 }
 
 sshuttle_tables() {
@@ -222,21 +268,31 @@ sweep_stale_tables() {
     done
 }
 
+# The plugin's guard (nm_sshuttle/guard.py), for both families.
 install_guard() {
     nft -f - <<EOF
 table inet $GUARD_TABLE {
     set subnets4 { type ipv4_addr; flags interval; elements = { 10.99.0.0/24 } }
     set exclude4 { type ipv4_addr; flags interval; elements = { $JUMP_IP } }
+    set subnets6 { type ipv6_addr; flags interval; elements = { 2001:db8:99::/64 } }
+    set exclude6 { type ipv6_addr; flags interval; elements = { $JUMP_IP6 } }
     chain output {
         type filter hook output priority filter; policy accept;
         ip daddr @exclude4 accept
+        ip6 daddr @exclude6 accept
         ip daddr @subnets4 ct status dnat accept
+        ip6 daddr @subnets6 ct status dnat accept
         ip daddr @subnets4 meta l4proto tcp reject with tcp reset
-        ip daddr @subnets4 reject with icmp admin-prohibited
+        ip6 daddr @subnets6 meta l4proto tcp reject with tcp reset
+        ip daddr @subnets4 reject with icmpx admin-prohibited
+        ip6 daddr @subnets6 reject with icmpx admin-prohibited
     }
 }
 EOF
 }
+
+# The internal web server logged a request from ADDRESS: log_from LOG ADDRESS
+log_from() { grep -q "^$2 " "$1"; }
 
 # ------------------------------------------------------------------ tests
 echo "== setting up lab in $WORK"
@@ -357,6 +413,71 @@ check "T10c ServerAliveInterval=5/CountMax=2: sshuttle exits ${ELAPSED} s after 
 check "T10d rules cleaned up on that exit" test -z "$(sshuttle_tables)"
 roam $ROAM_IP $HOST_IP
 
+echo "== T11 IPv6 subnets through the tunnel"
+if [ "$HAVE_IPV6" = yes ]; then
+    : > "$WORK/http6.log"
+    PID=$(start_tunnel6 "$WORK/t11.log" corp)
+    check "T11a tunnel with IPv6 comes up (no --disable-ipv6)" wait_connected "$WORK/t11.log"
+    check "T11b sshuttle has an IPv6 table" test -n "$(sshuttle_tables | grep ipv6)"
+    check "T11c IPv6 TCP to the internal host through the tunnel" \
+        test "$(http_code "http://[$INTERNAL_IP6]:8080/")" = 200
+    check "T11d ... arriving from the jump host, not from the host" \
+        log_from "$WORK/http6.log" 2001:db8:99::1
+    check "T11e IPv4 still goes through the same tunnel" \
+        test "$(http_code http://10.99.0.10:8080/)" = 200
+
+    echo "== T12 IPv6 guard sets"
+    install_guard
+    check "T12a guard lets redirected IPv6 TCP through" \
+        test "$(http_code "http://[$INTERNAL_IP6]:8080/")" = 200
+    kill -TERM "$PID"
+    wait_exit "$PID" 10
+    START=$(date +%s%N)
+    CODE=$(http_code "http://[$INTERNAL_IP6]:8080/" 4)
+    ELAPSED_MS=$(( ($(date +%s%N) - START) / 1000000 ))
+    check "T12b tunnel down + guard: IPv6 TCP refused at once (${ELAPSED_MS} ms), not leaked" \
+        test "$CODE" = 000 -a "$ELAPSED_MS" -lt 1000
+    check "T12c excluded jump host stays reachable over IPv6" \
+        "$WORK/ssh-as-user" "$LAB_USER" "$AGENT_SOCK" corp6 true
+    nft delete table inet $GUARD_TABLE
+    : > "$WORK/http6.log"
+    check "T12d without the guard the same request leaks: the route reaches the host" \
+        test "$(http_code "http://[$INTERNAL_IP6]:8080/" 4)" = 200
+    check "T12e ... arriving from the host's own address" log_from "$WORK/http6.log" $HOST_IP6
+
+    echo "== T13 first hop by IPv6 only, inside a tunnelled IPv6 subnet"
+    : > "$WORK/http6.log"
+    PID=$(start_tunnel6 "$WORK/t13.log" corp6 2001:db8:51::/64)
+    check "T13a ssh's own connection is not captured: the tunnel comes up" \
+        wait_connected "$WORK/t13.log"
+    check "T13b IPv6 TCP through that tunnel" \
+        test "$(http_code "http://[$INTERNAL_IP6]:8080/")" = 200
+    check "T13c ... from the jump host" log_from "$WORK/http6.log" 2001:db8:99::1
+    kill -TERM "$PID"
+    wait_exit "$PID" 10
+else
+    skip "T11-T13 need IPv6 in the kernel (/proc/net/if_inet6 is missing)"
+fi
+
+echo "== T14 IPv6 off on the host"
+[ "$HAVE_IPV6" = yes ] && sysctl -qw net.ipv6.conf.lo.disable_ipv6=1
+plugin_sees_ipv6() {
+    PYTHONPATH=$REPO python3 -c \
+        'import sys; from nm_sshuttle.tunnel import ipv6_available; sys.exit(not ipv6_available())'
+}
+plugin_finds_ipv6_off() { ! plugin_sees_ipv6; }
+check "T14a the plugin's check finds IPv6 off" plugin_finds_ipv6_off
+PID=$(start_tunnel6 "$WORK/t14a.log" corp)
+check "T14b without --disable-ipv6 sshuttle stops" wait_exit "$PID" 15
+grep -m1 -i "ipv6 socket\|address family" "$WORK/t14a.log" | sed 's/^/      /'
+PID=$(start_tunnel "$WORK/t14c.log" --ns-hosts 10.99.0.53)
+check "T14c with --disable-ipv6 and the IPv6 networks left out, the tunnel comes up" \
+    wait_connected "$WORK/t14c.log"
+check "T14d ... and carries IPv4" test "$(http_code http://10.99.0.10:8080/)" = 200
+kill -TERM "$PID"
+wait_exit "$PID" 10
+[ "$HAVE_IPV6" = yes ] && sysctl -qw net.ipv6.conf.lo.disable_ipv6="$LO_IPV6_OFF"
+
 echo
-echo "== $PASS passed, $FAIL failed"
+echo "== $PASS passed, $FAIL failed, $SKIP skipped"
 [ "$FAIL" = 0 ]

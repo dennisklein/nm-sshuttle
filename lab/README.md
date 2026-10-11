@@ -6,7 +6,10 @@ network namespaces:
 
 ```
 host --198.51.100.0/24--> jump (sshd) --10.99.0.0/24--> internal (DNS .53, HTTP .10)
+     --2001:db8:51::/64-->           --2001:db8:99::/64-->        (HTTP ::10)
 ```
+
+The IPv6 half exists only where the kernel has IPv6.
 
 It then runs sshuttle the way the design proposes, as root with `ssh` running
 as an unprivileged user via [`ssh-as-user`](ssh-as-user). It prints PASS/FAIL
@@ -41,6 +44,12 @@ non-zero if any check fails.
 | T8 | A fixed `--listen` port cannot be reused within TIME_WAIT (`EADDRINUSE`). |
 | T9 | An unreachable resolver on the remote side kills the tunnel on the first forwarded DNS query; `--to-ns` avoids it. |
 | T10 | After the local address changes, the tunnel stays "running" but dead without ssh keepalives, and exits in about 17 s with `ServerAliveInterval=5`/`CountMax=2`. The user's `ssh` outlives sshuttle's exit unless something kills the whole process group. |
+| T11 | Without `--disable-ipv6`, sshuttle tunnels an IPv6 subnet through the jump host, next to the IPv4 one. |
+| T12 | The guard's IPv6 sets let redirected traffic through. With the tunnel down they refuse IPv6 TCP at once, although the host's route would deliver it (shown without the guard), and the excluded jump host stays reachable over IPv6. |
+| T13 | A first hop reached by its IPv6 address inside a tunnelled IPv6 subnet: with it excluded, ssh's own connection is not captured. |
+| T14 | With IPv6 off on the host the plugin's check sees it, sshuttle stops without `--disable-ipv6`, and with it (and the IPv6 networks left out, as the plugin does) the tunnel carries IPv4. |
+
+T11 to T13 print SKIP on a kernel without IPv6.
 
 The per-tunnel dummy link is replaced by a veth whose peer sits in an empty
 namespace, so the lab also runs on kernels built without the `dummy` module.
