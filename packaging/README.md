@@ -37,7 +37,9 @@ with a throwaway key and deploy nothing.
 
 ### Releasing
 
-Push an annotated tag whose version is the release's:
+Merge the release's version into `main` first: `meson.build`,
+`nm_sshuttle/__init__.py`, the two specs, `debian/changelog` and
+`CHANGELOG.md`. Then push an annotated tag whose version is the release's:
 
 ```console
 $ git tag -a v0.1.0 -m 'nm-sshuttle 0.1.0'
