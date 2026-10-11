@@ -19,7 +19,6 @@ sc() { systemctl --no-pager "$@"; }
 jc() { journalctl --no-pager "$@"; }
 bc() { busctl --system --no-pager "$@"; }
 rv() { resolvectl --no-pager "$@"; }
-jsync() { journalctl --sync > /dev/null 2>&1; }
 
 BUS=org.freedesktop.NetworkManager.sshuttle
 PLUGIN_UNIT=nm-sshuttle.service
@@ -143,10 +142,10 @@ diag_state() {
         echo "guard: $(guard_present && echo present || echo absent); tunnel: $(sc is-active "$TUNNEL_UNIT")" \
             "; plugin: $(sc is-active "$PLUGIN_UNIT") pid $(plugin_pid)"
         echo "--- plugin journal tail"
-        jc -u "$PLUGIN_UNIT" -n 30 -o short-precise 2>&1
+        tail -n 3000 "$JOURNAL_LOG" | grep -E "$PLUGIN_LINE" | tail -n 30
     } > "$tmp" 2>&1
     DETAIL_LINES=200 detail "$1-state" "state when it failed" < "$tmp"
-    sed 's/^/          | /' "$tmp" | head -n 40
+    sed 's/^/          | /' "$tmp" | head -n 70
     rm -f "$tmp"
 }
 
@@ -256,7 +255,7 @@ EOF
 
     systemd-run --quiet --collect --unit=nmtest-sshd \
         -p NetworkNamespacePath=/run/netns/jump /usr/sbin/sshd -D -e -f "$SSHD_DIR/sshd_config"
-    systemd-run --quiet --collect --unit=nmtest-dns \
+    systemd-run --quiet --collect --unit=nmtest-dns -p SyslogIdentifier=nmtest-dns \
         -p NetworkNamespacePath=/run/netns/internal /usr/bin/python3 "$REPO/lab/dns_server.py" $DNS_IP
     systemd-run --quiet --collect --unit=nmtest-web \
         -p NetworkNamespacePath=/run/netns/internal \
@@ -264,7 +263,7 @@ EOF
     systemd-run --quiet --collect --unit=nmtest-udp \
         -p NetworkNamespacePath=/run/netns/internal \
         /usr/bin/python3 "$REPO/lab/udp_echo.py" serve $WEB_IP $UDP_PORT
-    [ "$HAVE_IPV6" = yes ] && systemd-run --quiet --collect --unit=nmtest-web6 \
+    [ "$HAVE_IPV6" = yes ] && systemd-run --quiet --collect --unit=nmtest-web6 -p SyslogIdentifier=nmtest-web6 \
         -p NetworkNamespacePath=/run/netns/internal \
         /usr/bin/python3 -m http.server --bind $WEB_IP6 8080 --directory "$VARDIR/www"
     for i in $(seq 1 50); do
@@ -484,28 +483,43 @@ plugin_owns_bus() {  # plugin_owns_bus [PID] : alive, and owns the bus name
     [ -n "$pid" ] && [ "$pid" != 0 ] && kill -0 "$pid" 2> /dev/null && [ "$(bus_owner_pid)" = "$pid" ]
 }
 
-# log_mark : later plog calls show the plugin unit's journal after this point
+# The checks read the journal through one journalctl -f that runs for the
+# whole run: fresh reads, by unit, after a cursor or since a time, at times
+# missed the plugin's newest entries, which a later read showed.
+JOURNAL_LOG=$VARDIR/journal.log
+JOURNAL_PID=""
+PLUGIN_LINE=' nm-sshuttle-service\[[0-9]+\]: '
+journal_follow() {
+    journalctl --no-pager --follow --lines=0 -o short-precise > "$JOURNAL_LOG" 2> /dev/null &
+    JOURNAL_PID=$!
+}
+journal_stop() { [ -z "$JOURNAL_PID" ] || kill "$JOURNAL_PID" 2> /dev/null; JOURNAL_PID=""; }
+journal_since_mark() { tail -c "+$(( ${LOGMARK:-0} + 1 ))" "$JOURNAL_LOG" 2> /dev/null; }
+# log_mark : later plog calls show the plugin's journal after this point
 log_mark() {
-    jsync
-    LOGMARK=$(jc -u "$PLUGIN_UNIT" -n 1 -o cat --show-cursor 2> /dev/null | sed -n 's/^-- cursor: //p')
+    LOGMARK=$(stat -c %s "$JOURNAL_LOG" 2> /dev/null || echo 0)
     MARK_EPOCH=$(date +%s)
 }
-plog() {  # the plugin unit's journal since log_mark (or since the run began)
-    jsync
-    if [ -n "$LOGMARK" ]; then
-        jc -u "$PLUGIN_UNIT" --after-cursor="$LOGMARK" -o short-precise 2>&1
-    else
-        jc -u "$PLUGIN_UNIT" --since "@${MARK_EPOCH:-$START_EPOCH}" -o short-precise 2>&1
-    fi
-}
+plog() { journal_since_mark | grep -E "$PLUGIN_LINE"; }  # the plugin's journal since log_mark (or since the run began)
 plog_has() { plog | grep -q -F -- "$1"; }
 plog_has_not() { ! plog | grep -q -F -- "$1"; }
+# journald tells followers about new entries in batches, so a line shows up in
+# JOURNAL_LOG a moment after it was logged. journal_catch_up : until the file
+# holds what journald had before this call, which a marker of our own shows.
+journal_catch_up() {
+    local m="nmtest-sync-$RANDOM$RANDOM"
+    echo "$m" | systemd-cat -t nmtest-sync
+    wait_for 5 grep -q -F -- "$m" "$JOURNAL_LOG"
+}
 plog_show() {  # plog_show PATTERN : the matching lines (a check's evidence); fails without any
+    journal_catch_up
+    wait_for 2 plog_has "$1"
     plog | grep -F -- "$1" | tail -n 8 | grep .
 }
 # Python errors and the supervisor's own error paths, since log_mark
 plog_errors() {
     local errs
+    journal_catch_up
     errs=$(plog | grep -E 'unexpected error|Traceback|error while handling|D-Bus handler error')
     [ -z "$errs" ] || { echo "$errs" | head -n 10; return 1; }
 }
@@ -566,7 +580,9 @@ uplink_resolved_ok() {  # the uplink keeps its servers and resolved's default ro
     [ "${dr##* }" = yes ] || { echo "$UPLINK default-route is not yes"; rc=1; }
     return "$rc"
 }
-dnslog_has() { jsync; jc -u nmtest-dns --since "@$START_EPOCH" -o cat | grep -q -F -- "$1"; }
+# servers_log NAME : what the test server NAME logged since log_mark (or since the run began)
+servers_log() { journal_since_mark | grep -F " $1["; }
+dnslog_has() { servers_log nmtest-dns | grep -q -F -- "$1"; }
 split_lookup_ok() {  # a fresh split name resolves, and the query reached the internal server via the jump host
     local n="u$RANDOM$RANDOM.corp.test" out
     out=$(rv query --cache=no --legend=no "$n" 2>&1)
@@ -583,7 +599,8 @@ outside_lookup_ok() {  # a fresh outside name is not sent to the tunnel's DNS se
 }
 http_ok() { [ "$(curl -g -s -m 5 -o /dev/null -w '%{http_code}' --noproxy '*' "$1")" = 200 ]; }
 # web6_from ADDRESS : the IPv6 web server logged a request from ADDRESS since log_mark
-web6_from() { jsync; jc -u nmtest-web6 --since "@$MARK_EPOCH" -o cat | grep "^$1 "; }
+web6_lines() { servers_log nmtest-web6 | sed 's/^[^]]*\]: //' | grep "^$1 "; }
+web6_from() { wait_for 3 web6_lines "$1"; web6_lines "$1"; }
 
 # info_or_check ID TEXT CMD... : like check, but only INFO with what CMD saw
 # when INFO_ONLY lists ID's last letter (an answer, not an assertion)
@@ -777,6 +794,7 @@ avc_since() {  # avc_since EPOCH OFFSET : SELinux denial records since then
 cleanup() {
     set +e
     note "cleaning up"
+    journal_stop
     unblock_jump
     nmcli connection down "$CON" > /dev/null 2>&1
     nmcli connection down "$CON_ZONE" > /dev/null 2>&1
