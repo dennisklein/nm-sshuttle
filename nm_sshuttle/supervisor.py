@@ -274,6 +274,10 @@ class Supervisor:
         v4 = [a for a in self.hops if profile_mod.family(a) == 4]
         self.gateway = (v4 or self.hops)[0]
 
+    def _uses_ipv6(self):
+        """The tunnel or its ssh connection may use the uplink's IPv6."""
+        return self.ipv6 or any(profile_mod.family(a) == 6 for a in self.hops)
+
     def _tunnelled_families(self):
         """The families sshuttle has a table for: those of its networks, the DNS
         servers' included, IPv6 only when it tunnels IPv6."""
@@ -1047,12 +1051,15 @@ class Supervisor:
     @guarded
     def on_network(self, uplink, connectivity, key):
         """Whether an uplink (an activated non-VPN connection) exists, NM's
-        connectivity, and the primary connection with its IPv4 addresses and
-        gateway as one key (None: no primary connection)."""
+        connectivity, and the primary connection as one key (None: no primary
+        connection): its UUID, IPv4 addresses and gateway, then its IPv6 global
+        prefixes and gateway, which count only while the tunnel uses IPv6."""
         was_offline = self._offline()
         was_portal = self.connectivity == CONN_PORTAL
         self.uplink, self.connectivity = uplink, connectivity
-        changed = key is not None and self.net_key is not None and key != self.net_key
+        n = None if self.profile and self._uses_ipv6() else 3
+        changed = (key is not None and self.net_key is not None
+                   and key[:n] != self.net_key[:n])
         if key is not None:
             self.net_key = key
         offline = self._offline()
