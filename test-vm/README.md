@@ -12,19 +12,26 @@ the VM. A gap is made by letting the jump host refuse connections and killing
 the tunnel unit; the plugin's own retries (1, 2, 4 ... s) bring it back once the
 block is lifted. Each scenario has an id `M2-NN`; its checks are `M2-NNx`.
 
+Each activation runs in a slot that the dispatcher picks, and its link, guard,
+units and files carry the slot's number ([several
+tunnels](../docs/later/multiple-tunnels.md)). A single tunnel usually gets
+slot 0 (`nmss0`), but a quick reconnect may land in another, so the checks
+follow the newest running instance, and "nothing left" means nothing in any
+slot.
+
 | id | scenario |
 |---|---|
 | M2-01 | install: files, SELinux labels, `90-nm-sshuttle.conf` takes effect after `nmcli general reload conf` |
-| M2-02 | connect: address, resolved per link, split and outside lookups, guard, units, firewalld zone, nmss0 unmanaged |
+| M2-02 | connect: address, resolved per link, split and outside lookups, guard, units, firewalld zone, the link unmanaged, a bus name of its own from NM |
 | M2-03 | reconnect (nbns) three times with firewalld: same ifindex, DNS, one VPN entry in NM, fail closed in the gap |
 | M2-04 | the same without firewalld |
 | M2-05 | a gap longer than 10 s |
 | M2-06 | `nmcli device set nmss0 managed no` in a gap: the plugin bounces the early "activated" |
 | M2-07 | `ip link del nmss0` in a gap: give-up at once; then a profile in a non-default firewalld zone |
 | M2-08 | `systemctl stop` and `restart` in a gap |
-| M2-09 | `kill -9` in a gap: the new instance cleans up and exits at its idle timeout |
-| M2-10 | switching off while a reconnect is pending |
-| M2-11 | Connect right after Disconnect, within the idle window |
+| M2-09 | `kill -9` in a gap: `ExecStopPost` cleans up and no new instance starts |
+| M2-10 | switching off while a reconnect is pending; the instance then exits |
+| M2-11 | Connect right after Disconnect: a new instance serves it |
 | M2-12 | a user override of the unmanaged setting: the plugin logs it |
 | M2-13 | NetworkManager restart under an active VPN |
 | M2-14 | `ExecStopPost` removes leftovers |
@@ -48,6 +55,9 @@ block is lifted. Each scenario has an id `M2-NN`; its checks are `M2-NNx`.
 | TP-01 | `method=tproxy` ([tproxy](../docs/later/tproxy.md)): sshuttle's mark chain and the plugin's rule and route; UDP echo, TCP and split DNS through the tunnel; UDP and TCP refused at once in a gap; nothing left after the disconnect |
 | TP-02 | `method=tproxy`: sshuttle killed while up, then `nft flush ruleset`: the guard comes back, the missing mark chain causes a reconnect, the rule and route stay |
 | TP-03 | `method=tproxy`: `nmcli general reload` and a roam to a second uplink leave the rule and route alone |
+| MT-01 | [several tunnels](../docs/later/multiple-tunnels.md): corp and a lab profile at once, each with split DNS through its own link and both links with 192.0.0.8; the lab reconnects and corp's sshuttle stays; a third profile that overlaps corp is refused with its name, and `nm-sshuttle check` says so; `kill -9` of the lab's instance cleans only its slot; an NM restart takes both down |
+| MT-02 | several tunnels: the lab's jump host inside the corporate network; a corp gap takes the lab down, and the lab is back at once after corp |
+| MT-03 | several tunnels: from the dispatcher's start to the instance's `READY=1`, cold and warm |
 
 `PASS` and `FAIL` are asserted. `INFO` prints something the design marks as
 unobserved (for example firewalld's zone binding after a link loss, or what
@@ -134,8 +144,8 @@ display (`test-vm/vm.sh viewer`), and create the profile as in
 2. With a passphrase key that is not loaded in the agent: switch on, type the
    passphrase in the prompt; the tunnel comes up.
 3. Unload the key (`ssh-add -D`), lock the screen (Super+L), kill the tunnel (`sudo systemctl kill -s KILL
-   nm-sshuttle-tunnel.service`), wait 30 s: the toggle shows "acquiring", and
-   `journalctl -u nm-sshuttle` says it waits for the unlock. Unlock: the prompt
+   nm-sshuttle-tunnel@0.service`), wait 30 s: the toggle shows "acquiring", and
+   `journalctl -u nm-sshuttle@0` says it waits for the unlock. Unlock: the prompt
    appears, the tunnel comes back.
 4. With automatic screen lock on, suspend (`systemctl suspend`) and resume:
    the tunnel comes back after the unlock.

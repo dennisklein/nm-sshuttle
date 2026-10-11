@@ -9,7 +9,7 @@
 #
 # It builds the spike's topology (jump host sshd, DNS and web in namespaces,
 # an agent key for the user), creates a profile with nmcli, and drives the
-# REAL plugin (nm-sshuttle.service) through the scenarios below. A gap is made
+# REAL plugin (nm-sshuttle@N.service, started by the dispatcher) through the scenarios below. A gap is made
 # the way it happens in life: the jump host starts refusing connections and the
 # tunnel dies; lifting the block lets the plugin's own retries (1, 2, 4 ... s)
 # succeed. Nothing in the plugin is patched or timed.
@@ -32,6 +32,9 @@
 #   TP-01 method=tproxy: UDP and TCP through the tunnel, fail closed in a gap
 #   TP-02 method=tproxy: kill sshuttle and nft flush ruleset while up
 #   TP-03 method=tproxy: NM leaves the policy routing alone; teardown removes it
+#   MT-01 several tunnels: two at once, a reconnect, an overlap, a kill, NM restart
+#   MT-02 several tunnels: the lab over corp, back at once after a corp gap
+#   MT-03 several tunnels: how long the dispatcher and the instance take to start
 #
 # Result ids are M2-NN (scenario) and M2-NNx (a check in it). PASS and FAIL are
 # asserted; INFO prints something the design marks unobserved. A FAIL prints
@@ -58,7 +61,7 @@ while [ $# -gt 0 ]; do
         --keep) KEEP=1; shift ;;
         --suspend) SUSPEND=1; shift ;;
         cleanup) CMD=cleanup; shift ;;
-        -h|--help) sed -n '3,38p' "$0"; exit 0 ;;
+        -h|--help) sed -n '3,41p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -92,10 +95,12 @@ INSTALLED=(
     /usr/lib/NetworkManager/conf.d/90-nm-sshuttle.conf
     "$LIBEXEC/nm-sshuttle" "$LIBEXEC/nm-sshuttle-service"
     "$LIBEXEC/nm-sshuttle-activate" "$LIBEXEC/nm-sshuttle-auth-dialog"
-    /usr/lib/systemd/system/nm-sshuttle.service
-    /usr/lib/systemd/system/nm-sshuttle-tunnel.service
+    "$LIBEXEC/nm-sshuttle-dispatcher"
+    /usr/lib/systemd/system/nm-sshuttle@.service
+    /usr/lib/systemd/system/nm-sshuttle-tunnel@.service
+    /usr/lib/systemd/system/nm-sshuttle-dispatcher.service
     /usr/share/dbus-1/system.d/nm-sshuttle.conf
-    /usr/share/dbus-1/system-services/org.freedesktop.NetworkManager.sshuttle.service
+    /usr/share/dbus-1/system-services/org.freedesktop.NetworkManager.sshuttle.Dispatcher.service
 )
 PYDIR=""
 
@@ -160,9 +165,11 @@ connect_ok() {
         return 0
     fi
     result "$1" FAIL "$2 (state '$(con_state "$con")')"
-    { echo "nmcli: $ACTIVATE_OUT"; echo; plog | tail -n 40; } | detail "$1" "$2"
+    { echo "nmcli: $ACTIVATE_OUT"; echo; plog | tail -n 40; echo; alog | tail -n 40; } |
+        detail "$1" "$2"
     echo "$ACTIVATE_OUT" | head -n 5 | sed 's/^/          /'
     plog | tail -n 8 | sed 's/^/          | /'
+    alog | tail -n 12 | sed 's/^/          a /'
     return 1
 }
 end_checks() {  # end_checks ID : checks every scenario ends with
@@ -184,7 +191,7 @@ labels_ok() {  # the labels policy gives these paths ('meson install' relabels t
     out=$(restorecon -n -v -R "${INSTALLED[@]}" "$PYDIR" 2>&1)
     [ -z "$out" ] || { echo "restorecon would change:"; echo "$out"; return 1; }
 }
-dummy_state() {  # the NM device state of a new link named nmss0 under the current configuration
+dummy_state() {  # the NM device state of a new link named $LINK under the current configuration
     local st
     ip link add "$LINK" type dummy && ip link set "$LINK" up || return 1
     wait_for 5 have_dev_state
@@ -193,7 +200,7 @@ dummy_state() {  # the NM device state of a new link named nmss0 under the curre
     sleep 0.5
     echo "${st:-none}"
 }
-unmanaged_in_print_config() { NetworkManager --print-config | grep '^unmanaged-devices=' | grep -q "interface-name:$LINK"; }
+unmanaged_in_print_config() { NetworkManager --print-config | grep '^unmanaged-devices=' | grep -q -F "interface-name:nmss*"; }
 
 have_dev_state() { [ -n "$(dev_state)" ]; }
 traffic_ok() { http_ok "http://$WEB_IP:8080/" && http_ok "http://git.corp.test:8080/"; }
@@ -205,7 +212,10 @@ zone_con_gone() { [ -z "$(con_state "$CON_ZONE")" ]; }
 sigterm_logged() { plog_show "SIGTERM during gap" && plog_show "giving up"; }
 new_instance_running() { local p; p=$(plugin_pid); echo "MainPID $p, before $1"; [ -n "$p" ] && [ "$p" != 0 ] && [ "$p" != "$1" ]; }
 new_instance_started() { plog | grep -o 'starting (pid [0-9]*' | grep -v "pid $1\$" | grep -q .; }
-idle_exit_done() { plugin_unit_down && ! bus_owned; }
+idle_exit_done() { echo "plugin unit: $(sc is-active "$PLUGIN_UNIT"); $BUS owned: $(bus_owned && echo yes || echo no)"; plugin_unit_down && ! bus_owned; }
+stays_dead() { sleep 5; echo "running instances: '$(running_slots | xargs)'"; [ -z "$(running_slots)" ] && ! new_instance_started "$1"; }
+new_instance_owns() { local p; p=$(plugin_pid); echo "MainPID $p, before $1"; [ "$p" != "$1" ] && plugin_owns_bus "$p"; }
+per_activation_name() { echo "$BUS"; [[ $BUS == "$FIXED_BUS".Connection_* ]]; }
 no_work_after_disconnect() { ! plog | sed -n '/Disconnect: switching off/,$p' | grep -E 'reconnect attempt [0-9]+ in|Config:|tunnel dropped'; }
 tunnel_not_restarted() { ! jc -u "$TUNNEL_UNIT" --since "@$1" -o cat | grep -E -q 'Starting|Started'; }
 process_gone() { ! kill -0 "$1" 2> /dev/null; }
@@ -215,7 +225,7 @@ s_install() {
     begin M2-01 "install: files, labels, conf.d"
     check M2-01a "all files of meson install are present" installed_files_present
     check M2-01b "SELinux labels are what policy expects (restorecon -n finds nothing to change)" labels_ok
-    result M2-01b-i INFO "label of nm-sshuttle.service: $(stat -c %C /usr/lib/systemd/system/nm-sshuttle.service 2> /dev/null); of the service script: $(stat -c %C "$LIBEXEC/nm-sshuttle-service" 2> /dev/null)"
+    result M2-01b-i INFO "label of nm-sshuttle@.service: $(stat -c %C /usr/lib/systemd/system/nm-sshuttle@.service 2> /dev/null); of the service script: $(stat -c %C "$LIBEXEC/nm-sshuttle-service" 2> /dev/null)"
     check M2-01c "SELinux is enforcing" test "$(getenforce 2> /dev/null)" = Enforcing
     # conf.d 90-nm-sshuttle.conf: take it away and a new nmss0 is managed; put it
     # back, 'nmcli general reload conf', and a new nmss0 is unmanaged (state 10)
@@ -235,7 +245,7 @@ s_install() {
         result M2-01d PASS "without 90-nm-sshuttle.conf a new $LINK is managed (device state $without)"
     fi
     check M2-01e "with it, after 'nmcli general reload conf', a new $LINK is unmanaged (state 10, saw $with)" test "$with" = 10
-    check M2-01f "NetworkManager --print-config lists interface-name:$LINK as unmanaged" unmanaged_in_print_config
+    check M2-01f "NetworkManager --print-config lists interface-name:nmss* as unmanaged" unmanaged_in_print_config
 }
 
 s_connect() {
@@ -250,6 +260,7 @@ s_connect() {
     check M2-02f "guard table $GUARD_TABLE exists" guard_present
     check M2-02g "the tunnel unit is active" tunnel_active
     check M2-02h "the plugin is alive and owns $BUS" plugin_owns_bus
+    check M2-02k "NetworkManager gave the activation its own bus name (--bus-name)" per_activation_name
     if fw_running; then
         check M2-02i "firewalld has $LINK bound to a zone" fw_bound
         result M2-02i-z INFO "zone of $LINK: $(fw_zone_of_link); default zone $(fw_default_zone)"
@@ -424,7 +435,7 @@ s_sigterm() {
     seq=$(signal_sequence "$REPORT/raw/signals-M2-08.txt")
     check M2-08a "signals: Config, then Failure, then STOPPED" signals_in_order "$seq"
     check_le M2-08b "the VPN goes down after the stop" "$T_CON" 3000 ms
-    check_le M2-08c "nmss0 is removed" "$T_LINK" 2500 ms
+    check_le M2-08c "$LINK is removed" "$T_LINK" 2500 ms
     check_le M2-08d "the guard is removed" "$T_GUARD" 3000 ms
     check_le M2-08f "the service has exited" "$T_UNIT" 5500 ms
     check M2-08g "systemctl stop succeeded" stop_result_ok
@@ -463,7 +474,7 @@ s_kill9() {
     sleep 2
     oldpid=$(plugin_pid)
     kill -9 "$oldpid"
-    # resolved before any 'nmcli general reload dns-rc': does it keep the server on nmss0?
+    # resolved before any 'nmcli general reload dns-rc': does it keep the server on the link?
     while link_exists && [ "$n" -lt 100 ]; do
         if rv dns "$LINK" 2> /dev/null | grep -q "$DNS_IP"; then
             seen_any=yes
@@ -477,20 +488,15 @@ s_kill9() {
     done
     result M2-09i INFO "resolved kept $DNS_IP on $LINK right after the kill: ${seen_first:-link was already gone}; at any of $n samples until the link went: $seen_any"
     check M2-09a "NM sets the VPN disconnected after the kill" wait_for 15 con_gone
-    check M2-09b "nmss0, guard and tunnel unit are gone" wait_for 15 all_clean
-    check M2-09c "a new plugin instance started (NM's Disconnect activates it)" wait_for 20 new_instance_started "$oldpid"
-    result M2-09j INFO "cleanup lines: $(plog | grep -F 'cleanup:' | cut -d' ' -f6- | xargs -d '\n' echo | cut -c1-300)"
-    result M2-09k INFO "new instance saw: $(plog | grep -E 'Disconnect: already stopped|D-Bus call' | tail -n 3 | cut -d' ' -f6- | xargs -d '\n' echo | cut -c1-200)"
+    check M2-09b "$LINK, guard and tunnel unit are gone" wait_for 15 all_clean
+    # No activation file names a plugin bus name any more, so NM's Disconnect
+    # after the kill starts nothing; ExecStopPost has cleaned up
+    # (docs/later/multiple-tunnels.md).
+    check M2-09c "no new plugin instance starts after the kill" stays_dead "$oldpid"
+    check M2-09e "the plugin unit is down and $BUS is free" idle_exit_done
+    result M2-09j INFO "ExecStopPost: $(jc -u "$PLUGIN_UNIT" --since "@$MARK_EPOCH" -o cat | grep -F 'nm-sshuttle cleanup' | tail -n 2 | xargs -d '\n' echo | cut -c1-200)"
     dns_snap
     result M2-09l INFO "NM DnsManager after the kill (design expects a leaked VPN entry until NM restarts): $(xargs <<< "$DNS_SNAP")"
-    # The new instance idles for 60 s after its cleanup and then exits.
-    if WAIT_POLL=1 wait_for 120 plog_has "idle; exiting"; then
-        result M2-09d PASS "the new instance exits at its idle timeout (log line after $((WAITED_MS / 1000)) s of waiting)"
-    else
-        result M2-09d FAIL "the new instance did not log 'idle; exiting' within 120 s"
-        diag_state M2-09d
-    fi
-    check M2-09e "the plugin unit is inactive and the bus name is free after the idle exit" wait_for 10 idle_exit_done
     clear_leaked_dns
     end_checks M2-09
 }
@@ -511,26 +517,26 @@ s_toggle_off() {
     check M2-10c "no reconnect is scheduled, and no Config is sent, after the Disconnect" no_work_after_disconnect
     check M2-10d "the tunnel unit was not started again" tunnel_not_restarted "$t_off"
     check M2-10e "nothing left: no link, guard, tunnel unit" all_clean
-    check M2-10f "the plugin still runs and owns its bus name 25 s later (idle window)" plugin_owns_bus "$pid"
+    check M2-10f "the plugin served its one activation and exited; $BUS is free" idle_exit_done
     end_checks M2-10
 }
 
 s_reconnect_connect() {
-    begin M2-11 "Connect right after Disconnect, within the idle window"
+    begin M2-11 "Connect right after Disconnect"
     connect_ok M2-11 "first activation" || return
     local pid
     pid=$(plugin_pid)
     # a: asynchronous down, then up at once: the Connect may arrive while the plugin is stopping
     nmcli --wait 0 connection down "$CON" > /dev/null 2>&1
     if connect_ok M2-11a "activation again right behind an asynchronous 'connection down'"; then
-        check M2-11b "the same plugin instance served it (pid $pid)" plugin_owns_bus "$pid"
+        check M2-11b "a new plugin instance (slot $SLOT, $BUS) served it, not pid $pid" new_instance_owns "$pid"
         dns_checks M2-11c
     fi
     # d: synchronous down, then up
     nmcli connection down "$CON" > /dev/null 2>&1
     wait_for 20 con_gone
     if connect_ok M2-11d "activation again right after a finished 'connection down'"; then
-        check M2-11e "the same plugin instance served it (pid $pid)" plugin_owns_bus "$pid"
+        check M2-11e "a new plugin instance (slot $SLOT, $BUS) served it, not pid $pid" new_instance_owns "$pid"
         dns_checks M2-11f
     fi
     check M2-11g "plugin log: no Connect was ignored" plog_has_not "Connect ignored"
@@ -578,7 +584,7 @@ s_nm_restart() {
     wait_for 15 tunnel_gone && tt=$(( $(now_ms) - t0 ))
     wait_for 15 not_bus_owned && tp=$(( $(now_ms) - t0 ))
     # the plugin sees NM's name vanish only when NM has stopped, which the restart itself takes a while to do
-    check_le M2-13a "nmss0 is removed after the restart was requested (plugin removes it first)" "$tl" 3000 ms
+    check_le M2-13a "$LINK is removed after the restart was requested (plugin removes it first)" "$tl" 3000 ms
     check_le M2-13b "the guard is removed" "$tg" 8000 ms
     check_le M2-13c "the tunnel unit is gone" "$tt" 8000 ms
     check_le M2-13d "the plugin exits (bus name released)" "$tp" 12000 ms
@@ -601,14 +607,18 @@ make_leftovers() {
 }
 s_stoppost() {
     begin M2-14 "ExecStopPost cleans up what the plugin left"
+    # Started by hand, without a bus name from the dispatcher: the instance
+    # falls back to NM's fixed name.
+    use_slot 0
+    rm -f "$STATE_DIR/0/bus-name"
     # a: leftovers exist before the unit starts; whichever of the plugin's startup
     # cleanup and ExecStopPost removes them, none may remain after start + stop
     make_leftovers
-    check M2-14a "the unit starts with leftovers around (nmss0, guard table, stale sshuttle table)" sc start "$PLUGIN_UNIT"
+    check M2-14a "the unit starts with leftovers around ($LINK, guard table, stale sshuttle table)" sc start "$PLUGIN_UNIT"
     wait_for 20 all_clean
     result M2-14b INFO "after the start the plugin's startup cleanup left: $(leftovers)"
     sc stop "$PLUGIN_UNIT"
-    check M2-14c "after start + stop no nmss0, guard or stale table is left" all_clean
+    check M2-14c "after start + stop no $LINK, guard or stale table is left" all_clean
     # d: the leftovers appear after the startup cleanup, so only ExecStopPost can remove them
     sc start "$PLUGIN_UNIT"
     sleep 3
@@ -707,10 +717,11 @@ s_link_loss_up() {
 s_link_loss_preup() {
     begin M2-19 "link loss before the first 'activated' (pre-up)"
     local mon out
-    # delete nmss0 as soon as the plugin sends its first Ip4Config
-    ( stdbuf -oL busctl --system --no-pager monitor --match "type='signal',sender='$BUS',member='Ip4Config'" 2> /dev/null |
+    # delete the link as soon as the plugin sends its first Ip4Config (whichever
+    # slot the activation got)
+    ( stdbuf -oL busctl --system --no-pager monitor --match "$SIGMATCH,member='Ip4Config'" 2> /dev/null |
         while read -r line; do
-            case $line in *Member=Ip4Config*) ip link del "$LINK" 2> /dev/null; echo "deleted at $(date +%T.%N)"; break ;; esac
+            case $line in *Member=Ip4Config*) for l in $(any_links); do ip link del "$l" 2> /dev/null; done; echo "deleted at $(date +%T.%N)"; break ;; esac
         done > "$VARDIR/preup.txt" ) &
     mon=$!
     sleep 0.5
@@ -761,7 +772,7 @@ stop_in_gap() {
     seq=$(signal_sequence "$REPORT/raw/signals-$id.txt")
     check "${id}a" "signals: Config, then Failure, then STOPPED" signals_in_order "$seq"
     check_le "${id}b" "the VPN goes down after the stop" "$T_CON" 3000 ms
-    check_le "${id}c" "nmss0 is removed" "$T_LINK" 2500 ms
+    check_le "${id}c" "$LINK is removed" "$T_LINK" 2500 ms
     check_le "${id}d" "the guard is removed" "$T_GUARD" 3000 ms
     check_le "${id}f" "the service has exited" "$T_UNIT" 5500 ms
     check "${id}g" "systemctl stop succeeded" stop_result_ok
@@ -947,7 +958,7 @@ s_park() {
                 oldpid=$(plugin_pid)
                 kill -9 "$oldpid"
                 check M2-26k "the VPN goes down after the kill" wait_for 15 con_gone
-                check M2-26l "nmss0, guard and tunnel unit are gone" wait_for 15 all_clean
+                check M2-26l "$LINK, guard and tunnel unit are gone" wait_for 15 all_clean
                 dns_snap
                 check M2-26m "NM DnsManager has no VPN entry after a kill in a parked gap (the candidate's claim; M2-09 leaks it)" dns_no_vpn_entry
                 gap_end
@@ -1014,7 +1025,7 @@ jump_name_teardown() {
     return 0
 }
 pin_count() { journal_catch_up; grep -c -F "the first hop's name does not resolve" "$JOURNAL_LOG"; }
-pinned_jump() { grep -A2 "^Host $JUMP_NAME\$" /run/nm-sshuttle-ssh/ssh_config | grep -q "HostName $JUMP_IP"; }
+pinned_jump() { grep -A2 "^Host $JUMP_NAME\$" "/run/nm-sshuttle-ssh/ssh_config-$SLOT" | grep -q "HostName $JUMP_IP"; }
 
 s_jump_name() {
     begin M2-29 "a ProxyJump host named inside the tunnelled DNS domain"
@@ -1272,14 +1283,259 @@ s_suspend() {
     end_checks M2-28
 }
 
+# ------------------------------------------------------------ several tunnels
+# docs/later/multiple-tunnels.md. corp covers 10.99.0.0/24 except the lab's
+# 10.99.0.16/28 and its DNS server; the lab has its own DNS server and zone.
+# Both run over the jump host (MT-01), or the lab over corp, through an sshd
+# inside the corporate network (MT-02).
+mt_setup() {
+    local a
+    for a in $LAB_WEB $LAB_DNS $LAB_JUMP; do ip -n internal addr add "$a/24" dev i-j 2> /dev/null; done
+    sc is-active --quiet nmtest-dns2 || systemd-run --quiet --collect --unit=nmtest-dns2 -p SyslogIdentifier=nmtest-dns2 \
+        -p NetworkNamespacePath=/run/netns/internal \
+        /usr/bin/python3 "$REPO/lab/dns_server.py" $LAB_DNS lab.test $LAB_WEB
+    sc is-active --quiet nmtest-web2 || systemd-run --quiet --collect --unit=nmtest-web2 \
+        -p NetworkNamespacePath=/run/netns/internal \
+        /usr/bin/python3 -m http.server --bind $LAB_WEB 8080 --directory "$VARDIR/www"
+    if ! sc is-active --quiet nmtest-sshd2; then
+        { grep -v '^ListenAddress' "$SSHD_DIR/sshd_config"; echo "ListenAddress $LAB_JUMP"; } \
+            > "$SSHD_DIR/sshd2_config"
+        restorecon -RF "$SSHD_DIR" 2> /dev/null
+        systemd-run --quiet --collect --unit=nmtest-sshd2 \
+            -p NetworkNamespacePath=/run/netns/internal /usr/sbin/sshd -D -e -f "$SSHD_DIR/sshd2_config"
+        grep -q "^$LAB_JUMP " "$HOME_U/.ssh/known_hosts" ||
+            echo "$LAB_JUMP $(cut -d' ' -f1,2 "$SSHD_DIR/host_ed25519.pub")" >> "$HOME_U/.ssh/known_hosts"
+    fi
+    wait_for 10 mt_services_up
+}
+mt_services_up() {
+    ss -N internal -ltnH "src $LAB_WEB and sport = :8080" | grep -q . &&
+        ss -N internal -lunH "src $LAB_DNS and sport = :53" | grep -q . &&
+        ss -N internal -ltnH "src $LAB_JUMP and sport = :22" | grep -q .
+}
+mt_profiles() {  # mt_profiles LAB-REMOTE : corp without the lab's part, the lab, and one that overlaps corp
+    create_profile "$CON" "exclude = 10.99.0.16/28 $LAB_DNS/32"
+    REMOTE=$1 SUBNETS=10.99.0.16/28 DNS_SERVERS=$LAB_DNS DOMAINS=~lab.test create_profile "$CONL"
+    SUBNETS=10.99.0.10/32 DOMAINS=~other.test create_profile "$CONX"
+}
+mt_teardown() {
+    reset_state
+    sc stop nmtest-sshd2 nmtest-dns2 nmtest-web2 > /dev/null 2>&1
+    nmcli connection delete "$CONL" "$CONX" > /dev/null 2>&1
+    create_profile "$CON"
+}
+con_uuid() { nmcli -g connection.uuid connection show "$1" 2> /dev/null; }
+slot_of() {  # slot_of CONNECTION : the slot whose claim is the connection's
+    local u f
+    u=$(con_uuid "$1")
+    for f in "$STATE_DIR"/[0-7]/claim.json; do
+        [ -e "$f" ] && grep -q "\"uuid\": \"$u\"" "$f" && { basename "$(dirname "$f")"; return 0; }
+    done
+    return 1
+}
+con_state_is() { [ "$(con_state "$1")" = "$2" ]; }
+con_down() { [ -z "$(con_state "$1")" ]; }
+both_http() { http_ok "http://$WEB_IP:8080/" && http_ok "http://$LAB_WEB:8080/"; }
+two_links() { ip -4 -o addr show dev "nmss$1" | grep -F 192.0.0.8/32 && ip -4 -o addr show dev "nmss$2" | grep -F 192.0.0.8/32; }
+two_guards() { nft list table inet "nm-sshuttle-guard-$1" > /dev/null && nft list table inet "nm-sshuttle-guard-$2" > /dev/null; }
+mt_resolved() {  # mt_resolved LINK SERVER ZONE : the link carries the server and the routing domain
+    local dns dom
+    dns=$(rv dns "$1" 2>&1)
+    dom=$(rv domain "$1" 2>&1)
+    printf '%s\n%s\n' "$dns" "$dom"
+    contains "$dns" "$2" && contains "$dom" "~$3"
+}
+mt_logged() { servers_log "$1" | grep -q -F -- ": $2 type"; }
+mt_lookup() {  # mt_lookup ZONE ADDRESS UNIT : a fresh name resolves, and that zone's server saw it
+    local n="u$RANDOM$RANDOM.$1" out
+    out=$(rv query --cache=no --legend=no "$n" 2>&1)
+    echo "$out"
+    contains "$out" "$2" || return 1
+    wait_for 10 mt_logged "$3" "$n" || { echo "$3 never logged $n"; return 1; }
+}
+two_vpn_entries() {
+    echo "$DNS_SNAP"
+    [ "$(grep -c '^vpn=1 ' <<< "$DNS_SNAP")" = 2 ] &&
+        grep -q "^vpn=1 iface=nmss$1 ns=$DNS_IP" <<< "$DNS_SNAP" &&
+        grep -q "^vpn=1 iface=nmss$2 ns=$LAB_DNS" <<< "$DNS_SNAP"
+}
+tunnel_pid() { sc show -p MainPID --value "nm-sshuttle-tunnel@$1.service" 2> /dev/null; }
+corp_untouched() {  # corp_untouched SLOT SSHUTTLE-PID : still activated, same sshuttle, link and guard
+    echo "corp: '$(con_state "$CON")', sshuttle pid $(tunnel_pid "$1") (was $2)"
+    con_state_is "$CON" activated && [ "$(tunnel_pid "$1")" = "$2" ] &&
+        [ -e "/sys/class/net/nmss$1" ] && nft list table inet "nm-sshuttle-guard-$1" > /dev/null
+}
+slot_clean() {  # slot_clean N : the slot's link, guard and tunnel unit are gone
+    local t
+    t=$(sc is-active "nm-sshuttle-tunnel@$1.service" 2> /dev/null)
+    echo "nmss$1: $([ -e "/sys/class/net/nmss$1" ] && echo present || echo gone); tunnel: $t"
+    [ ! -e "/sys/class/net/nmss$1" ] && ! nft list table inet "nm-sshuttle-guard-$1" > /dev/null 2>&1 &&
+        case $t in active|activating|deactivating) false ;; *) true ;; esac
+}
+check_names_conflict() {  # nm-sshuttle check, as the user, reports the overlap
+    local out
+    out=$(as_user nm-sshuttle check "$CONX" 2>&1)
+    echo "$out"
+    contains "$out" "FAIL subnets overlap with the active profile $CON"
+}
+two_running() { echo "running: '$(running_slots | xargs)'"; [ "$(running_slots | wc -l)" = 2 ]; }
+
+s_multi() {
+    begin MT-01 "several tunnels: two at once, one reconnects, a third overlaps, a kill, an NM restart"
+    mt_setup || { result MT-01 FAIL "cannot start the lab's DNS, web and sshd"; mt_teardown; return; }
+    mt_profiles "$USER_NAME@$JUMP_IP"
+    local sc_="" sl="" pidc ifl t0
+    if connect_ok MT-01 "corp activates" && connect_ok MT-01a "the lab activates next to it" "$CONL"; then
+        sc_=$(slot_of "$CON")
+        sl=$(slot_of "$CONL")
+    fi
+    if [ -z "$sc_" ] || [ -z "$sl" ] || [ "$sc_" = "$sl" ]; then
+        result MT-01b FAIL "two instances in two slots (corp '$sc_', lab '$sl')"
+        mt_teardown
+        return
+    fi
+    result MT-01b PASS "two instances in two slots (corp $sc_, lab $sl)"
+    check MT-01c "both links carry 192.0.0.8/32" two_links "$sc_" "$sl"
+    check MT-01d "both guards exist" two_guards "$sc_" "$sl"
+    check MT-01e "traffic to corp ($WEB_IP) and to the lab ($LAB_WEB) goes through the tunnels" both_http
+    check MT-01f "resolved: nmss$sc_ has $DNS_IP and ~corp.test" mt_resolved "nmss$sc_" "$DNS_IP" corp.test
+    check MT-01g "resolved: nmss$sl has $LAB_DNS and ~lab.test" mt_resolved "nmss$sl" "$LAB_DNS" lab.test
+    check MT-01h "a corp name resolves through corp's server" mt_lookup corp.test "$WEB_IP" nmtest-dns
+    check MT-01i "a lab name resolves through the lab's server" mt_lookup lab.test "$LAB_WEB" nmtest-dns2
+    dns_snap
+    check MT-01j "NM DnsManager: one VPN entry on each link" two_vpn_entries "$sc_" "$sl"
+
+    # one tunnel reconnects: the jump host still accepts it, so it is back at once
+    pidc=$(tunnel_pid "$sc_")
+    use_slot "$sl"
+    ifl=$(link_ifindex)
+    drop_tunnel
+    wait_for 15 con_state_is "$CONL" activating
+    check MT-01k "the lab reconnects after its tunnel dies" wait_for 60 con_state_is "$CONL" activated
+    check MT-01l "corp was untouched (same sshuttle, link and guard)" corp_untouched "$sc_" "$pidc"
+    check MT-01m "the lab keeps its link (ifindex $ifl)" test "$(link_ifindex)" = "$ifl"
+    check MT-01n "traffic through both again" wait_for 10 both_http
+
+    # a third profile that overlaps corp is refused, with corp's name
+    activate "$CONX" > /dev/null 2>&1
+    check MT-01o "an overlapping third profile is refused" con_down "$CONX"
+    check MT-01p "plugin log names the profile it overlaps" plog_show "subnets overlap with the active profile $CON: 10.99.0.10/32"
+    check MT-01q "nm-sshuttle check reports the overlap" check_names_conflict
+    check MT-01r "the refused instance exits; the two others run on" wait_for 15 two_running
+    check MT-01s "traffic through both still" both_http
+
+    # kill -9 of one instance: its ExecStopPost cleans only its slot
+    use_slot "$sl"
+    kill -9 "$(plugin_pid)"
+    check MT-01t "the lab goes down after the kill" wait_for 15 con_down "$CONL"
+    check MT-01u "the lab's slot is cleaned (nmss$sl, its guard, its tunnel unit)" wait_for 15 slot_clean "$sl"
+    check MT-01v "corp was untouched" corp_untouched "$sc_" "$pidc"
+    check MT-01w "traffic to corp still flows" http_ok "http://$WEB_IP:8080/"
+
+    # an NM restart with two tunnels up: both tear down
+    if connect_ok MT-01y "the lab activates again" "$CONL"; then
+        t0=$(now_ms)
+        sc restart --no-block NetworkManager
+        check MT-01z "after an NM restart nothing is left in any slot" wait_for 20 all_clean
+        result MT-01z-i INFO "torn down $(( $(now_ms) - t0 )) ms after the restart was requested"
+        nm-online -s -q -t 60
+        sleep 2
+        dns_snap
+        check MT-01z-d "NM DnsManager has no VPN entry" dns_no_vpn_entry
+    fi
+    clear_leaked_dns
+    end_checks MT-01
+    mt_teardown
+}
+
+mt_lab_diag() {  # mt_lab_diag SLOT : why the lab stayed up during corp's gap
+    local pid
+    pid=$(sc show -p MainPID --value "nm-sshuttle@$1.service" 2> /dev/null)
+    result MT-02e-i INFO "the lab's tunnel unit: $(sc is-active "nm-sshuttle-tunnel@$1.service");" \
+        "connections to $LAB_JUMP:22: $(ss -tnpH "dst $LAB_JUMP" | xargs | cut -c1-300)"
+    sc status -l "nm-sshuttle-tunnel@$1.service" 2>&1 | sed -n '/CGroup:/,$p' | head -n 8 |
+        cut -c1-180 | sed 's/^/          p /'
+    ss -tanpH 2>&1 | grep -E '"(ssh|sshuttle|python3?)"' | cut -c1-180 | sed 's/^/          s /'
+    plog | grep -F "[$pid]:" | grep -E 'invisible|active connection' | head -n 3 | sed 's/^/          l /'
+    plog | grep -F "[$pid]:" | tail -n 15 | sed 's/^/          l /'
+}
+
+s_nested() {
+    begin MT-02 "several tunnels: the lab over corp; a corp gap takes the lab down, and it is back at once after corp"
+    mt_setup || { result MT-02 FAIL "cannot start the lab's DNS, web and sshd"; mt_teardown; return; }
+    mt_profiles "$USER_NAME@$LAB_JUMP"
+    local sc_ sl_ t_corp t_lab
+    connect_ok MT-02 "corp activates" || { mt_teardown; return; }
+    sc_=$SLOT
+    if ! connect_ok MT-02a "the lab activates, its ssh to $LAB_JUMP running over corp" "$CONL"; then
+        mt_teardown
+        return
+    fi
+    sl_=$SLOT
+    check MT-02b "plugin log: the lab's first hop is $LAB_JUMP" plog_show "first hop $LAB_JUMP"
+    check MT-02c "traffic to corp and to the lab" both_http
+    check MT-02d "a lab name resolves through the lab's server" mt_lookup lab.test "$LAB_WEB" nmtest-dns2
+    result MT-02i INFO "the lab's ssh to $LAB_JUMP: $(ss -tnpH "dst $LAB_JUMP" | xargs | cut -c1-200)"
+    log_mark
+    use_slot "$sc_"
+    gap_begin || { result MT-02e FAIL "no corp gap (state '$(con_state)')"; mt_teardown; return; }
+    check MT-02e "the lab drops with corp" wait_for 30 con_state_is "$CONL" activating
+    con_state_is "$CONL" activated && mt_lab_diag "$sl_"
+    sleep 10                        # the lab's backoff grows meanwhile
+    gap_end
+    if wait_for 60 con_is activated; then
+        t_corp=$(now_ms)
+        wait_for 60 con_state_is "$CONL" activated
+        t_lab=$(( $(now_ms) - t_corp ))
+        con_state_is "$CONL" activated || t_lab=""
+        check_le MT-02f "the lab is activated again soon after corp" "$t_lab" 6000 ms
+    else
+        result MT-02f FAIL "corp did not come back within 60 s"
+    fi
+    check MT-02g "plugin log: another VPN was activated, so the lab tried at once" plog_show "another VPN was activated"
+    check MT-02h "traffic to corp and to the lab again" wait_for 10 both_http
+    end_checks MT-02
+    mt_teardown
+}
+
+# ms between the first lines since log_mark matching $1 and $2, from systemd,
+# the dispatcher or a plugin instance
+GAP_LINE=' (systemd\[1\]|nm-sshuttle-dispatcher\[[0-9]+\]|nm-sshuttle-service\[[0-9]+\]): '
+line_time() { date -d "$(cut -d' ' -f1-3)" +%s.%N 2> /dev/null; }  # a journal line's time, in s
+journal_gap_ms() {
+    local a b
+    a=$(journal_since_mark | grep -E "$GAP_LINE" | grep -m1 -F -- "$1" | line_time)
+    b=$(journal_since_mark | grep -E "$GAP_LINE" | grep -m1 -F -- "$2" | line_time)
+    [ -n "$a" ] && [ -n "$b" ] && awk -v a="$a" -v b="$b" 'BEGIN { printf "%d", (b - a) * 1000 }'
+}
+s_timing() {
+    begin MT-03 "several tunnels: from the dispatcher's start to the instance owning its name"
+    local cold warm
+    sc stop "$DISPATCHER_UNIT" > /dev/null 2>&1
+    sleep 1
+    log_mark
+    connect_ok MT-03 "activation with the dispatcher stopped (cold)" || return
+    cold=$(journal_gap_ms "Starting nm-sshuttle-dispatcher.service" "Started nm-sshuttle@$SLOT.service")
+    check_le MT-03a "cold: the dispatcher's start to the instance's READY=1, well inside NM's 5 s" "$cold" 3500 ms
+    nmcli connection down "$CON" > /dev/null 2>&1
+    wait_for 20 con_gone
+    sleep 2
+    log_mark
+    connect_ok MT-03b "activation with the dispatcher running (warm)" || return
+    warm=$(journal_gap_ms "slot $SLOT for" "Started nm-sshuttle@$SLOT.service")
+    result MT-03c INFO "warm: the dispatcher's StartUnit to the instance's READY=1: ${warm:-?} ms"
+    end_checks MT-03
+}
+
 # ------------------------------------------------------------------ collect
 collect() {
     note "collecting"
     local u
     raw journal-all journalctl --no-pager --since "@$START_EPOCH" -o short-precise \
-        -u NetworkManager -u "$PLUGIN_UNIT" -u "$TUNNEL_UNIT" -u nmtest-sshd -u nmtest-dns \
+        -u NetworkManager -u "$DISPATCHER_UNIT" -u "$PLUGIN_GLOB" -u 'nm-sshuttle-tunnel@*.service' \
+        -u nmtest-sshd -u nmtest-dns \
         -u systemd-resolved -u firewalld -u NetworkManager-dispatcher -u dbus-broker
-    raw journal-plugin journalctl --no-pager --since "@$START_EPOCH" -o short-precise -u "$PLUGIN_UNIT"
+    raw journal-plugin journalctl --no-pager --since "@$START_EPOCH" -o short-precise -u "$DISPATCHER_UNIT" -u "$PLUGIN_GLOB"
     raw firewalld firewall-cmd --get-active-zones
     {
         echo "# nm-sshuttle test-vm report"
@@ -1357,6 +1613,9 @@ want V6-02 && s_ipv6_roam
 want TP-01 && s_tproxy
 want TP-02 && s_tproxy_health
 want TP-03 && s_tproxy_nm
+want MT-01 && s_multi
+want MT-02 && s_nested
+want MT-03 && s_timing
 s_selinux
 reset_state
 collect
