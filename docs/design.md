@@ -1787,4 +1787,5 @@ Later, also propose a hook for an externally provided firewall helper
    with KVM (about 12 min). What CI cannot run stays open under M2:
    suspend, the GNOME checks by hand, and DNS without resolved.
 5. **Later:** GTK4 editor plugin for GNOME Settings, several tunnels at once
-   (template units), UDP through `tproxy`, IPv6 guard sets.
+   (template units), UDP through `tproxy`, IPv6 guard sets. Each has a
+   design in [`later/`](later/README.md).
