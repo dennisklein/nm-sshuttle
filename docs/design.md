@@ -1819,10 +1819,22 @@ Later, also propose a hook for an externally provided firewall helper
      entry, unlike M2-09. One run is not enough to turn it on by default.
    The first CI run logged one SELinux denial that the second did not; its
    record was not kept.
-   Still to do: suspend (M2-28, opt-in: `test-vm/vm.sh run --only M2-28
-   --suspend` on a host whose VM wakes from its RTC), the GNOME checks by
-   hand (`test-vm/README.md`), and resolv.conf without resolved, which
-   needs a Debian or Ubuntu VM.
+   **Third VM run** (CI, 2026-10-11; 482 checks, no failure, no SELinux
+   denial) added M2-29: with a ProxyJump host named inside `~corp.test`,
+   the reconnect after a kill found the name unresolvable and came back
+   through the pinned address (§4.3).
+   **On a notebook** (Fedora 44 with GNOME, a real corporate network
+   behind a ProxyJump host, 2026-10-11), checked by hand: the Quick
+   Settings toggle, a killed tunnel, roaming, airplane mode (no attempts
+   while offline, a reconnect at once after it), suspend and resume, the
+   agent's passphrase
+   prompt, the lock screen, automatic lock with suspend, and fail closed
+   (with the jump host blocked, TCP to a tunnelled host was reset at once)
+   all worked. Two bugs found there are fixed: `nm-sshuttle check` read
+   `nmcli -g`'s escaped output and rejected every profile, and reconnects
+   failed when the jump host's name lay in the tunnelled domain (M2-29).
+   Still to do: resolv.conf without resolved, which needs a Debian or
+   Ubuntu VM. M2-28 (suspend in the VM) remains opt-in.
    The full scope: persistence, reconnect and backoff, sleep, roaming,
    guard, sweeper, startup and `ExecStopPost` cleanup, the unmanaged
    `nmss0` setting and its check, health checks and unit tests. The park
@@ -1835,8 +1847,8 @@ Later, also propose a hook for an externally provided firewall helper
    Fedora 43 and 44 and deb packages for Debian 13 and Ubuntu 26.04, built
    and install-checked in CI; the [user guide](user-guide.md) and the
    README; and the VM tests in CI, on demand and weekly, on hosted runners
-   with KVM (about 12 min). What CI cannot run stays open under M2:
-   suspend, the GNOME checks by hand, and DNS without resolved.
+   with KVM (about 12 min). Suspend and the GNOME checks passed by hand
+   on a notebook; DNS without resolved stays open under M2.
 5. **Later:** GTK4 editor plugin for GNOME Settings, several tunnels at once
    (template units), UDP through `tproxy`, IPv6 guard sets. Each has a
    design in [`later/`](later/README.md). **IPv6 is in:** IPv6 subnets
