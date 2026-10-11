@@ -1,0 +1,5 @@
+[D-BUS Service]
+Name=org.freedesktop.NetworkManager.sshuttle.Dispatcher
+Exec=@LIBEXECDIR@/nm-sshuttle-dispatcher
+User=root
+SystemdService=nm-sshuttle-dispatcher.service

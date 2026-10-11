@@ -1,0 +1,22 @@
+[Unit]
+Description=NetworkManager sshuttle VPN plugin, slot %i
+Documentation=https://github.com/dennisklein/nm-sshuttle
+
+[Service]
+# The dispatcher starts it for one activation and writes the bus name it owns
+# to /run/nm-sshuttle/%i/bus-name (docs/later/multiple-tunnels.md). READY=1
+# comes once it owns that name.
+Type=notify
+NotifyAccess=main
+ExecStart=@LIBEXECDIR@/nm-sshuttle-service --slot %i
+# After a stop, a kill or a crash: stop this slot's tunnel unit, remove its
+# link, guard and stale sshuttle tables. NetworkManager never removes the link
+# itself (design §4.4, §4.7).
+ExecStopPost=@LIBEXECDIR@/nm-sshuttle cleanup --slot %i
+# The plugin owns the restart policy; a restart under an active VPN would
+# leave NetworkManager's DNS entry behind.
+Restart=no
+OOMScoreAdjust=-500
+# On SIGTERM the plugin gives up first and waits up to 1 s for
+# NetworkManager's Disconnect; it exits within 5 s whatever happens.
+TimeoutStopSec=20

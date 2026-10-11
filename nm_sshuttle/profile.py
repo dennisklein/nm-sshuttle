@@ -41,13 +41,14 @@ class Profile:
     fail_closed: bool = True
     ignored_keys: list = field(default_factory=list)
 
-    def tunnel_spec(self, first_hop, ipv6=False):
+    def tunnel_spec(self, first_hop, ipv6=False, slot=0):
         """What exec-tunnel needs, as JSON-friendly data. first_hop is the list
-        of the first hop's addresses; ipv6 says whether sshuttle tunnels IPv6."""
+        of the first hop's addresses; ipv6 says whether sshuttle tunnels IPv6;
+        slot picks the activation's own tproxy mark."""
         return {"remote": self.remote, "user": self.user, "subnets": self.subnets,
                 "exclude": self.exclude, "dns": self.dns, "dns_servers": self.dns_servers,
                 "method": self.method, "first_hop": list(first_hop), "ipv6": ipv6,
-                **({"tmark": TPROXY_MARK} if self.method == "tproxy" else {})}
+                **({"tmark": TPROXY_MARK + slot} if self.method == "tproxy" else {})}
 
     def guarded_networks(self):
         """Networks the guard makes fail closed: the subnets plus the DNS servers."""

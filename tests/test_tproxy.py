@@ -33,11 +33,11 @@ def test_sshuttle_argv_passes_the_mark():
 
 # ------------------------------------------------------------------- guard
 def test_the_guard_accepts_the_mark_ahead_of_the_dnat_rule():
-    rules = guard.guard_ruleset(["10.0.0.0/8", "2001:db8::/48"], [], TPROXY_MARK).splitlines()
+    rules = guard.guard_ruleset("g", ["10.0.0.0/8", "2001:db8::/48"], [], TPROXY_MARK).splitlines()
     mark4 = rules.index("        ip daddr @subnets4 meta mark 0x4e530000 accept")
     mark6 = rules.index("        ip6 daddr @subnets6 meta mark 0x4e530000 accept")
     assert max(mark4, mark6) < rules.index("        ip daddr @subnets4 ct status dnat accept")
-    assert "meta mark" not in guard.guard_ruleset(["10.0.0.0/8"], [])
+    assert "meta mark" not in guard.guard_ruleset("g", ["10.0.0.0/8"], [])
 
 
 def fake_ip(monkeypatch, rules="", routes=""):
@@ -61,13 +61,13 @@ def fake_ip(monkeypatch, rules="", routes=""):
 
 def test_policy_routing_goes_by_exact_values(monkeypatch):
     calls = fake_ip(monkeypatch)
-    guard.install_policy_routing([4, 6])
+    guard.install_policy_routing([4, 6], 0)
     rule = ["priority", "100", "fwmark", "0x4e530000/0xffffffff", "lookup", "20051"]
     route = ["local", "default", "dev", "lo", "table", "20051"]
     assert ["ip", "-4", "rule", "add", *rule] in calls
     assert ["ip", "-6", "route", "replace", *route] in calls
     calls.clear()
-    assert guard.remove_policy_routing()
+    assert guard.remove_policy_routing(0)
     assert ["ip", "-4", "rule", "del", *rule] in calls
     assert not any("flush" in argv for argv in calls)
 
@@ -76,10 +76,10 @@ def test_policy_routing_is_read_back_per_family(monkeypatch):
     fake_ip(monkeypatch, rules="0:\tfrom all lookup local\n"
                                "100:\tfrom all fwmark 0x4e530000 lookup 20051\n",
             routes="local default dev lo scope host\n")
-    assert guard.policy_routing_present([4, 6])
+    assert guard.policy_routing_present([4, 6], 0)
     fake_ip(monkeypatch, rules="100:\tfrom all fwmark 0x1 lookup 100\n",
             routes="local default dev lo scope host\n")
-    assert not guard.policy_routing_present([4])
+    assert not guard.policy_routing_present([4], 0)
 
 
 # ------------------------------------------------------------------- sweep
@@ -118,11 +118,11 @@ def test_the_sweep_removes_the_chains_of_a_port_without_listener():
 def test_health_reads_the_mark_chain_for_tproxy(monkeypatch):
     monkeypatch.setattr(tunnel.subprocess, "run", lambda argv, **kw: SimpleNamespace(
         returncode=0, stdout=MANGLE if argv[0].endswith("tables") else
-        "table inet nm-sshuttle-guard\ntable inet sshuttle-ipv4-12300\n"))
+        "table inet g\ntable inet sshuttle-ipv4-12300\n"))
     monkeypatch.setattr(tunnel, "listening_ports", lambda: {12300})
-    assert tunnel.nft_health("tproxy") == {"guard": True, "sshuttle": {4, 6}}
+    assert tunnel.nft_health("tproxy", "g") == {"guard": True, "sshuttle": {4, 6}}
     monkeypatch.setattr(tunnel, "listening_ports", lambda: {12399})
-    assert tunnel.nft_health("tproxy")["sshuttle"] == set()
+    assert tunnel.nft_health("tproxy", "g")["sshuttle"] == set()
 
 
 # -------------------------------------------------------------- supervisor

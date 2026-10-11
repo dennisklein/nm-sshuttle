@@ -30,9 +30,8 @@ import traceback
 from . import profile as profile_mod
 from .const import (AC_ACTIVATED, AC_ACTIVATING, AC_DEACTIVATED, AC_DEACTIVATING,
                     AC_NAMES, AC_UNKNOWN, CONN_PORTAL, DEVICE_UNMANAGED, FAIL_CONNECT,
-                    FAIL_LOGIN, LINK, LINK_ADDRESS, NBNS_SENTINEL,
-                    ST_INIT, ST_STARTED, ST_STARTING, ST_STOPPED, ST_STOPPING, STATE_NAMES,
-                    TPROXY_MARK)
+                    FAIL_LOGIN, LINK_ADDRESS, NBNS_SENTINEL,
+                    ST_INIT, ST_STARTED, ST_STARTING, ST_STOPPED, ST_STOPPING, STATE_NAMES)
 from .tunnel import classify_failure
 
 log = logging.getLogger("nm-sshuttle")
@@ -80,9 +79,14 @@ class Supervisor:
     SLEEP_CAP = 3.0            # release the sleep inhibitor by then (logind waits 5 s)
     PARK_GAP = False           # candidate (design §7, M2): a lone Config in each gap
 
-    def __init__(self, fx, parse_profile=profile_mod.parse):
+    def __init__(self, fx, parse_profile=profile_mod.parse, one_activation=False):
         self.fx = fx
+        self.slot = fx.slot            # names everything this activation creates
+        self.link = self.slot.link
         self.parse_profile = parse_profile
+        # Under a per-activation bus name the process serves exactly one
+        # activation and then exits (docs/later/multiple-tunnels.md).
+        self.one_activation = one_activation
         self.phase = "idle"
         self.state = ST_INIT
         self.timers = {}
@@ -250,7 +254,7 @@ class Supervisor:
         return self.ifindex is not None and self.fx.link_ifindex() == self.ifindex
 
     def _config(self):
-        return {"gateway": self.gateway, "tundev": LINK, "has-ip4": True,
+        return {"gateway": self.gateway, "tundev": self.link, "has-ip4": True,
                 "has-ip6": False, "can-persist": True}
 
     def _ip4_config(self, sentinel=False):
@@ -265,7 +269,7 @@ class Supervisor:
         return cfg
 
     def _install_guard(self):
-        mark = TPROXY_MARK if self.profile.method == "tproxy" else None
+        mark = self.slot.tproxy_mark if self.profile.method == "tproxy" else None
         self.fx.install_guard(self.profile.guarded_networks(),
                               self.hops + list(self.profile.exclude), mark)
         self.guard_installed = True
@@ -470,9 +474,10 @@ class Supervisor:
     def _have_first_hop(self, addrs, stale_device):
         self._set_hops(addrs)
         if self.fx.link_ifindex() is not None and stale_device is None:
-            # A leftover nmss0: note NM's device for it, so that the poll below does
+            # A leftover link: note NM's device for it, so that the poll below does
             # not take it for the new link's (design §4.1).
-            self.fx.find_device(LINK, self._callback(self._leftover_device, self.activation_id))
+            self.fx.find_device(self.link,
+                                self._callback(self._leftover_device, self.activation_id))
             return
         self.stale_device = stale_device
         try:
@@ -482,17 +487,18 @@ class Supervisor:
                 self._install_guard()
             if self.profile.method == "tproxy":
                 self._install_routing()
-            self.fx.write_tunnel_spec(self.profile.tunnel_spec(self.hops, self.ipv6))
+            self.fx.write_tunnel_spec(self.profile.tunnel_spec(self.hops, self.ipv6,
+                                                               self.slot.n))
         except (OSError, RuntimeError) as e:
             self.give_up(FAIL_CONNECT, str(e))
             return
-        log.info("first hop %s; %s has ifindex %s", ", ".join(self.hops), LINK, self.ifindex)
+        log.info("first hop %s; %s has ifindex %s", ", ".join(self.hops), self.link, self.ifindex)
         self._start_tunnel(self._first_tunnel_result)
 
     def _leftover_device(self, aid, path):
         if aid != self.activation_id or self.phase != "connecting":
             return
-        log.info("a leftover %s exists (NM device %s); replacing it", LINK, path)
+        log.info("a leftover %s exists (NM device %s); replacing it", self.link, path)
         self._have_first_hop(self.hops, path or "")
 
     def _first_tunnel_result(self, ok, detail):
@@ -508,10 +514,10 @@ class Supervisor:
         if self.phase != "connecting":
             return
         if path is None:
-            self.give_up(FAIL_CONNECT, f"NetworkManager never created a device for {LINK}")
+            self.give_up(FAIL_CONNECT, f"NetworkManager never created a device for {self.link}")
             return
         if not self._link_intact():
-            self.give_up(FAIL_CONNECT, f"{LINK} was lost before the first Config")
+            self.give_up(FAIL_CONNECT, f"{self.link} was lost before the first Config")
             return
         if self._nm_ending():
             self.give_up(FAIL_CONNECT, "NetworkManager is ending the connection; no Config")
@@ -559,7 +565,7 @@ class Supervisor:
 
     def _device_ask(self, pid, deadline, cb):
         if pid == self.poll_id:
-            self.fx.find_device(LINK, self._callback(self._device_answer, pid, deadline, cb))
+            self.fx.find_device(self.link, self._callback(self._device_answer, pid, deadline, cb))
 
     def _device_answer(self, pid, deadline, cb, path):
         if pid != self.poll_id:
@@ -591,7 +597,7 @@ class Supervisor:
             log.info("NM: active connection is %s%s", AC_NAMES.get(state, state),
                      f" (reason {reason})" if reason is not None else "")
         if self.phase in ACTIVE and self.ifindex is not None and not self._link_intact():
-            self.give_up(FAIL_CONNECT, f"{LINK} was lost")
+            self.give_up(FAIL_CONNECT, f"{self.link} was lost")
             return
         if state == AC_ACTIVATED and prev != AC_ACTIVATED:
             self._on_activated()
@@ -621,7 +627,7 @@ class Supervisor:
             if not self.starting_sent:
                 self._send_starting()
             elif not self._link_intact():
-                self.give_up(FAIL_CONNECT, f"{LINK} was lost during a reconnect")
+                self.give_up(FAIL_CONNECT, f"{self.link} was lost during a reconnect")
             elif self.bounces < self.MAX_BOUNCES:
                 # NM flipped to "activated" while the tunnel is down (design §4.4).
                 self.bounces += 1
@@ -640,15 +646,15 @@ class Supervisor:
             return
         if state is None:
             log.warning("cannot read NetworkManager's state for %s; the unmanaged "
-                        "setting is unchecked", LINK)
+                        "setting is unchecked", self.link)
         elif state == DEVICE_UNMANAGED:
             self.link_managed = False
-            log.info("%s is unmanaged by NetworkManager, as configured", LINK)
+            log.info("%s is unmanaged by NetworkManager, as configured", self.link)
         else:
             self.link_managed = True
             log.warning("%s is managed by NetworkManager (device state %s); DNS may take "
                         "the default route (risk 11). Is 90-nm-sshuttle.conf masked or "
-                        "overridden, or has NetworkManager not reloaded it yet?", LINK, state)
+                        "overridden, or has NetworkManager not reloaded it yet?", self.link, state)
 
     def _on_deactivating(self, state):
         if self.phase in ACTIVE:
@@ -793,7 +799,7 @@ class Supervisor:
         self.retry_after_stop = False
         self._cancel("stop-wait")
         if not self._link_intact():
-            self.give_up(FAIL_CONNECT, f"{LINK} was lost during a reconnect")
+            self.give_up(FAIL_CONNECT, f"{self.link} was lost during a reconnect")
             return
         self.attempts += 1
         self.in_attempt = True
@@ -833,7 +839,8 @@ class Supervisor:
             try:
                 if self.profile.fail_closed:
                     self._install_guard()
-                self.fx.write_tunnel_spec(self.profile.tunnel_spec(self.hops, self.ipv6))
+                self.fx.write_tunnel_spec(self.profile.tunnel_spec(self.hops, self.ipv6,
+                                                                   self.slot.n))
             except (OSError, RuntimeError) as e:
                 self.give_up(FAIL_CONNECT, str(e))
                 return
@@ -882,10 +889,10 @@ class Supervisor:
         if self.phase != "gap":
             return
         if path is None:
-            self.give_up(FAIL_CONNECT, f"NetworkManager has no device for {LINK}")
+            self.give_up(FAIL_CONNECT, f"NetworkManager has no device for {self.link}")
             return
         if not self._link_intact():
-            self.give_up(FAIL_CONNECT, f"{LINK} was lost during a reconnect")
+            self.give_up(FAIL_CONNECT, f"{self.link} was lost during a reconnect")
             return
         if self._foreign_nm():
             self.give_up(FAIL_CONNECT, "NetworkManager is not the instance that connected")
@@ -975,7 +982,7 @@ class Supervisor:
         if self.phase != "reconfig" or self.escalated:
             return
         if not self._link_intact():
-            self.give_up(FAIL_CONNECT, f"{LINK} was lost during a reconnect")
+            self.give_up(FAIL_CONNECT, f"{self.link} was lost during a reconnect")
             return
         if self._foreign_nm():
             self.give_up(FAIL_CONNECT, "NetworkManager is not the instance that connected")
@@ -1164,7 +1171,7 @@ class Supervisor:
     def check_link(self):
         """Called periodically: nmss0 lost means give up at once (design §4.4, branch 4)."""
         if self.phase in ACTIVE and self.ifindex is not None and not self._link_intact():
-            self.give_up(FAIL_CONNECT, f"{LINK} was lost")
+            self.give_up(FAIL_CONNECT, f"{self.link} was lost")
 
     # --------------------------------------------------------------- give up
     def _pick_branch(self):
@@ -1215,7 +1222,7 @@ class Supervisor:
             self._safe(self._set_state, ST_STOPPED)
         if branch == "4-stale":
             log.warning("a link named %s with another ifindex exists; NetworkManager may "
-                        "keep a stale DNS entry for the old one", LINK)
+                        "keep a stale DNS entry for the old one", self.link)
         self._enter_stopping()
         if quit:
             self._request_quit()
@@ -1231,6 +1238,9 @@ class Supervisor:
         self._timer("link-cap", self.LINK_CAP, self._remove_link_and_guard)
         if self.disconnect_seen or self.ac_state == AC_DEACTIVATED:
             self._timer("link", self.LINK_DELAY, self._remove_link_and_guard)
+        if self.one_activation:
+            # Once torn down and NM's Disconnect is seen (or 1 s passed), exit.
+            self._request_quit()
 
     def _request_quit(self):
         self.quit_requested = True

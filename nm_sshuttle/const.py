@@ -2,6 +2,7 @@
 """Names, paths and NetworkManager constants shared by the plugin and the CLI."""
 
 import os
+from dataclasses import dataclass
 
 BUS_NAME = "org.freedesktop.NetworkManager.sshuttle"
 SERVICE_TYPE = BUS_NAME
@@ -26,13 +27,14 @@ LOGIN_MANAGER_IFACE = "org.freedesktop.login1.Manager"
 LOGIN_USER_IFACE = "org.freedesktop.login1.User"
 LOGIN_SESSION_IFACE = "org.freedesktop.login1.Session"
 
-PLUGIN_UNIT = "nm-sshuttle.service"
-TUNNEL_UNIT = "nm-sshuttle-tunnel.service"
+# The dispatcher gives each activation a slot (docs/later/multiple-tunnels.md).
+DISPATCHER_NAME = BUS_NAME + ".Dispatcher"
+DISPATCHER_PATH = "/org/freedesktop/NetworkManager/sshuttle"
+DISPATCHER_UNIT = "nm-sshuttle-dispatcher.service"
+SLOTS = 8
 
-LINK = "nmss0"
 LINK_ADDRESS = "192.0.0.8"      # RFC 7600 IPv4 dummy address (design §4.1)
 NBNS_SENTINEL = "192.0.0.10"    # the reconnect sentinel (design §4.4)
-GUARD_TABLE = "nm-sshuttle-guard"
 # method=tproxy (docs/later/tproxy.md): the mark sshuttle sets ("NS" in the high
 # half, nobody else's), the routing table that sends marked packets to lo, and
 # the rule's priority, ahead of Tailscale's and wg-quick's rules.
@@ -43,11 +45,67 @@ TPROXY_PRIORITY = 100
 # Overridable for development and tests; packages use the defaults.
 LIBEXEC = os.environ.get("NM_SSHUTTLE_LIBEXEC", "/usr/libexec/nm-sshuttle")
 STATE_DIR = os.environ.get("NM_SSHUTTLE_STATE_DIR", "/run/nm-sshuttle")
-TUNNEL_SPEC = os.path.join(STATE_DIR, "tunnel.json")
 # World-readable, unlike STATE_DIR: ssh reads it as the user (design §4.3).
 SSH_CONFIG = os.environ.get("NM_SSHUTTLE_SSH_CONFIG", "/run/nm-sshuttle-ssh/ssh_config")
-# NM versions on which the nbns reconnect never completed (design §4.4)
+# NM versions on which the nbns reconnect never completed (design §4.4); global,
+# instances append to it
 INVISIBLE_MARK = os.path.join(STATE_DIR, "invisible-reconnect")
+
+# What a single-tunnel version created; cleanup --all removes it after an upgrade.
+V1_PLUGIN_UNIT = "nm-sshuttle.service"
+V1_TUNNEL_UNIT = "nm-sshuttle-tunnel.service"
+V1_GUARD_TABLE = "nm-sshuttle-guard"
+V1_TUNNEL_SPEC = os.path.join(STATE_DIR, "tunnel.json")
+
+
+@dataclass(frozen=True)
+class Slot:
+    """Everything one activation creates is named after its slot, 0 to 7."""
+    n: int
+
+    @property
+    def plugin_unit(self):
+        return f"nm-sshuttle@{self.n}.service"
+
+    @property
+    def tunnel_unit(self):
+        return f"nm-sshuttle-tunnel@{self.n}.service"
+
+    @property
+    def link(self):
+        return f"nmss{self.n}"
+
+    @property
+    def guard_table(self):
+        return f"nm-sshuttle-guard-{self.n}"
+
+    @property
+    def dir(self):
+        return os.path.join(STATE_DIR, str(self.n))
+
+    @property
+    def spec(self):
+        return os.path.join(self.dir, "tunnel.json")
+
+    @property
+    def ssh_config(self):
+        return os.path.join(os.path.dirname(SSH_CONFIG), f"ssh_config-{self.n}")
+
+    @property
+    def bus_name_file(self):
+        return os.path.join(self.dir, "bus-name")
+
+    @property
+    def tproxy_mark(self):
+        return TPROXY_MARK + self.n
+
+
+def slot_number(text):
+    """A slot from the command line or a unit's instance name."""
+    n = int(text)
+    if not 0 <= n < SLOTS:
+        raise ValueError(f"slot {n} is not 0 to {SLOTS - 1}")
+    return n
 
 # NMVpnServiceState and NMVpnPluginFailure (nm-vpn-dbus-interface.h)
 ST_INIT, ST_STARTING, ST_STARTED, ST_STOPPING, ST_STOPPED = 1, 3, 4, 5, 6

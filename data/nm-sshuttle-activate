@@ -2,8 +2,19 @@
 # SPDX-License-Identifier: MIT
 #
 # program= of the VPN .name file. NetworkManager spawns this inside its own
-# cgroup and SELinux domain and then waits for the plugin's bus name. All it
-# does is ask the bus to activate the plugin, which starts
-# nm-sshuttle.service through systemd (design §4.1).
-exec busctl --system call org.freedesktop.DBus /org/freedesktop/DBus \
-    org.freedesktop.DBus StartServiceByName su org.freedesktop.NetworkManager.sshuttle 0
+# cgroup and SELinux domain, with --bus-name and the name it then waits for,
+# one per activation. All it does is ask the dispatcher, which the bus starts
+# through systemd, for a plugin instance under that name
+# (docs/later/multiple-tunnels.md). Without --bus-name (an NM that has not
+# reread the .name file since an upgrade) it asks for NM's fixed name.
+name=org.freedesktop.NetworkManager.sshuttle
+while [ $# -gt 0 ]; do
+    case $1 in
+        --bus-name) name=$2; shift 2 ;;
+        --bus-name=*) name=${1#--bus-name=}; shift ;;
+        *) shift ;;
+    esac
+done
+exec busctl --system call org.freedesktop.NetworkManager.sshuttle.Dispatcher \
+    /org/freedesktop/NetworkManager/sshuttle \
+    org.freedesktop.NetworkManager.sshuttle.Dispatcher Start s "$name"

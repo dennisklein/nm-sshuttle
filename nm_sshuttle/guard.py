@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: MIT
-"""The dummy link nmss0 and the fail-closed nft guard table (design §4.1, §4.6).
+"""The dummy link nmssN and the fail-closed nft guard table (design §4.1, §4.6),
+and the policy routing of method=tproxy, each named after the activation's slot
+(docs/later/multiple-tunnels.md).
 
 Each call is short and synchronous (one ip or nft run), so the plugin can make
 it from the main loop, and the cleanup command can make it too.
@@ -10,7 +12,7 @@ import subprocess
 
 from .profile import collapse
 
-from .const import GUARD_TABLE, LINK, TPROXY_MARK, TPROXY_PRIORITY, TPROXY_TABLE
+from .const import TPROXY_MARK, TPROXY_PRIORITY, TPROXY_TABLE
 
 log = logging.getLogger("nm-sshuttle")
 
@@ -24,7 +26,7 @@ def run(argv, input=None, timeout=10):
     return p.returncode == 0, (p.stderr or p.stdout).strip()
 
 
-def link_ifindex(name=LINK):
+def link_ifindex(name):
     """The link's ifindex, or None when there is no such link."""
     try:
         with open(f"/sys/class/net/{name}/ifindex") as f:
@@ -33,7 +35,7 @@ def link_ifindex(name=LINK):
         return None
 
 
-def create_link(name=LINK):
+def create_link(name):
     """Create the dummy link, replacing any leftover, and return its ifindex.
 
     NetworkManager sets the address itself (design §4.1)."""
@@ -53,7 +55,7 @@ def create_link(name=LINK):
     return ifindex
 
 
-def remove_link(name=LINK):
+def remove_link(name):
     if link_ifindex(name) is None:
         return True
     ok, out = run(["ip", "link", "del", name])
@@ -63,7 +65,7 @@ def remove_link(name=LINK):
     return True
 
 
-def guard_ruleset(networks, exclude, mark=None):
+def guard_ruleset(table, networks, exclude, mark=None):
     """The guard table (design §4.6, docs/later/ipv6.md) as an nft script.
 
     sshuttle's redirect runs at priority dstnat, so its packets carry conntrack
@@ -82,7 +84,7 @@ def guard_ruleset(networks, exclude, mark=None):
         return f"    set {name} {{ {body} }}"
 
     return "\n".join([
-        f"table inet {GUARD_TABLE} {{",
+        f"table inet {table} {{",
         set_def("subnets4", networks, 4),
         set_def("exclude4", exclude, 4),
         set_def("subnets6", networks, 6),
@@ -105,25 +107,25 @@ def guard_ruleset(networks, exclude, mark=None):
     ])
 
 
-def install_guard(networks, exclude, mark=None):
+def install_guard(table, networks, exclude, mark=None):
     """Install (or replace) the guard table in one nft transaction."""
-    script = f"table inet {GUARD_TABLE}\ndelete table inet {GUARD_TABLE}\n"
-    script += guard_ruleset(networks, exclude, mark)
+    script = f"table inet {table}\ndelete table inet {table}\n"
+    script += guard_ruleset(table, networks, exclude, mark)
     ok, out = run(["nft", "-f", "-"], input=script)
     if not ok:
         raise RuntimeError(f"cannot install the guard table: {out}")
 
 
-def guard_present():
-    return run(["nft", "list", "table", "inet", GUARD_TABLE])[0]
+def guard_present(table):
+    return run(["nft", "list", "table", "inet", table])[0]
 
 
-def remove_guard():
-    if not guard_present():
+def remove_guard(table):
+    if not guard_present(table):
         return True
-    ok, out = run(["nft", "delete", "table", "inet", GUARD_TABLE])
-    if not ok and guard_present():
-        log.warning("cannot remove the guard table: %s", out)
+    ok, out = run(["nft", "delete", "table", "inet", table])
+    if not ok and guard_present(table):
+        log.warning("cannot remove the guard table %s: %s", table, out)
         return False
     return True
 
@@ -133,7 +135,7 @@ def remove_guard():
 # hands them to its listener. sshuttle leaves that to the user; the plugin
 # owns it and removes it by its exact values, never flushing a table or rules
 # it does not own (docs/later/tproxy.md).
-def tproxy_mark(slot=0):
+def tproxy_mark(slot):
     return TPROXY_MARK + slot
 
 
@@ -163,12 +165,12 @@ def _routing_parts(family, slot):
     return rule, route
 
 
-def policy_routing_present(families, slot=0):
+def policy_routing_present(families, slot):
     """Whether the rule and the route are there for every one of families."""
     return all(all(_routing_parts(f, slot)) for f in families)
 
 
-def install_policy_routing(families, slot=0):
+def install_policy_routing(families, slot):
     """Install the rule and the route for each family, replacing any copy."""
     for family in families:
         for _ in range(10):         # "ip rule add" twice makes two rules
@@ -181,7 +183,7 @@ def install_policy_routing(families, slot=0):
             raise RuntimeError(f"cannot install the policy routing for IPv{family}: {out}")
 
 
-def remove_policy_routing(slot=0):
+def remove_policy_routing(slot):
     """Remove the rule and the route for both families; True when none is left."""
     clean = True
     for family in (4, 6):

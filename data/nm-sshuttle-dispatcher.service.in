@@ -1,0 +1,11 @@
+[Unit]
+Description=NetworkManager sshuttle VPN plugin dispatcher
+Documentation=https://github.com/dennisklein/nm-sshuttle
+
+[Service]
+# D-Bus activated by NetworkManager's shim; gives each activation a slot and
+# starts nm-sshuttle@SLOT.service for it (docs/later/multiple-tunnels.md).
+Type=dbus
+BusName=org.freedesktop.NetworkManager.sshuttle.Dispatcher
+ExecStart=@LIBEXECDIR@/nm-sshuttle-dispatcher
+Restart=no

@@ -2,7 +2,7 @@
 name=sshuttle
 service=org.freedesktop.NetworkManager.sshuttle
 program=@LIBEXECDIR@/nm-sshuttle-activate
-supports-multiple-connections=false
+supports-multiple-connections=true
 supports-safe-private-file-access=true
 
 [libnm]

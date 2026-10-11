@@ -5,7 +5,7 @@ import heapq
 import itertools
 import types
 
-from nm_sshuttle.const import AC_ACTIVATED, AC_ACTIVATING, ST_STARTED
+from nm_sshuttle.const import AC_ACTIVATED, AC_ACTIVATING, ST_STARTED, Slot
 from nm_sshuttle.profile import ProfileError
 from nm_sshuttle.supervisor import Supervisor
 
@@ -62,6 +62,7 @@ class FakeEffects:
         self.guard_mark = None        # the guard's tproxy mark, as last installed
         self.routing = None           # families with tproxy policy routing, or None
         self.health_methods = []
+        self.slot = Slot(0)
 
     # recording helpers
     def _rec(self, *event):

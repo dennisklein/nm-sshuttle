@@ -1,0 +1,10 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = remove ]; then
+    # End every tunnel, then remove what they left behind.
+    systemctl stop 'nm-sshuttle@*.service' nm-sshuttle-dispatcher.service >/dev/null 2>&1 || true
+    /usr/libexec/nm-sshuttle/nm-sshuttle cleanup --all || true
+fi
+
+#DEBHELPER#

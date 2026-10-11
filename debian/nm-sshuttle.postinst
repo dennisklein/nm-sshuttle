@@ -2,8 +2,11 @@
 set -e
 
 if [ "$1" = configure ]; then
-    # Apply the conf.d snippet that leaves nmss0 unmanaged, unless a VPN is active.
+    # Apply the conf.d snippet that leaves the nmss links unmanaged, unless a
+    # VPN is active.
     /usr/libexec/nm-sshuttle/nm-sshuttle post-install || true
+    # A running dispatcher picks up the new code; plugin instances keep their VPNs.
+    systemctl try-restart nm-sshuttle-dispatcher.service >/dev/null 2>&1 || true
 fi
 
 #DEBHELPER#

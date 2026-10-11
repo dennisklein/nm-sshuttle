@@ -210,23 +210,23 @@ def test_stale_tables(tmp_path):
     ports = tunnel.listening_ports((str(tcp), str(tmp_path / "missing")))
     assert ports == {12305}
     tables = ("table inet sshuttle-ipv4-12305\ntable inet sshuttle-ipv4-12300\n"
-              "table inet nm-sshuttle-guard\ntable ip nat\ntable inet sshuttle-ipv6-12299\n")
+              "table inet nm-sshuttle-guard-0\ntable ip nat\ntable inet sshuttle-ipv6-12299\n")
     assert tunnel.stale_tables(tables, ports) == ["sshuttle-ipv4-12300", "sshuttle-ipv6-12299"]
     assert tunnel.sshuttle_tables(tables, ports, live=True) == ["sshuttle-ipv4-12305"]
 
 
 def test_nft_health(monkeypatch):
-    out = "table inet sshuttle-ipv4-12305\ntable inet nm-sshuttle-guard\n"
+    out = "table inet sshuttle-ipv4-12305\ntable inet nm-sshuttle-guard-0\n"
     monkeypatch.setattr(tunnel.subprocess, "run",
                         lambda *a, **k: subprocess.CompletedProcess(a, 0, out, ""))
     monkeypatch.setattr(tunnel, "listening_ports", lambda: {12305})
-    assert tunnel.nft_health() == {"guard": True, "sshuttle": {4}}
+    assert tunnel.nft_health("nft", "nm-sshuttle-guard-0") == {"guard": True, "sshuttle": {4}}
     monkeypatch.setattr(tunnel, "listening_ports", lambda: set())
-    assert tunnel.nft_health() == {"guard": True, "sshuttle": set()}
+    assert tunnel.nft_health("nft", "nm-sshuttle-guard-0") == {"guard": True, "sshuttle": set()}
     out = ("table inet sshuttle-ipv4-12305\ntable inet sshuttle-ipv6-12305\n"
            "table inet sshuttle-ipv6-12300\n")
     monkeypatch.setattr(tunnel, "listening_ports", lambda: {12305})
-    assert tunnel.nft_health() == {"guard": False, "sshuttle": {4, 6}}
+    assert tunnel.nft_health("nft", "nm-sshuttle-guard-0") == {"guard": False, "sshuttle": {4, 6}}
     monkeypatch.setattr(tunnel.subprocess, "run",
                         lambda *a, **k: subprocess.CompletedProcess(a, 1, "", "denied"))
-    assert tunnel.nft_health() is None
+    assert tunnel.nft_health("nft", "nm-sshuttle-guard-0") is None

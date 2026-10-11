@@ -15,7 +15,7 @@ import subprocess
 import sys
 import threading
 
-from .const import GUARD_TABLE, LIBEXEC, SSH_CONFIG, TUNNEL_SPEC
+from .const import LIBEXEC, SSH_CONFIG, V1_TUNNEL_SPEC, Slot
 from .profile import collapse, family
 
 log = logging.getLogger("nm-sshuttle")
@@ -89,10 +89,11 @@ def ipv6_available(lo="/proc/sys/net/ipv6/conf/lo/disable_ipv6",
     return os.path.exists(if_inet6)
 
 
-def exec_tunnel():
+def exec_tunnel(slot=None):
     """ExecStart of the tunnel unit: exec sshuttle so that it is the main
-    process and its own READY=1 counts."""
-    with open(TUNNEL_SPEC) as f:
+    process and its own READY=1 counts. Without a slot it reads the spec of a
+    single-tunnel version's plugin, which may still run during an upgrade."""
+    with open(V1_TUNNEL_SPEC if slot is None else Slot(slot).spec) as f:
         spec = json.load(f)
     sshuttle = shutil.which("sshuttle", path=SEARCH_PATH)
     if not sshuttle:
@@ -101,7 +102,7 @@ def exec_tunnel():
     ssh_config = None
     text = pinned_ssh_config(spec)
     if text:
-        ssh_config = write_ssh_config(text)
+        ssh_config = write_ssh_config(text, SSH_CONFIG if slot is None else Slot(slot).ssh_config)
         print(f"exec-tunnel: the first hop's name does not resolve; ssh gets its address "
               f"from connect through {ssh_config}", file=sys.stderr, flush=True)
     argv = sshuttle_argv(spec, sshuttle, ssh_config)
@@ -304,7 +305,8 @@ def write_ssh_config(text, path=SSH_CONFIG):
 
 
 # ------------------------------------------------------------------ sweep
-def listening_ports(proc_files=("/proc/net/tcp", "/proc/net/tcp6")):
+def listening_ports(proc_files=("/proc/net/tcp", "/proc/net/tcp6"), inodes=None):
+    """Ports with a TCP listener; with inodes, only those of these sockets."""
     ports = set()
     for path in proc_files:
         try:
@@ -312,11 +314,50 @@ def listening_ports(proc_files=("/proc/net/tcp", "/proc/net/tcp6")):
                 next(f, None)
                 for line in f:
                     fields = line.split()
-                    if len(fields) > 3 and fields[3] == "0A":     # TCP_LISTEN
+                    if len(fields) > 3 and fields[3] == "0A" and (     # TCP_LISTEN
+                            inodes is None or (len(fields) > 9 and fields[9] in inodes)):
                         ports.add(int(fields[1].rsplit(":", 1)[1], 16))
         except OSError:
             pass
     return ports
+
+
+def unit_cgroup(unit, root="/sys/fs/cgroup"):
+    """Where systemd puts a system service's processes: a template instance
+    sits in its template's slice."""
+    if "@" in unit:
+        template = unit.split("@", 1)[0].replace("-", "\\x2d")
+        return os.path.join(root, "system.slice", f"system-{template}.slice", unit)
+    return os.path.join(root, "system.slice", unit)
+
+
+def unit_ports(unit, root="/sys/fs/cgroup", proc="/proc"):
+    """The TCP ports processes of this unit listen on: one tunnel's own
+    sshuttle, never another's (docs/later/multiple-tunnels.md). None when
+    the unit's cgroup is not where it is expected."""
+    try:
+        with open(os.path.join(unit_cgroup(unit, root), "cgroup.procs")) as f:
+            pids = f.read().split()
+    except FileNotFoundError:
+        return None if not os.path.isdir(os.path.dirname(unit_cgroup(unit, root))) else set()
+    except OSError:
+        return None
+    inodes = set()
+    for pid in pids:
+        fd_dir = os.path.join(proc, pid, "fd")
+        try:
+            fds = os.listdir(fd_dir)
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                target = os.readlink(os.path.join(fd_dir, fd))
+            except OSError:
+                continue
+            if target.startswith("socket:["):
+                inodes.add(target[8:-1])
+    return listening_ports((os.path.join(proc, "net/tcp"), os.path.join(proc, "net/tcp6")),
+                           inodes)
 
 
 def inet_tables(nft_list_tables):
@@ -388,12 +429,12 @@ def _mangle(family):
     return p.stdout if p.returncode == 0 else None
 
 
-def nft_health(method="nft"):
+def nft_health(method, guard_table, ports=None):
     """What the health check reads from the firewall (design §4.4, "Health"):
     is the guard table there, and for which families (4, 6) does sshuttle have
     its rules with a listener on their port? Those are a table in nft, or for
-    method=tproxy a mark chain in iptables' mangle table. None when nft cannot
-    be asked."""
+    method=tproxy a mark chain in iptables' mangle table. ports limits it to
+    this tunnel's own listeners. None when nft cannot be asked."""
     try:
         p = subprocess.run(["nft", "list", "tables"], capture_output=True, text=True,
                            timeout=10)
@@ -401,7 +442,8 @@ def nft_health(method="nft"):
         return None
     if p.returncode:
         return None
-    ports = listening_ports()
+    if ports is None:
+        ports = listening_ports()
     if method == "tproxy":
         families = set()
         for version in IPTABLES:
@@ -411,7 +453,7 @@ def nft_health(method="nft"):
     else:
         live = sshuttle_tables(p.stdout, ports, live=True)
         families = {int(SSHUTTLE_TABLE_RE.match(t).group(1)) for t in live}
-    return {"guard": GUARD_TABLE in inet_tables(p.stdout), "sshuttle": families}
+    return {"guard": guard_table in inet_tables(p.stdout), "sshuttle": families}
 
 
 def sweep():
