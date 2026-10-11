@@ -17,8 +17,10 @@ dnf -y install "$base/nm-sshuttle-release.noarch.rpm"
 # nm-sshuttle.repo points at the public site; follow the site under test
 # instead. --allowerasing: the container has systemd-standalone-tmpfiles,
 # which conflicts with the systemd that systemd-resolved needs; a real system
-# has the full systemd.
-dnf -y install --allowerasing --setopt="nm-sshuttle.baseurl=$base/rpm/fedora/\$releasever/\$basearch/" \
+# has the full systemd. No weak dependencies: GTK's media codecs include
+# openh264, which comes from a third-party host that a hosted runner fails to
+# reach now and then, and nothing here uses them.
+dnf -y install --allowerasing --setopt=install_weak_deps=False --setopt="nm-sshuttle.baseurl=$base/rpm/fedora/\$releasever/\$basearch/" \
   nm-sshuttle nm-sshuttle-gnome
 
 rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE}: %{SIGPGP:pgpsig}\n' \
