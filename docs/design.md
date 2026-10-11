@@ -1,8 +1,8 @@
 # nm-sshuttle: design proposal
 
-Status: proposal, updated 2026-10-10 after the sixth Fedora 44 spike run.
-M2's plugin is in [`nm_sshuttle/`](../nm_sshuttle); its first Fedora 44 VM
-run ([`test-vm/`](../test-vm)) passed. The research code is the lab in
+Status: M0 to M3 done (§7), updated 2026-10-11. The plugin is in
+[`nm_sshuttle/`](../nm_sshuttle), packaged for Fedora, Debian and Ubuntu, and
+its VM tests ([`test-vm/`](../test-vm)) pass in CI. The research code is the lab in
 [`lab/`](../lab), which checks the sshuttle and kernel behaviour this design
 relies on, and the spike in [`spike/`](../spike), which checks
 NetworkManager, SELinux and GNOME on Fedora 44.
@@ -1778,12 +1778,13 @@ Later, also propose a hook for an externally provided firewall helper
    candidate (during a gap, keep NM in ip-config-get with a lone, unchanged
    `Config`, so that a kill removes the DNS too **[src]**) stays behind
    `NM_SSHUTTLE_PARK_GAP=1`, off by default.
-4. **M3, usable (in progress):** CLI, packaging (RPM, deb), documentation,
-   and VM tests in CI if feasible. Done: the profile commands `add`,
+4. **M3, usable (done):** CLI, packaging (RPM, deb), documentation, and VM
+   tests in CI if feasible. All four are in: the profile commands `add`,
    `check`, `list` and `remove` (`nm-sshuttle` on PATH); RPM packages for
    Fedora 43 and 44 and deb packages for Debian 13 and Ubuntu 26.04, built
-   and install-checked in CI; the [user guide](user-guide.md); and the VM
-   tests in CI, on demand and weekly, on hosted runners with KVM (about
-   12 min).
+   and install-checked in CI; the [user guide](user-guide.md) and the
+   README; and the VM tests in CI, on demand and weekly, on hosted runners
+   with KVM (about 12 min). What CI cannot run stays open under M2:
+   suspend, the GNOME checks by hand, and DNS without resolved.
 5. **Later:** GTK4 editor plugin for GNOME Settings, several tunnels at once
    (template units), UDP through `tproxy`, IPv6 guard sets.
