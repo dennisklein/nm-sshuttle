@@ -620,8 +620,15 @@ s_stoppost() {
 s_selinux() {
     SCENARIO=M2-15
     note "M2-15 SELinux denials over the whole run"
-    local n out
+    local n out other
     out=$(avc_since "$START_EPOCH" "$START_OFFSET")
+    # Not the plugin's: Fedora's getty reading the issue file NetworkManager's
+    # dispatcher writes for the console, seen in some runs
+    other=$(grep -E 'comm="agetty".*tcontext=[^ ]*:NetworkManager_dispatcher_console_var_run_t:' <<< "$out")
+    if [ -n "$other" ]; then
+        result M2-15i INFO "ignored, not the plugin's: $(grep -c . <<< "$other") denial(s) of agetty reading NetworkManager's console issue file"
+        out=$(grep -v -F -x -f <(echo "$other") <<< "$out")
+    fi
     n=$(grep -c . <<< "$out")
     if [ -z "$out" ]; then
         result M2-15 PASS "no SELinux denial records during the run"
