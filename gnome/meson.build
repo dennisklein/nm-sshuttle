@@ -47,7 +47,8 @@ connection = static_library('nm-sshuttle-connection', 'nm-sshuttle-connection.c'
 base_plugin = shared_module('nm-vpn-plugin-sshuttle', 'nm-sshuttle-editor-plugin.c',
                             name_prefix: 'lib', c_args: c_args,
                             dependencies: [libnm, gmodule, dl],
-                            install: true, install_dir: plugindir)
+                            install: true, install_dir: plugindir,
+                            install_tag: 'gnome-editor')
 
 resources = gnome.compile_resources('nm-sshuttle-editor-resources',
                                     'nm-sshuttle-editor.gresource.xml',
@@ -57,7 +58,8 @@ editor_plugin = shared_module('nm-gtk4-vpn-plugin-sshuttle-editor',
                               name_prefix: 'lib', c_args: c_args,
                               dependencies: [libnm, gtk4, gmodule],
                               link_with: [connection, validate],
-                              install: true, install_dir: plugindir)
+                              install: true, install_dir: plugindir,
+                              install_tag: 'gnome-editor')
 
 json_glib = dependency('json-glib-1.0', required: false)
 if json_glib.found()
@@ -65,20 +67,23 @@ if json_glib.found()
        executable('test-validate', 'tests/test-validate.c', c_args: c_args,
                   dependencies: [glib, json_glib], link_with: validate,
                   include_directories: inc),
-       args: [meson.project_source_root() / 'tests' / 'profile-cases.json'])
+       args: [meson.project_source_root() / 'tests' / 'profile-cases.json'],
+       suite: 'gnome-editor')
 endif
 test('connection writes',
      executable('test-connection', 'tests/test-connection.c', c_args: c_args,
                 dependencies: libnm, link_with: [connection, validate],
-                include_directories: inc))
+                include_directories: inc),
+     suite: 'gnome-editor')
 test('no GTK4 editor in a GTK3 process',
      executable('test-gtk3', 'tests/test-gtk3.c', c_args: c_args, dependencies: [libnm, gmodule],
                 export_dynamic: true, include_directories: inc),
-     args: [base_plugin.full_path()])
+     args: [base_plugin.full_path()], suite: 'gnome-editor')
 # Needs a display, so run it under xvfb-run; without one it exits with 77, a skip.
 test('editor form',
      executable('test-editor', 'tests/test-editor.c', c_args: c_args,
                 dependencies: [libnm, gtk4], link_with: [connection, validate],
                 include_directories: inc),
      args: [base_plugin.full_path()], depends: [editor_plugin],
-     env: {'GTK_A11Y': 'none', 'GSETTINGS_BACKEND': 'memory', 'GSK_RENDERER': 'cairo'})
+     env: {'GTK_A11Y': 'none', 'GSETTINGS_BACKEND': 'memory', 'GSK_RENDERER': 'cairo'},
+     suite: 'gnome-editor')
