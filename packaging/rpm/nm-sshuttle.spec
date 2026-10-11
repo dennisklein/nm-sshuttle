@@ -26,6 +26,8 @@ Requires:       util-linux
 Requires:       openssh-clients
 Requires:       systemd-resolved
 Requires:       dbus-common
+# method=tproxy runs sshuttle's iptables method (iptables and ip6tables)
+Recommends:     iptables-nft
 
 %description
 nm-sshuttle runs sshuttle as a NetworkManager VPN connection. The tunnel is

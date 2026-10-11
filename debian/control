@@ -34,6 +34,7 @@ Depends:
  python3-gi,
  sshuttle (>= 1.3.1),
 Recommends:
+ iptables,
  systemd-resolved,
 Description: NetworkManager VPN plugin that tunnels with sshuttle
  nm-sshuttle runs sshuttle as a NetworkManager VPN connection. The tunnel is
