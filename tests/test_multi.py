@@ -267,6 +267,20 @@ def test_unit_ports_of_a_stopped_unit_and_an_unknown_layout(tmp_path):
     assert tunnel.unit_ports(unit, str(tmp_path / "elsewhere"), proc) is None
 
 
+def test_unit_runs_finds_a_command_among_the_units_processes(tmp_path):
+    unit = "nm-sshuttle-tunnel@1.service"
+    cg, proc = proc_tree(tmp_path, unit, [10, 20])
+    (tmp_path / "proc" / "10" / "comm").write_text("sshuttle\n")
+    (tmp_path / "proc" / "20" / "comm").write_text("ssh\n")
+    assert tunnel.unit_runs(unit, "ssh", cg, proc) is True
+    cg, proc = proc_tree(tmp_path / "b", unit, [10])
+    (tmp_path / "b" / "proc" / "10" / "comm").write_text("sshuttle\n")
+    assert tunnel.unit_runs(unit, "ssh", cg, proc) is False   # sshuttle outlived its ssh
+    cg, proc = proc_tree(tmp_path / "c", unit, None)
+    assert tunnel.unit_runs(unit, "ssh", cg, proc) is False   # the unit stopped
+    assert tunnel.unit_runs(unit, "ssh", str(tmp_path / "elsewhere"), proc) is None
+
+
 def test_unit_cgroup_of_a_plain_and_a_template_unit():
     assert tunnel.unit_cgroup("a.service", "/c") == "/c/system.slice/a.service"
     assert tunnel.unit_cgroup("nm-sshuttle-tunnel@0.service", "/c") == (

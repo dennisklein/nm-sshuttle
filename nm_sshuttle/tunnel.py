@@ -331,6 +331,27 @@ def unit_cgroup(unit, root="/sys/fs/cgroup"):
     return os.path.join(root, "system.slice", unit)
 
 
+def unit_runs(unit, comm, root="/sys/fs/cgroup", proc="/proc"):
+    """Does a process of this unit have the command name comm? sshuttle 1.3
+    can outlive its ssh, listening on with nothing behind it. None when the
+    unit's cgroup is not where it is expected."""
+    try:
+        with open(os.path.join(unit_cgroup(unit, root), "cgroup.procs")) as f:
+            pids = f.read().split()
+    except FileNotFoundError:
+        return None if not os.path.isdir(os.path.dirname(unit_cgroup(unit, root))) else False
+    except OSError:
+        return None
+    for pid in pids:
+        try:
+            with open(os.path.join(proc, pid, "comm")) as f:
+                if f.read().strip() == comm:
+                    return True
+        except OSError:
+            continue
+    return False
+
+
 def unit_ports(unit, root="/sys/fs/cgroup", proc="/proc"):
     """The TCP ports processes of this unit listen on: one tunnel's own
     sshuttle, never another's (docs/later/multiple-tunnels.md). None when

@@ -1072,6 +1072,10 @@ class Supervisor:
                 self._drop(f"health: no sshuttle {what} with a listener on its port for " +
                            " and ".join(f"IPv{f}" for f in sorted(missing)))
                 return
+            if snap.get("ssh") is False:
+                # sshuttle listens on, but nothing carries its connections.
+                self._drop("health: sshuttle's ssh has exited")
+                return
         if method == "tproxy" and not self.fx.policy_routing_present(
                 sorted(self._tunnelled_families())):
             log.warning("the policy routing for method=tproxy is gone; installing it again")
