@@ -770,7 +770,11 @@ cleanup() {
     nmcli connection down "$CON6" > /dev/null 2>&1
     nmcli connection delete "$CON" "$CON_ZONE" "$CON6" > /dev/null 2>&1
     sc stop "$PLUGIN_UNIT" "$TUNNEL_UNIT" > /dev/null 2>&1
-    sc stop nmtest-sshd nmtest-dns nmtest-web nmtest-web6 > /dev/null 2>&1
+    sc stop nmtest-sshd nmtest-dns nmtest-web nmtest-web6 nmtest-dns-local > /dev/null 2>&1
+    rv revert h-j > /dev/null 2>&1
+    if [ -f "$VARDIR/ssh-config-written" ]; then
+        rm -f "$HOME_U/.ssh/config" "$VARDIR/ssh-config-written"
+    fi
     if [ -f "$VARDIR/packaged-conf.bak" ]; then
         mv -f "$VARDIR/packaged-conf.bak" "$NM_PACKAGED"
     fi

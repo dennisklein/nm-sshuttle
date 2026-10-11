@@ -26,6 +26,7 @@
 #   M2-24 no default route         M2-25 lock screen (LockedHint set by root)
 #   M2-26 park candidate           M2-27 probe with forwarding dead
 #   M2-28 suspend and resume (only with --suspend: the VM must wake by RTC)
+#   M2-29 a ProxyJump host named inside the tunnelled DNS domain
 #   V6-01 IPv6 subnet through the tunnel, fail closed in a gap
 #   V6-02 roams that change only the uplink's IPv6 addresses
 #
@@ -975,6 +976,56 @@ s_probe() {
     end_checks M2-27
 }
 
+# A local resolver on h-j that knows jump.corp.test; ~. makes it the default, so
+# nmss0's ~corp.test wins for the name once the tunnel's DNS is up.
+JUMP_NAME=jump.corp.test
+jump_name_setup() {
+    systemd-run --quiet --collect --unit=nmtest-dns-local \
+        -p NetworkNamespacePath=/run/netns/jump \
+        /usr/bin/python3 "$REPO/lab/dns_server.py" $JUMP_IP "$JUMP_NAME=$JUMP_IP" || return 1
+    wait_for 10 sh -c "ss -N jump -lunH 'sport = :53' | grep -q ."
+    rv dns h-j $JUMP_IP && rv domain h-j '~.' && rv default-route h-j yes || return 1
+    [ -e "$HOME_U/.ssh/config" ] && return 1
+    touch "$VARDIR/ssh-config-written"
+    as_user sh -c "umask 077; printf 'Host nmtest-pj\n    HostName %s\n    ProxyJump %s\n' \
+        $JUMP_IP $JUMP_NAME > $HOME_U/.ssh/config"
+    sed -n "s/^$JUMP_IP /$JUMP_NAME /p" "$VARDIR/known_hosts.tmp" >> "$HOME_U/.ssh/known_hosts"
+    raw jump-name rv query "$JUMP_NAME"
+}
+jump_name_teardown() {
+    sc stop nmtest-dns-local > /dev/null 2>&1
+    rv revert h-j > /dev/null 2>&1
+    if [ -f "$VARDIR/ssh-config-written" ]; then
+        rm -f "$HOME_U/.ssh/config" "$VARDIR/ssh-config-written"
+        as_user ssh-keygen -R "$JUMP_NAME" > /dev/null 2>&1
+    fi
+    return 0
+}
+pin_count() { jsync; jc -u "$TUNNEL_UNIT" --since "@$START_EPOCH" -o cat | grep -c -F "the first hop's name does not resolve"; }
+pinned_jump() { grep -A2 "^Host $JUMP_NAME\$" /run/nm-sshuttle-ssh/ssh_config | grep -q "HostName $JUMP_IP"; }
+
+s_jump_name() {
+    begin M2-29 "a ProxyJump host named inside the tunnelled DNS domain"
+    jump_name_setup || { result M2-29 SKIP "cannot set up the local resolver and ssh config"; jump_name_teardown; return; }
+    REMOTE=nmtest-pj create_profile "$CON"
+    local ifi pins
+    if connect_ok M2-29 "activation through ProxyJump $JUMP_NAME, looked up on the local network"; then
+        ifi=$(link_ifindex)
+        check M2-29a "plugin log: the first hop is $JUMP_IP" plog_show "first hop $JUMP_IP"
+        pins=$(pin_count)
+        drop_tunnel
+        wait_for 15 plog_has "tunnel dropped"
+        recovery_checks M2-29r "$ifi"
+        check M2-29b "tunnel log: $JUMP_NAME did not resolve, so ssh got the address from connect" \
+            test "$(pin_count)" -gt "$pins"
+        check M2-29c "the generated ssh config pins $JUMP_NAME to $JUMP_IP" pinned_jump
+    fi
+    reset_state
+    jump_name_teardown
+    create_profile "$CON"
+    end_checks M2-29
+}
+
 # --------------------------------------------------------- IPv6 (docs/later/ipv6.md)
 refused6_fast() {
     local t0 out rc
@@ -1172,6 +1223,7 @@ want M2-25 && s_lock
 want M2-26 && s_park
 want M2-27 && s_probe
 want M2-28 && s_suspend
+want M2-29 && s_jump_name
 want V6-01 && s_ipv6
 want V6-02 && s_ipv6_roam
 s_selinux
