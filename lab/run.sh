@@ -43,6 +43,9 @@ LO_IPV6_OFF=$(cat /proc/sys/net/ipv6/conf/lo/disable_ipv6 2>/dev/null || echo 1)
 [ -x "$SSHUTTLE" ] || { echo "sshuttle not found; set SSHUTTLE=" >&2; exit 2; }
 
 WORK=$(mktemp -d /tmp/nmss-lab.XXXXXX)
+# sshuttle tells systemd it is ready once its rules are in place. Nothing
+# listens here, so with -v that shows in its log as "Error notifying systemd".
+export NOTIFY_SOCKET=$WORK/notify
 chmod 755 "$WORK"
 cp "$LAB_SRC/ssh-as-user" "$LAB_SRC/dns_query.py" "$LAB_SRC/dns_server.py" "$WORK/"
 chmod 755 "$WORK"/*
@@ -227,10 +230,11 @@ start_tunnel6() {
     echo $!
 }
 
-wait_connected() {
+wait_connected() {  # until the tunnel is up and sshuttle's rules are in place
     local i
     for i in $(seq 1 30); do
-        grep -q "Connected to server" "$1" && return 0
+        grep -q "Connected to server" "$1" && grep -q "Error notifying systemd" "$1" &&
+            return 0
         sleep 0.5
     done
     return 1
