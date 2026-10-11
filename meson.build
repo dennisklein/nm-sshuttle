@@ -64,5 +64,7 @@ foreach unit : ['nm-sshuttle.service', 'nm-sshuttle-tunnel.service']
                  install: true, install_dir: systemd_unitdir)
 endforeach
 
+subdir('gnome')
+
 test('unit tests', python, args: ['-m', 'pytest', '-q', meson.project_source_root() / 'tests'],
      workdir: meson.project_source_root())
