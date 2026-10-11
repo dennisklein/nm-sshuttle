@@ -67,7 +67,9 @@ def test_add_sets_the_defaults(dennis):
     argv = nm.calls[0]
     assert argv[:6] == ("connection", "add", "type", "vpn", "con-name", "corp")
     for pair in [("connection.permissions", "user:dennis"), ("connection.autoconnect", "no"),
-                 ("vpn.persistent", "yes"), ("ipv4.method", "auto")]:
+                 ("vpn.persistent", "yes"), ("ipv4.method", "auto"),
+                 ("ipv4.auto-route-ext-gw", "no"), ("ipv4.never-default", "yes"),
+                 ("ipv6.never-default", "yes")]:
         assert argv[argv.index(pair[0]) + 1] == pair[1]
     data = cli.parse_vpn_data(argv[argv.index("vpn.data") + 1])
     assert data["subnets"] == "10.0.0.0/8 172.20.0.0/16"
