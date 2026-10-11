@@ -378,6 +378,42 @@ def test_the_fixed_name_stays_for_the_idle_window():
     assert not fx.quit_called
 
 
+def gap_of(fx, sup):
+    sup.on_tunnel_inactive()
+    sup.on_ac_state(AC, AC_ACTIVATING, 6)
+    assert sup.phase == "gap"
+
+
+def test_another_vpn_activated_in_a_gap_kicks_a_reconnect():
+    fx, sup = make()
+    bring_up(fx, sup)
+    other = "/org/freedesktop/NetworkManager/ActiveConnection/8"
+    sup.on_vpns([AC])                 # the first read only learns what is there
+    gap_of(fx, sup)
+    fx.advance(1.0)
+    fx.finish_start(False, "connection refused")   # attempt 1 fails; backoff follows
+    fx.clear()
+    sup.on_vpns([AC, other])
+    fx.advance(0)
+    fx.finish_stops()
+    assert "start_tunnel" in fx.names()
+
+
+def test_vpns_already_there_or_this_one_kick_nothing():
+    fx, sup = make()
+    bring_up(fx, sup)
+    other = "/org/freedesktop/NetworkManager/ActiveConnection/8"
+    sup.on_vpns([AC, other])
+    gap_of(fx, sup)
+    fx.advance(1.0)
+    fx.finish_start(False, "connection refused")
+    fx.clear()
+    sup.on_vpns([AC, other])
+    fx.advance(0)
+    fx.finish_stops()
+    assert "start_tunnel" not in fx.names()
+
+
 # ---------------------------------------------------------------------- cli
 @pytest.fixture
 def host(monkeypatch, tmp_path):

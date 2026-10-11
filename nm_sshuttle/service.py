@@ -166,7 +166,7 @@ class Service:
         self.unit_path = unit_object_path(self.tunnel_unit)
         self.node = Gio.DBusNodeInfo.new_for_xml(INTROSPECTION)
         self.network = watch.NetworkWatcher(conn, self._call, self.sup.on_network,
-                                            self.sup.on_nm_version)
+                                            self.sup.on_nm_version, self.sup.on_vpns)
         self.logind = watch.LogindWatcher(conn, self.sup.on_prepare_sleep,
                                           self.sup.on_lock_changed)
         self.inhibit_fd = None
