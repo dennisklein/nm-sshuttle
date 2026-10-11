@@ -842,7 +842,7 @@ keys:
 | `dns` | `split` | `none`, `split` or `all`. |
 | `dns-servers` | `10.1.0.53` | Required for `split` and `all`. IPv4 only. |
 | `dns-domains` | `corp.example,lab.example` | Routing domains for `split`. |
-| `method` | `nft` | `nft` (default) or `nat`. `tproxy` comes later. |
+| `method` | `nft` | `nft` (default), `nat`, or `tproxy`, which also carries UDP ([tproxy](later/tproxy.md)). |
 | `gateway` | `203.0.113.7` | Override the first hop, IPv4 or IPv6. Needed with `ProxyCommand`. |
 | `probe` | `10.1.0.10:22` | Optional reachability check through the tunnel, `ADDRESS:PORT` or `[IPV6]:PORT`. The service must send first, as an ssh server does (§4.4, "Health"). |
 | `fail-closed` | `yes` | Install the guard table (default `yes`). |
@@ -1260,7 +1260,9 @@ Events and what the supervisor does:
   state is not evidence (see "Activated is not proof"):
   - the tunnel unit is active (an unreadable state is no failure);
   - with `method=nft`, sshuttle's nft table exists and a listener holds its
-    port;
+    port; with `method=tproxy`, its mark chain in iptables' `mangle` table
+    does, for each tunnelled family, and the plugin's rule and route are
+    there (put back if not);
   - the guard table exists (re-install it if something flushed the ruleset);
   - optionally, the `probe` TCP connect through the tunnel, where two
     failures in a row cause a restart. This covers sshuttle's "process
@@ -1469,7 +1471,10 @@ The IPv6 sets are always there, empty for an IPv4-only profile
 ([IPv6](later/ipv6.md)). The exclude sets hold every address of the first
 hop and the profile's `exclude`. sshuttle's NAT redirect runs earlier, at
 priority `dstnat`, so packets it redirected carry conntrack status `dnat`
-when they reach the guard.
+when they reach the guard. With `method=tproxy` there is no NAT; two rules
+ahead of the `dnat` ones accept what sshuttle's mangle chain marked
+(`ip daddr @subnets4 meta mark 0x4e530000 accept`, and the same for IPv6;
+[tproxy](later/tproxy.md)).
 
 **[lab T4]** In the lab, while the tunnel was down, connections failed in
 about 10 ms instead of leaking to the default route. In the lab's container,
@@ -1680,11 +1685,18 @@ below used sshuttle 2.0.0 with the nft method in an Ubuntu 24.04 container
 | T12 | The IPv6 guard sets: redirected IPv6 passes; tunnel down, IPv6 TCP is refused in milliseconds although a route would deliver it, and the excluded jump host stays reachable over IPv6 || PASS |
 | T13 | A first hop with only an IPv6 address inside a tunnelled IPv6 subnet: ssh's own connection is not captured || PASS |
 | T14 | IPv6 off on the host: the plugin's check sees it, sshuttle without `--disable-ipv6` stops, and with it and the IPv6 networks left out it carries IPv4 | PASS |
+| T15 | `method=tproxy` behind the plugin's guard and policy routing: DNS pinned to the tunnel link with `IP_UNICAST_IF` is captured and answered via the jump host | PASS |
+| T16 | `method=tproxy`: a UDP echo and TCP go through the tunnel, and nothing to the internal network leaves on the uplink | PASS |
+| T17 | `method=tproxy`, tunnel down: UDP is refused locally, TCP in milliseconds, nothing leaves on the uplink | PASS |
+| T18 | `method=tproxy`: SIGKILL leaves the mangle chains, which neither answer nor leak; the plugin's sweep removes them, and the rule and route stay | PASS |
+| T19 | `method=tproxy`: a UDP flow silent for 40 s answers again | PASS |
 
 T11 to T13 need IPv6 in the kernel, which the container this table was
 first written in lacked; they passed in CI's lab job, as did all the
 others. T1 to T10 and T14 passed in both, with the guard of §4.6, IPv6 sets
-included.
+included. T15 to T19 use the plugin's own guard, policy routing and sweep,
+and give the host a route to the internal network through the jump host,
+so that a leak would arrive.
 
 The dummy link is replaced by a veth whose peer sits in an empty namespace,
 because the lab kernel has no `dummy` module. For these tests the two
@@ -1854,4 +1866,8 @@ Later, also propose a hook for an externally provided firewall helper
    design in [`later/`](later/README.md). **IPv6 is in:** IPv6 subnets
    and exclusions, the IPv6 guard sets, an IPv6 first hop and `gateway`,
    and the IPv6 part of the network key, with unit tests, lab tests T11 to
-   T14 and VM scenarios V6-01 and V6-02.
+   T14 and VM scenarios V6-01 and V6-02. **So is `method=tproxy`:** UDP
+   through the tunnel, the guard's mark rules, policy routing the plugin
+   owns, the sweep of sshuttle's mangle chains and a per-method health
+   check, with unit tests, lab tests T15 to T19 and VM scenarios TP-01 to
+   TP-03.

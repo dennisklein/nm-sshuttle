@@ -1,7 +1,9 @@
 # UDP through `method=tproxy`
 
-Status: design, not implemented. One of the "Later" items of the
+Status: implemented. One of the "Later" items of the
 [design](../design.md) (§7); the index is in [README.md](README.md).
+"What was built" at the end lists the results and where the code differs
+from this design.
 
 v1 tunnels TCP only. sshuttle's `nft` and `nat` methods redirect TCP, plus
 UDP to port 53 of the `--ns-hosts` servers; any other UDP to a tunnelled
@@ -232,12 +234,42 @@ About 120 lines of Python plus tests.
   `nmcli general reload`; no SELinux denial (`iptables` runs from the
   helper as `iptables_t`).
 
+## What was built
+
+The design as above, with these results and details:
+
+- **DNS works (lab T15):** a query pinned to the tunnel link with
+  `IP_UNICAST_IF` is rerouted to `lo` by the mark and answered through
+  the jump host, so `dns=split` and `dns=all` stay allowed with `tproxy`.
+- **Slot 0 only for now:** mark `0x4e530000`, table 20051, priority 100.
+  The functions take the slot, for the multiple tunnels design.
+- **The routing is installed whether or not the profile fails closed**
+  (`fail-closed=no` drops only the guard), and only for the families the
+  tunnel carries. It is removed for both families.
+- **The sweep** runs `iptables -w -t mangle -S` and `ip6tables`, deletes
+  the `OUTPUT` and `PREROUTING` jumps to stale chains, then flushes and
+  deletes the chains. Listing does not create a `mangle` table.
+- **Health:** a family without a live `sshuttle-m-PORT` chain is a drop,
+  as a missing nft table is for `nft`; a missing rule or route is put
+  back. `nft flush ruleset` removes iptables-nft's chains and the guard,
+  not the rule or route. With iptables-legacy the chains are not in nft
+  and survive the flush, so only the guard comes back and the tunnel
+  stays up. Fedora's sshuttle package pulls in iptables-legacy, and in
+  the test VM `iptables` then uses it (VM TP-02).
+- **Packaging:** `Recommends: iptables` (deb) and `iptables-nft` (RPM).
+  `nm-sshuttle check` fails a `tproxy` profile without them.
+- **Tests:** lab T15 to T19 with the plugin's own guard, routing and
+  sweep, a route to the internal network through the jump host and a
+  counter on the uplink, so that a leak would show. T18 shows that stale
+  chains black-hole UDP rather than leak it. VM scenarios TP-01 (UDP,
+  TCP and split DNS, a gap), TP-02 (killed sshuttle, `nft flush
+  ruleset`) and TP-03 (`nmcli general reload` and a roam leave the rule
+  and route alone) pass on Fedora 44.
+
 ## Open questions
 
-- DNS through `tproxy` with `IP_UNICAST_IF` (T15). The answer decides
-  whether `dns=split` works with this method at all.
 - Whether `rp_filter` or a firewalld setting drops packets that come back
   in on `lo` with an uplink source address. The loopback device is
   normally exempt from reverse path filtering (inferred).
 - Whether NetworkManager leaves the rule and the route on `lo` alone on
-  every target release (the VM test above).
+  every target release. It does on Fedora 44 (VM TP-03).

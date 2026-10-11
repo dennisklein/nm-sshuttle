@@ -125,7 +125,7 @@ One column of rows, in the order a user fills them in:
 | DNS domains | entry; sensitive for "split" | `dns-domains` |
 | Advanced (expander): first hop | entry, empty means "from ssh -G" | `gateway` |
 | Advanced: probe | entry, `ADDRESS:PORT` | `probe` |
-| Advanced: method | drop-down: nft, nat, and tproxy once it exists | `method` |
+| Advanced: method | drop-down: nft, nat, tproxy | `method` |
 | Advanced: block traffic while down | switch, on by default | `fail-closed` |
 | Local user | label | `local-user` |
 
@@ -274,6 +274,8 @@ NetworkManager or the plugin.
   the plugin; DNS servers stay IPv4. The IPv6 tab has the same "Use this
   connection only for resources on its network" switch, so the note names
   both tabs.
-- **Not done yet:** `method=tproxy` and the keys of several tunnels. Each is
-  a change to `nm-sshuttle-validate.c` and to the cases when the plugin gets
-  it; the shared cases fail on whichever side is behind.
+- **`method=tproxy`** is in the drop-down and accepted, as in the plugin
+  ([tproxy](tproxy.md)).
+- **Not done yet:** the keys of several tunnels. That is a change to
+  `nm-sshuttle-validate.c` and to the cases when the plugin gets them; the
+  shared cases fail on whichever side is behind.
