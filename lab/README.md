@@ -22,12 +22,13 @@ namespaces, veth links, nft tables and a local user (`nmss-lab`), and it
 changes the address of its own veth link.
 
 ```console
-# apt install iproute2 nftables openssh-server openssh-client curl python3
+# apt install iproute2 nftables iptables openssh-server openssh-client curl python3
 # pip install sshuttle            # or the distro package
 # SSHUTTLE=$(command -v sshuttle) ./lab/run.sh
 ```
 
-It takes about two minutes, most of it in the roaming test (T10). It exits
+It takes about three minutes, most of it in the roaming test (T10) and
+the silent UDP flow (T19). It exits
 non-zero if any check fails.
 
 ## What it checks
@@ -48,8 +49,16 @@ non-zero if any check fails.
 | T12 | The guard's IPv6 sets let redirected traffic through. With the tunnel down they refuse IPv6 TCP at once, although the host's route would deliver it (shown without the guard), and the excluded jump host stays reachable over IPv6. |
 | T13 | A first hop reached by its IPv6 address inside a tunnelled IPv6 subnet: with it excluded, ssh's own connection is not captured. |
 | T14 | With IPv6 off on the host the plugin's check sees it, sshuttle stops without `--disable-ipv6`, and with it (and the IPv6 networks left out, as the plugin does) the tunnel carries IPv4. |
+| T15 | `method=tproxy` behind the plugin's guard and policy routing: DNS pinned to the tunnel link with `IP_UNICAST_IF` is captured and answered through the jump host. |
+| T16 | `method=tproxy`: a UDP echo and TCP go through the tunnel, and nothing to the internal network leaves on the uplink. |
+| T17 | `method=tproxy`, tunnel down: UDP is refused locally and TCP at once, and nothing leaves on the uplink. |
+| T18 | `method=tproxy`: SIGKILL leaves sshuttle's mangle chains, which neither answer nor leak; the plugin's sweep removes them and leaves its rule and route. |
+| T19 | `method=tproxy`: a UDP flow silent for 40 s answers again. |
 
-T11 to T13 print SKIP on a kernel without IPv6.
+T11 to T13 print SKIP on a kernel without IPv6, and T15 to T19 without
+`iptables` and `ip6tables`. T15 to T19 use the plugin's code from this
+checkout, give the host a route to 10.99.0.0/24 through the jump host and
+count what leaves on the uplink.
 
 The per-tunnel dummy link is replaced by a veth whose peer sits in an empty
 namespace, so the lab also runs on kernels built without the `dummy` module.
