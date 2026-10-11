@@ -64,7 +64,9 @@ unobserved (for example firewalld's zone binding after a link loss, or what
 resolved holds between a kill and the link's removal): read those lines, they
 are the answers. `SKIP` means the scenario cannot run here.
 
-There are no manual GNOME checks; the VM is headless by default.
+The VM is headless, so the GNOME checks are not automated. The editor for GNOME
+Settings has a protocol for checking it by hand on a laptop:
+[`gnome-editor-protocol.md`](gnome-editor-protocol.md).
 
 ## Run it
 

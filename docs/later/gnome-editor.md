@@ -3,7 +3,9 @@
 Status: implemented in `gnome/`, with the changes listed under
 "Differences from the design" at the end, and checked by the unit tests and a
 form test under Xvfb. The checks in GNOME Settings itself (§Tests, "VM, by
-hand") are still open. One of the "Later" items of the [design](../design.md)
+hand") passed on a Fedora 44 notebook except 7.3 and 7.6 of the
+[protocol](../../test-vm/gnome-editor-protocol.md) (Apply lagged one change
+behind the IPv4 method). That is fixed; the re-check of 7.3 to 7.7 is open. One of the "Later" items of the [design](../design.md)
 (§7); the index is in [README.md](README.md).
 
 v1 has no editor plugin (§1, option B in §3). Profiles come from `nm-sshuttle

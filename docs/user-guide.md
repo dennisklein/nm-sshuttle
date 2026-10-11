@@ -44,9 +44,10 @@ $ sudo apt install ./nm-sshuttle_*_all.deb
 ```
 
 To create and edit profiles in GNOME Settings as well, install the editor,
-which is a separate package (`nm-sshuttle-gnome`; `nm-sshuttle-gnome-*.rpm`,
-`nm-sshuttle-gnome_*.deb` as files). Settings reads its list of VPN types
-once, so restart it afterwards (log out, or `pkill gnome-control-center`).
+which is a separate package (`sudo dnf install nm-sshuttle-gnome` from the
+repository; `nm-sshuttle-gnome-*.rpm`, `nm-sshuttle-gnome_*.deb` as files).
+Settings reads its list of VPN types once, so restart it afterwards (log out,
+or `pkill gnome-control-center`).
 
 From source:
 
