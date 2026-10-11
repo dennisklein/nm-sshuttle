@@ -1,7 +1,9 @@
 # IPv6 subnets and guard sets
 
-Status: design, not implemented. One of the "Later" items of the
+Status: implemented. One of the "Later" items of the
 [design](../design.md) (§7); the index is in [README.md](README.md).
+"What was built" at the end lists where the code differs from this
+design.
 
 v1 is IPv4 only: the profile refuses IPv6 networks, sshuttle runs with
 `--disable-ipv6`, and the guard has only `subnets4` and `exclude4`. §4.5
@@ -225,6 +227,38 @@ About 150 lines of Python, most of them in `profile.py`, `guard.py` and
   and fail closed in a gap; a roam that changes only the IPv6 prefix
   restarts the tunnel when the first hop is reached over IPv6; a rotated
   temporary address does not.
+
+## What was built
+
+The design as above, with these differences and details:
+
+- **A profile with only IPv6 networks on a host with IPv6 off** fails at
+  `Connect` ("IPv6 is off on this host, and the profile tunnels only IPv6
+  networks"). sshuttle would have nothing to tunnel.
+- **sshuttle gets no IPv6 at all when IPv6 is not tunnelled:** no IPv6
+  subnet and no IPv6 `-x`, rather than letting it drop them with a
+  warning. The guard still has them.
+- **Who decides:** the plugin reads `/proc` at `Connect` and writes the
+  answer into `tunnel.json` (`"ipv6": true`), so the health check and
+  `exec-tunnel` agree. A spec without the key (from an older plugin) runs
+  with `--disable-ipv6`, and one whose `first_hop` is a string still works.
+- **The health check** expects an IPv4 table only when the profile has an
+  IPv4 network or a DNS server, and an IPv6 table only when IPv6 is
+  tunnelled.
+- **The network key** always carries the IPv6 part; the supervisor
+  compares it only while the tunnel uses IPv6. A first hop whose name has
+  a link-local address keeps it without the scope.
+- **The CLI** also sets `ipv4.auto-route-ext-gw=no` and both
+  `never-default` settings, which §4.1 names and the CLI had lacked.
+  `check` warns about a profile without `ipv6.auto-route-ext-gw=no` and
+  prints the `nmcli` command that fixes it.
+- **Tests:** lab T11 to T14 as above, with a route to the internal IPv6
+  network through the jump host, so that a leak would arrive (T12d shows
+  it does without the guard). VM scenario V6-01 is an IPv6 subnet through
+  the tunnel and fail closed in a gap; V6-02 changes the uplink's IPv6
+  addresses on NM's primary connection: a second address in the prefix is
+  no change, a new prefix restarts a tunnel whose first hop is IPv6, and
+  not an IPv4 one.
 
 ## Open questions
 

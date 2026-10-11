@@ -816,7 +816,8 @@ others.
 464XLAT range (192.0.0.0/29), and the lab used it. NM sets the address
 itself; otherwise it might remove an address it did not configure.
 
-The CLI sets `ipv4.auto-route-ext-gw=no`. sshuttle captures traffic with
+The CLI sets `ipv4.auto-route-ext-gw=no` and `ipv6.auto-route-ext-gw=no`.
+sshuttle captures traffic with
 nft rules, not routes, and `nmss0` carries no routes, so the first hop goes
 over the uplink anyway (spike R1b-r). NM's extra host route to the gateway
 would only get in the way: after a roam on the same interface it still
@@ -836,14 +837,14 @@ keys:
 |---|---|---|
 | `remote` | `corp` | An ssh destination as the user would type it; usually an alias from `~/.ssh/config`. |
 | `local-user` | `dennis` | Whose ssh identity and agent to use. Required. |
-| `subnets` | `10.0.0.0/8,172.20.0.0/16` | CIDRs to tunnel. |
-| `exclude` | `10.0.5.0/24` | Optional. |
+| `subnets` | `10.0.0.0/8,2001:db8:10::/48` | CIDRs to tunnel, IPv4 and IPv6 ([IPv6](later/ipv6.md)). |
+| `exclude` | `10.0.5.0/24` | Optional; either family. |
 | `dns` | `split` | `none`, `split` or `all`. |
-| `dns-servers` | `10.1.0.53` | Required for `split` and `all`. |
+| `dns-servers` | `10.1.0.53` | Required for `split` and `all`. IPv4 only. |
 | `dns-domains` | `corp.example,lab.example` | Routing domains for `split`. |
 | `method` | `nft` | `nft` (default) or `nat`. `tproxy` comes later. |
-| `gateway` | `203.0.113.7` | Override the first hop. Needed with `ProxyCommand`. |
-| `probe` | `10.1.0.10:22` | Optional reachability check through the tunnel. The service must send first, as an ssh server does (§4.4, "Health"). |
+| `gateway` | `203.0.113.7` | Override the first hop, IPv4 or IPv6. Needed with `ProxyCommand`. |
+| `probe` | `10.1.0.10:22` | Optional reachability check through the tunnel, `ADDRESS:PORT` or `[IPV6]:PORT`. The service must send first, as an ssh server does (§4.4, "Health"). |
 | `fail-closed` | `yes` | Install the guard table (default `yes`). |
 
 The CLI also sets `connection.permissions=user:<local-user>`,
@@ -1204,9 +1205,12 @@ Events and what the supervisor does:
   seconds. If the first hop's address changed, it goes into the guard's
   exclude set before the tunnel starts.
   - The network is NM's `PrimaryConnection`: its UUID, and its IPv4
-    config's addresses and gateway. A DHCP renewal with the same address,
-    an IPv6 change (the tunnel is IPv4) or a moment without a primary
-    connection is no change.
+    config's addresses and gateway. A DHCP renewal with the same address
+    or a moment without a primary connection is no change. When the
+    tunnel uses IPv6 (an IPv6 subnet, or a first hop with an IPv6
+    address), the IPv6 config's global prefixes and gateway count too,
+    but not its addresses, so a new temporary address is no change
+    ([IPv6](later/ipv6.md)); otherwise IPv6 changes do not count.
   - After a change or a resume the first hop is resolved again, as the
     user, before the next attempt; if that fails the old address stays.
     A new address also goes into `Config`'s `gateway`.
@@ -1349,11 +1353,12 @@ R4c, R4g and R4i, -q), and in runs 5 and 6 also with `nmss0` unmanaged
 (R8b, R8g, R8c, and R8j in run 6). Not yet covered: `all`, TCP fallback,
 and a real DNS server with EDNS0 and AAAA records.
 
-**AAAA records are a leak path.** sshuttle runs with `--disable-ipv6`, and
-the v1 guard covers IPv4. If a split domain answers AAAA and the uplink
-has IPv6, applications would connect around the tunnel. The lab's DNS
-server answers no AAAA, so this is untested. Either filter AAAA for the
-split domains or bring the IPv6 guard sets forward (§7).
+**AAAA records are a leak path** for IPv6 networks the profile does not
+list. If a split domain answers AAAA and the uplink has IPv6, applications
+connect to those addresses around the tunnel. The remedy is to list the
+internal IPv6 networks in `subnets`: the tunnel carries them and the guard
+makes them fail closed ([IPv6](later/ipv6.md)). The lab's DNS server
+answers no AAAA, so the resolver side is untested.
 
 **Two DNS entries for one link (risk 11).** After a commit on a managed
 `nmss0` that changes content while its external device is activated, NM
@@ -1415,17 +1420,25 @@ The guard is present from `Connect` until `Disconnect`:
 table inet nm-sshuttle-guard {
     set subnets4 { type ipv4_addr; flags interval; elements = { 10.0.0.0/8 } }
     set exclude4 { type ipv4_addr; flags interval; elements = { 203.0.113.7 } }
+    set subnets6 { type ipv6_addr; flags interval; elements = { 2001:db8:10::/48 } }
+    set exclude6 { type ipv6_addr; flags interval; elements = { 2001:db8:ffff::7 } }
     chain output {
         type filter hook output priority filter; policy accept;
         ip daddr @exclude4 accept
+        ip6 daddr @exclude6 accept
         ip daddr @subnets4 ct status dnat accept            # redirected by sshuttle
+        ip6 daddr @subnets6 ct status dnat accept
         ip daddr @subnets4 meta l4proto tcp reject with tcp reset
-        ip daddr @subnets4 reject with icmp admin-prohibited
+        ip6 daddr @subnets6 meta l4proto tcp reject with tcp reset
+        ip daddr @subnets4 reject with icmpx admin-prohibited
+        ip6 daddr @subnets6 reject with icmpx admin-prohibited
     }
 }
 ```
 
-The same pattern applies to IPv6. sshuttle's NAT redirect runs earlier, at
+The IPv6 sets are always there, empty for an IPv4-only profile
+([IPv6](later/ipv6.md)). The exclude sets hold every address of the first
+hop and the profile's `exclude`. sshuttle's NAT redirect runs earlier, at
 priority `dstnat`, so packets it redirected carry conntrack status `dnat`
 when they reach the guard.
 
@@ -1634,6 +1647,15 @@ below used sshuttle 2.0.0 with the nft method in an Ubuntu 24.04 container
 | T8 | A fixed `--listen` port cannot be reused within TIME_WAIT (`EADDRINUSE`) | PASS |
 | T9 | An unreachable remote resolver kills the tunnel on the first DNS query; `--to-ns` avoids it | PASS |
 | T10 | After roaming: no keepalive leaves a dead tunnel running for 30 s or more; `ServerAlive` 5 s × 2 ends it in about 17 s, with cleanup. The user's `ssh` outlives sshuttle's exit | PASS |
+| T11 | Without `--disable-ipv6`, sshuttle tunnels an IPv6 subnet next to the IPv4 one, through the jump host || PASS |
+| T12 | The IPv6 guard sets: redirected IPv6 passes; tunnel down, IPv6 TCP is refused in milliseconds although a route would deliver it, and the excluded jump host stays reachable over IPv6 || PASS |
+| T13 | A first hop with only an IPv6 address inside a tunnelled IPv6 subnet: ssh's own connection is not captured || PASS |
+| T14 | IPv6 off on the host: the plugin's check sees it, sshuttle without `--disable-ipv6` stops, and with it and the IPv6 networks left out it carries IPv4 | PASS |
+
+T11 to T13 need IPv6 in the kernel, which the container this table was
+first written in lacked; they passed in CI's lab job, as did all the
+others. T1 to T10 and T14 passed in both, with the guard of §4.6, IPv6 sets
+included.
 
 The dummy link is replaced by a veth whose peer sits in an empty namespace,
 because the lab kernel has no `dummy` module. For these tests the two
@@ -1788,4 +1810,7 @@ Later, also propose a hook for an externally provided firewall helper
    suspend, the GNOME checks by hand, and DNS without resolved.
 5. **Later:** GTK4 editor plugin for GNOME Settings, several tunnels at once
    (template units), UDP through `tproxy`, IPv6 guard sets. Each has a
-   design in [`later/`](later/README.md).
+   design in [`later/`](later/README.md). **IPv6 is in:** IPv6 subnets
+   and exclusions, the IPv6 guard sets, an IPv6 first hop and `gateway`,
+   and the IPv6 part of the network key, with unit tests, lab tests T11 to
+   T14 and VM scenarios V6-01 and V6-02.
