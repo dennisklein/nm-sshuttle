@@ -13,3 +13,9 @@ override_dh_auto_configure:
 # D-Bus, and the plugin starts the tunnel unit.
 override_dh_installsystemd:
 	dh_installsystemd --no-enable --no-start --no-restart-after-upgrade
+
+# The editor's test needs a display.
+ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
+override_dh_auto_test:
+	xvfb-run -a dh_auto_test
+endif

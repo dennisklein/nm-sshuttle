@@ -24,6 +24,25 @@ jobs:
       - name: Run the unit tests
         run: python3 -m pytest -q
 
+  gnome-editor:
+    # The editor for GNOME Settings is C; its form is tested under a virtual display.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends meson ninja-build gcc pkgconf \
+            libglib2.0-dev libgtk-4-dev libjson-glib-dev libnm-dev xvfb xauth
+      - name: Build
+        run: |
+          meson setup build -Dgnome-editor=enabled
+          meson compile -C build
+      - name: Run the tests
+        run: xvfb-run -a meson test -C build --suite gnome-editor --print-errorlogs
+
   lab:
     # lab/run.sh builds network namespaces, veth links and nft tables, so it
     # needs a privileged root container (docs/design.md §5).
@@ -65,24 +84,28 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Build the RPM
+      - name: Build the RPMs
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          spec=packaging/rpm/nm-sshuttle.spec
-          version=$(rpmspec -q --qf '%{version}\n' --srpm "$spec")
+          version=$(rpmspec -q --qf '%{version}\n' --srpm packaging/rpm/nm-sshuttle.spec)
           mkdir -p ~/rpmbuild/SOURCES
           git archive --format=tar.gz --prefix="nm-sshuttle-$version/" \
             -o ~/rpmbuild/SOURCES/"nm-sshuttle-$version.tar.gz" HEAD
-          dnf -y builddep "$spec"
-          rpmbuild -ba "$spec"
+          for spec in packaging/rpm/*.spec; do
+            dnf -y builddep "$spec"
+            rpmbuild -ba "$spec"
+          done
           mkdir dist
-          cp ~/rpmbuild/RPMS/noarch/*.rpm ~/rpmbuild/SRPMS/*.rpm dist/
+          cp ~/rpmbuild/RPMS/*/*.rpm ~/rpmbuild/SRPMS/*.rpm dist/
       - name: Lint
         run: rpmlint dist/*.rpm || true
-      - name: Check that it installs
+      - name: Check that they install
         run: |
-          dnf -y install dist/nm-sshuttle-*.noarch.rpm
-          rpm -ql nm-sshuttle
+          # The container has systemd-standalone-tmpfiles, which conflicts with the
+          # systemd that systemd-resolved needs; a real system has the full systemd.
+          dnf -y install --allowerasing dist/nm-sshuttle-*.noarch.rpm \
+            dist/nm-sshuttle-gnome-*.x86_64.rpm
+          rpm -ql nm-sshuttle nm-sshuttle-gnome
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: rpm-fedora-${{ matrix.fedora }}
@@ -104,7 +127,8 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends build-essential debhelper dh-python \
-            fakeroot lintian meson ninja-build python3 python3-gi python3-pytest
+            fakeroot libglib2.0-dev libgtk-4-dev libjson-glib-dev libnm-dev lintian meson \
+            ninja-build pkgconf python3 python3-gi python3-pytest xauth xvfb
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -112,13 +136,13 @@ jobs:
         run: |
           dpkg-buildpackage -us -uc -b
           mkdir dist
-          cp ../nm-sshuttle_*.deb dist/
+          cp ../nm-sshuttle_*.deb ../nm-sshuttle-gnome_*.deb dist/
       - name: Lint
         run: lintian dist/*.deb || true
-      - name: Check that it installs
+      - name: Check that they install
         run: |
-          apt-get install -y --no-install-recommends ./dist/nm-sshuttle_*.deb
-          dpkg -L nm-sshuttle
+          apt-get install -y --no-install-recommends ./dist/nm-sshuttle_*.deb ./dist/nm-sshuttle-gnome_*.deb
+          dpkg -L nm-sshuttle nm-sshuttle-gnome
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: deb-${{ matrix.name }}

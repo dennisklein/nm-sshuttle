@@ -5,5 +5,8 @@ program=@LIBEXECDIR@/nm-sshuttle-activate
 supports-multiple-connections=false
 supports-safe-private-file-access=true
 
+[libnm]
+plugin=libnm-vpn-plugin-sshuttle.so
+
 [GNOME]
 auth-dialog=@LIBEXECDIR@/nm-sshuttle-auth-dialog

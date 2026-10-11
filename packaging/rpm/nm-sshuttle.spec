@@ -39,7 +39,10 @@ logged-in user, so the user's keys, agent and ~/.ssh/config apply.
 # Meson bakes the interpreter's path into the scripts' shebangs. Where /usr/sbin
 # comes first in PATH it would pick /usr/sbin/python3, which is not a provider.
 export PATH=/usr/bin:$PATH
-%meson
+# The editor for GNOME Settings is C and architecture-specific, so it is built
+# by nm-sshuttle-gnome.spec: an RPM cannot hold an architecture-specific
+# subpackage of a noarch one.
+%meson -Dgnome-editor=disabled
 %meson_build
 
 %install
