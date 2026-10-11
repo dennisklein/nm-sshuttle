@@ -31,5 +31,5 @@ install -Dpm 0644 %{SOURCE1} %{buildroot}%{_sysconfdir}/pki/rpm-gpg/RPM-GPG-KEY-
 %{_sysconfdir}/pki/rpm-gpg/RPM-GPG-KEY-nm-sshuttle
 
 %changelog
-* Sun Oct 11 2026 Dennis Klein <ilmt2000@googlemail.com> - 1-1
+* Sun Oct 11 2026 Dennis Klein <d.klein@gsi.de> - 1-1
 - Initial package

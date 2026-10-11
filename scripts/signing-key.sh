@@ -35,11 +35,11 @@
 #    the next publish sign everything with the new key.
 # 3. After that publish, --retire removes the old key.
 #
-# Env: NM_SSHUTTLE_SIGNING_UID  key user ID (default: nm-sshuttle package signing <ilmt2000@googlemail.com>)
+# Env: NM_SSHUTTLE_SIGNING_UID  key user ID (default: nm-sshuttle package signing <d.klein@gsi.de>)
 #      NM_SSHUTTLE_REPO         GitHub repository (default: dennisklein/nm-sshuttle)
 set -euo pipefail
 
-uid=${NM_SSHUTTLE_SIGNING_UID:-nm-sshuttle package signing <ilmt2000@googlemail.com>}
+uid=${NM_SSHUTTLE_SIGNING_UID:-nm-sshuttle package signing <d.klein@gsi.de>}
 repo=${NM_SSHUTTLE_REPO:-dennisklein/nm-sshuttle}
 environment=rpm-signing
 secret=RPM_SIGNING_KEY

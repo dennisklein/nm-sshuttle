@@ -53,5 +53,5 @@ xvfb-run -a %{__meson} test -C %{_vpath_builddir} --no-rebuild --print-errorlogs
 %{_libdir}/NetworkManager/libnm-vpn-plugin-sshuttle.so
 
 %changelog
-* Sun Oct 11 2026 Dennis Klein <ilmt2000@googlemail.com> - 0.1.0-1
+* Sun Oct 11 2026 Dennis Klein <d.klein@gsi.de> - 0.1.0-1
 - Initial package
