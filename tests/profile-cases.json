@@ -97,7 +97,8 @@
 
     {"name": "method nat", "data": {"method": "nat"}},
     {"name": "method nft", "data": {"method": "nft"}},
-    {"name": "method tproxy before it exists", "data": {"method": "tproxy"}, "error": "method"},
+    {"name": "method tproxy", "data": {"method": "tproxy"}},
+    {"name": "method that does not exist", "data": {"method": "socks"}, "error": "method"},
     {"name": "method that is capitalised", "data": {"method": "NFT"}, "error": "method"},
     {"name": "method that is empty", "data": {"method": ""}, "error": "method"},
 

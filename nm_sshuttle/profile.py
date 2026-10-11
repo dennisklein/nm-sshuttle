@@ -11,6 +11,8 @@ import pwd
 import re
 from dataclasses import dataclass, field
 
+from .const import TPROXY_MARK
+
 REMOTE_RE = re.compile(r"[A-Za-z0-9._@:%\[\]-]+")
 DOMAIN_RE = re.compile(r"~?(\.|[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.?)")
 USER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*")   # also keeps it one word for sshuttle -e
@@ -44,7 +46,8 @@ class Profile:
         of the first hop's addresses; ipv6 says whether sshuttle tunnels IPv6."""
         return {"remote": self.remote, "user": self.user, "subnets": self.subnets,
                 "exclude": self.exclude, "dns": self.dns, "dns_servers": self.dns_servers,
-                "method": self.method, "first_hop": list(first_hop), "ipv6": ipv6}
+                "method": self.method, "first_hop": list(first_hop), "ipv6": ipv6,
+                **({"tmark": TPROXY_MARK} if self.method == "tproxy" else {})}
 
     def guarded_networks(self):
         """Networks the guard makes fail closed: the subnets plus the DNS servers."""
@@ -181,8 +184,8 @@ def parse(settings, getpwnam=pwd.getpwnam):
         servers, domains = [], []
 
     method = data.get("method", "nft")
-    if method not in ("nft", "nat"):
-        raise ProfileError(f"method: expected nft or nat, got {method!r}")
+    if method not in ("nft", "nat", "tproxy"):
+        raise ProfileError(f"method: expected nft, nat or tproxy, got {method!r}")
 
     gateway = data.get("gateway") or None
     if gateway:

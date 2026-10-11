@@ -16,7 +16,7 @@
 #define RESOURCE "/io/github/dennisklein/nm-sshuttle/nm-sshuttle-editor.ui"
 
 static const char *const DNS_MODES[] = {"none", "split", "all"};
-static const char *const METHODS[] = {"nft", "nat"};
+static const char *const METHODS[] = {"nft", "nat", "tproxy"};
 
 /* The rows of the form, in the order of NmssEditor.rows. */
 enum {

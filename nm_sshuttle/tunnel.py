@@ -30,6 +30,9 @@ AUTH_MARKERS = ("Permission denied", "Host key verification failed",
 SSHUTTLE_TABLE_RE = re.compile(r"^sshuttle-ipv([46])-(\d+)$")
 # What may go into the generated ssh config unquoted.
 SSH_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+# method=tproxy: sshuttle's chains in the mangle table (docs/later/tproxy.md).
+SSHUTTLE_CHAIN_RE = re.compile(r"^sshuttle-([mtd])-(\d+)$")
+IPTABLES = {4: "iptables", 6: "ip6tables"}
 
 
 def bridge_command(user, ssh_config=None):
@@ -59,6 +62,8 @@ def sshuttle_argv(spec, sshuttle, ssh_config=None):
     argv = [sshuttle, "-v", "--method", spec.get("method", "nft")]
     if not ipv6:
         argv.append("--disable-ipv6")
+    if spec.get("tmark"):
+        argv += ["--tmark", f"{spec['tmark']:#x}"]
     argv += ["-r", spec["remote"]]
     for net in wanted(first_hops(spec) + list(spec.get("exclude", []))):
         argv += ["-x", net]
@@ -339,10 +344,56 @@ def stale_tables(nft_list_tables, ports):
     return sshuttle_tables(nft_list_tables, ports, live=False)
 
 
-def nft_health():
-    """What the health check reads from nft (design §4.4, "Health"): is the
-    guard table there, and for which families (4, 6) does a sshuttle table
-    have a listener on its port? None when nft cannot be asked."""
+def mangle_chains(iptables_s):
+    """sshuttle's chains in 'iptables -t mangle -S' output: {name: port}."""
+    chains = {}
+    for line in iptables_s.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0] == "-N":
+            m = SSHUTTLE_CHAIN_RE.match(parts[1])
+            if m:
+                chains[parts[1]] = int(m.group(2))
+    return chains
+
+
+def stale_chain_commands(iptables_s, ports):
+    """The iptables arguments that remove the sshuttle chains whose port has no
+    listener: the jumps from OUTPUT and PREROUTING first, then flush every
+    chain, then delete them (the t-chain jumps to the d-chain)."""
+    stale = [c for c, port in mangle_chains(iptables_s).items() if port not in ports]
+    cmds = []
+    for line in iptables_s.splitlines():
+        parts = line.split()
+        if (len(parts) >= 4 and parts[0] == "-A" and parts[1] in ("OUTPUT", "PREROUTING")
+                and parts[-2] == "-j" and parts[-1] in stale):
+            cmds.append(["-D"] + parts[1:])
+    cmds += [["-F", c] for c in stale]
+    cmds += [["-X", c] for c in stale]
+    return cmds
+
+
+def iptables_available():
+    """Whether both iptables and ip6tables exist, as sshuttle's tproxy method
+    needs (its is_supported)."""
+    return all(shutil.which(cmd, path=SEARCH_PATH) for cmd in IPTABLES.values())
+
+
+def _mangle(family):
+    """'iptables -t mangle -S' for one family, or None."""
+    try:
+        p = subprocess.run([IPTABLES[family], "-w", "-t", "mangle", "-S"], capture_output=True,
+                           text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return p.stdout if p.returncode == 0 else None
+
+
+def nft_health(method="nft"):
+    """What the health check reads from the firewall (design §4.4, "Health"):
+    is the guard table there, and for which families (4, 6) does sshuttle have
+    its rules with a listener on their port? Those are a table in nft, or for
+    method=tproxy a mark chain in iptables' mangle table. None when nft cannot
+    be asked."""
     try:
         p = subprocess.run(["nft", "list", "tables"], capture_output=True, text=True,
                            timeout=10)
@@ -350,23 +401,49 @@ def nft_health():
         return None
     if p.returncode:
         return None
-    live = sshuttle_tables(p.stdout, listening_ports(), live=True)
-    return {"guard": GUARD_TABLE in inet_tables(p.stdout),
-            "sshuttle": {int(SSHUTTLE_TABLE_RE.match(t).group(1)) for t in live}}
+    ports = listening_ports()
+    if method == "tproxy":
+        families = set()
+        for version in IPTABLES:
+            chains = mangle_chains(_mangle(version) or "")
+            if any(c.startswith("sshuttle-m-") and port in ports for c, port in chains.items()):
+                families.add(version)
+    else:
+        live = sshuttle_tables(p.stdout, ports, live=True)
+        families = {int(SSHUTTLE_TABLE_RE.match(t).group(1)) for t in live}
+    return {"guard": GUARD_TABLE in inet_tables(p.stdout), "sshuttle": families}
 
 
 def sweep():
-    """Delete sshuttle tables left by a killed tunnel; they only black-hole traffic."""
+    """Delete sshuttle tables and chains left by a killed tunnel; they only
+    black-hole traffic."""
     try:
         out = subprocess.run(["nft", "list", "tables"], capture_output=True, text=True,
                              timeout=10).stdout
     except (OSError, subprocess.TimeoutExpired) as e:
         log.warning("sweep: cannot list nft tables: %s", e)
-        return
-    for table in stale_tables(out, listening_ports()):
+        out = ""
+    ports = listening_ports()
+    for table in stale_tables(out, ports):
         p = subprocess.run(["nft", "delete", "table", "inet", table], capture_output=True,
                            text=True, timeout=10)
         if p.returncode == 0:
             log.info("sweep: deleted stale table %s", table)
         else:
             log.warning("sweep: cannot delete %s: %s", table, p.stderr.strip())
+    # method=tproxy leaves iptables chains; through iptables, so that this also
+    # works with iptables-legacy (docs/later/tproxy.md).
+    for version, cmd in IPTABLES.items():
+        if not shutil.which(cmd, path=SEARCH_PATH):
+            continue
+        listing = _mangle(version)
+        if listing is None:
+            continue
+        for args in stale_chain_commands(listing, ports):
+            p = subprocess.run([cmd, "-w", "-t", "mangle", *args], capture_output=True,
+                               text=True, timeout=10)
+            if p.returncode:
+                log.warning("sweep: %s -t mangle %s: %s", cmd, " ".join(args),
+                            p.stderr.strip())
+            elif args[0] == "-X":
+                log.info("sweep: deleted stale chain %s (IPv%d)", args[1], version)

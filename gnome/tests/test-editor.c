@@ -66,7 +66,7 @@ cli_connection(void)
     nm_setting_vpn_add_data_item(NM_SETTING_VPN(s_vpn), "remote", "corp");
     nm_setting_vpn_add_data_item(NM_SETTING_VPN(s_vpn), "local-user", g_get_user_name());
     nm_setting_vpn_add_data_item(NM_SETTING_VPN(s_vpn), "subnets", "10.0.0.0/8");
-    nm_setting_vpn_add_data_item(NM_SETTING_VPN(s_vpn), "method", "tproxy");
+    nm_setting_vpn_add_data_item(NM_SETTING_VPN(s_vpn), "method", "socks");
     nm_setting_vpn_add_data_item(NM_SETTING_VPN(s_vpn), "from-a-newer-cli", "x");
     nm_connection_add_setting(connection, s_vpn);
     return connection;
@@ -234,7 +234,7 @@ test_existing_profile(Fixture *f, gconstpointer user_data)
     g_assert_false(nm_vpn_editor_update_connection(f->editor, f->connection, &error));
     g_assert_error(error, NMSS_VALIDATE_ERROR, NMSS_FIELD_METHOD);
     g_clear_error(&error);
-    g_assert_cmpstr(nm_setting_vpn_get_data_item(s_vpn, "method"), ==, "tproxy");
+    g_assert_cmpstr(nm_setting_vpn_get_data_item(s_vpn, "method"), ==, "socks");
 
     gtk_drop_down_set_selected(GTK_DROP_DOWN(method), 1); /* nat */
     g_assert_true(nm_vpn_editor_update_connection(f->editor, f->connection, &error));
