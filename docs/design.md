@@ -1,8 +1,11 @@
 # nm-sshuttle: design proposal
 
-Status: M0 to M3 done (§7), updated 2026-10-11. The plugin is in
-[`nm_sshuttle/`](../nm_sshuttle), packaged for Fedora, Debian and Ubuntu, and
-its VM tests ([`test-vm/`](../test-vm)) pass in CI. The research code is the lab in
+Status: M0 to M3 done and the "Later" items implemented (§7), updated
+2026-10-11. The plugin is in [`nm_sshuttle/`](../nm_sshuttle) and the editor
+for GNOME Settings in [`gnome/`](../gnome). They are packaged for Fedora,
+Debian and Ubuntu (Fedora also from a signed dnf repository), and the VM
+tests ([`test-vm/`](../test-vm)) pass in CI. The sections below describe the
+design as proposed for v1; later work is marked where it changes them. The research code is the lab in
 [`lab/`](../lab), which checks the sshuttle and kernel behaviour this design
 relies on, and the spike in [`spike/`](../spike), which checks
 NetworkManager, SELinux and GNOME on Fedora 44.
@@ -10,7 +13,9 @@ NetworkManager, SELinux and GNOME on Fedora 44.
 ## 1. Recommendation in brief
 
 Build a **small NetworkManager VPN service plugin in Python, without a GUI
-editor**; a ten-line auth-dialog stub is its only GNOME part. It runs as a D-Bus-activated systemd service and supervises
+editor** in v1; a ten-line auth-dialog stub is its only GNOME part. (The
+[GNOME Settings editor](later/gnome-editor.md) came later, as a separate
+package.) It runs as a D-Bus-activated systemd service and supervises
 sshuttle, which runs in a second systemd unit.
 
 - **The toggle.** GNOME Quick Settings shows a VPN toggle for every
@@ -586,7 +591,8 @@ DNS behaviour.
 
 - **A** buys native editing in GNOME Settings at the cost of a C/GTK4
   editor library (gnome-control-center `dlopen`s it) and libnma. It can be
-  added on top of B later without changing anything else.
+  added on top of B later without changing anything else; it was, as the
+  separate package `nm-sshuttle-gnome` ([editor](later/gnome-editor.md)).
 - **C** is the smallest: a systemd unit plus a Quick Settings extension
   such as *Custom Command Toggle* (GNOME 45–51). But the toggle sits outside
   NM's VPN list, extensions break on GNOME upgrades, and the lifecycle work
@@ -652,6 +658,10 @@ supports-safe-private-file-access=true
 [GNOME]
 auth-dialog=/usr/libexec/nm-sshuttle/nm-sshuttle-auth-dialog
 ```
+
+With [several tunnels](later/multiple-tunnels.md) the installed file says
+`supports-multiple-connections=true`, and the [editor](later/gnome-editor.md)
+adds a `[libnm]` section that names the plugin library of the editor package.
 
 The other installed files:
 
@@ -1598,21 +1608,27 @@ minimal path under it; `ip` and `nft` there are untested.
 
 ```
 nm_sshuttle/
-  service.py      VPN D-Bus interface (Gio), about 250 lines
+  service.py      VPN D-Bus interface (Gio)
   supervisor.py   state machine, backoff, health; pure logic, unit-testable
   watch.py        NM and logind D-Bus watchers (systemd's and NM's active
                   connection signals stay in service.py)
   profile.py      vpn.data parsing and validation
   tunnel.py       sshuttle argv, exec-tunnel, sweep, ssh-as-user
   guard.py        nft guard table, dummy link
-  cli.py          add / check / list / remove (wraps nmcli); sweep and
-                  cleanup, which the units run
-data/             .name file, D-Bus policy and activation file, the two units,
+  claims.py       what each active profile claims; the conflict rules
+  dispatcher.py   gives each activation a slot (several tunnels)
+  const.py        names, paths and NM constants
+  cli.py          add / check / list / remove (wraps nmcli); sweep, cleanup
+                  and post-install, which the units and packages run
+data/             .name file, D-Bus policy and activation file, the units,
                   the conf.d snippet that leaves nmss0 unmanaged,
                   auth-dialog stub (shell)
+gnome/            editor for GNOME Settings (C, GTK4), a separate package
 ```
 
-That is roughly 1,200 lines of Python.
+v1 was about 1,200 lines of Python. With the lifecycle work, IPv6, tproxy
+and several tunnels it is about 4,200, and the editor adds about 1,200 lines
+of C.
 
 - **Runtime dependencies:** python3 ≥ 3.10, python3-gobject, sshuttle ≥
   1.3.1, nftables, iproute2, util-linux (`setpriv`) and openssh-clients.
@@ -1873,9 +1889,9 @@ Later, also propose a hook for an externally provided firewall helper
    README; and the VM tests in CI, on demand and weekly, on hosted runners
    with KVM (about 12 min). Suspend and the GNOME checks passed by hand
    on a notebook; DNS without resolved stays open under M2.
-5. **Later:** GTK4 editor plugin for GNOME Settings, several tunnels at once
-   (template units), UDP through `tproxy`, IPv6 guard sets. Each has a
-   design in [`later/`](later/README.md). **IPv6 is in:** IPv6 subnets
+5. **Later (all four implemented):** GTK4 editor plugin for GNOME Settings,
+   several tunnels at once (template units), UDP through `tproxy`, IPv6
+   guard sets. Each has a design in [`later/`](later/README.md). **IPv6 is in:** IPv6 subnets
    and exclusions, the IPv6 guard sets, an IPv6 first hop and `gateway`,
    and the IPv6 part of the network key, with unit tests, lab tests T11 to
    T14 and VM scenarios V6-01 and V6-02. **So is `method=tproxy`:** UDP
@@ -1886,3 +1902,13 @@ Later, also propose a hook for an externally provided firewall helper
    activation a slot and starts a plugin instance for it, names per slot,
    the conflict rules between active profiles, and `cleanup --slot` and
    `--all`, with unit and D-Bus tests and VM scenarios MT-01 to MT-03.
+   **And the editor for GNOME Settings:** a GTK4 library, packaged as
+   `nm-sshuttle-gnome`, whose validation reads the same test cases as the
+   plugin's, with unit tests and a form test under Xvfb. On the Fedora 44
+   notebook the protocol
+   ([`test-vm/gnome-editor-protocol.md`](../test-vm/gnome-editor-protocol.md))
+   passed in GNOME Settings except 7.3 and 7.6 (Apply lagged one change
+   behind the IPv4 method); that is fixed, and the re-check of 7.3 to 7.7
+   is still open.
+   **Packages:** a signed dnf repository for Fedora 43 and 44 on GitHub
+   Pages, published from release tags ([`packaging/`](../packaging/README.md)).
