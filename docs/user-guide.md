@@ -90,13 +90,13 @@ The options of `add`:
 | Option | Meaning |
 |---|---|
 | `--remote` | The ssh destination, as you would type it after `ssh`; usually a `Host` alias. Required. |
-| `--subnets` | The IPv4 networks to send through the tunnel, separated by commas. Required. |
+| `--subnets` | The networks to send through the tunnel, IPv4 or IPv6, separated by commas. Required. |
 | `--exclude` | Networks inside those to leave out. |
 | `--dns` | `none` (the default) leaves DNS alone. `split` sends lookups for `--dns-domains` to `--dns-servers` through the tunnel, and everything else as before. `all` sends every lookup through the tunnel. |
-| `--dns-servers` | The DNS servers on the far side. Required for `split` and `all`. |
+| `--dns-servers` | The DNS servers on the far side, IPv4 only. Required for `split` and `all`. |
 | `--dns-domains` | The domains `split` sends there, subdomains included. `~corp.example` only routes lookups. A plain `corp.example` also completes short names, so `git` becomes `git.corp.example`. Quote a leading `~` in the shell. |
 | `--gateway` | The address ssh connects to first, when the plugin cannot work it out (`ProxyCommand`). |
-| `--probe` | `ADDRESS:PORT` of a server on the far side that speaks first, such as an ssh server. The plugin connects to it every 10 s and restarts the tunnel after two failures in a row. Without it, a tunnel that is up but stuck is noticed only when sshuttle exits. |
+| `--probe` | `ADDRESS:PORT` (or `[IPV6]:PORT`) of a server on the far side that speaks first, such as an ssh server. The plugin connects to it every 10 s and restarts the tunnel after two failures in a row. Without it, a tunnel that is up but stuck is noticed only when sshuttle exits. |
 | `--method` | `nft` (the default) or `nat`. |
 | `--fail-closed` | `yes` (the default) blocks traffic to the tunnelled networks while the tunnel is down. `no` lets it go out on the local network. |
 | `--user` | Whose ssh configuration and agent to use. The default is you. |
@@ -154,6 +154,9 @@ Common causes:
 - **The journal says `nmss0` is managed:** the setting in
   `/usr/lib/NetworkManager/conf.d/90-nm-sshuttle.conf` is overridden or
   not loaded. Switch the VPN off and run `sudo nm-sshuttle post-install`.
+- **`check` warns about `ipv6.auto-route-ext-gw`:** the profile was made
+  before IPv6 support. Run the `nmcli connection modify` command it
+  prints.
 - **Something is left over after a crash** (an `nmss0` link, or blocked
   traffic to the tunnelled networks): with the VPN off,
   `sudo nm-sshuttle cleanup` removes it. The plugin also cleans up when it
@@ -162,8 +165,13 @@ Common causes:
 ## Limits
 
 - One tunnel at a time.
-- IPv4 only. TCP and DNS go through the tunnel; other UDP traffic, such as
-  QUIC, does not.
+- TCP and DNS go through the tunnel; other UDP traffic, such as QUIC,
+  does not.
+- DNS servers on the far side must have IPv4 addresses. If a split domain
+  answers with IPv6 addresses, list those networks in `--subnets` too, or
+  connections to them go around the tunnel.
+- On a machine with IPv6 switched off, IPv6 networks are blocked but not
+  tunnelled.
 - The tunnelled networks need a route on your machine; a default route is
   enough. On a network without one, the tunnel comes up but connections to
   those networks fail.
