@@ -241,8 +241,8 @@ The design as above, with these results and details:
 - **DNS works (lab T15):** a query pinned to the tunnel link with
   `IP_UNICAST_IF` is rerouted to `lo` by the mark and answered through
   the jump host, so `dns=split` and `dns=all` stay allowed with `tproxy`.
-- **Slot 0 only for now:** mark `0x4e530000`, table 20051, priority 100.
-  The functions take the slot, for the multiple tunnels design.
+- **Per slot:** slot N uses mark `0x4e530000` + N, table 20051 + N and
+  priority 100 + N ([several tunnels](multiple-tunnels.md)).
 - **The routing is installed whether or not the profile fails closed**
   (`fail-closed=no` drops only the guard), and only for the families the
   tunnel carries. It is removed for both families.

@@ -2,7 +2,8 @@
 
 The [design](../design.md)'s roadmap (§7) ends with work left out of v1.
 Each item has a design here. They build on the architecture of §4 and
-change nothing in it unless they say so. Implemented: IPv6, the GNOME editor and tproxy.
+change nothing in it unless they say so. Implemented: IPv6, the GNOME editor,
+tproxy and several tunnels.
 
 | Design | What it adds | Size |
 |---|---|---|
