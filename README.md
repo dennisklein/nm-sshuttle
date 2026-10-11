@@ -37,7 +37,9 @@ $ nmcli connection up corp         # or the VPN toggle in Quick Settings
   own package, `nm-sshuttle-gnome`. Its validation reads the same
   [test cases](tests/profile-cases.json) as the plugin's.
 - [`packaging/rpm/`](packaging/rpm) and [`debian/`](debian) build the
-  Fedora and Debian/Ubuntu packages.
+  Fedora and Debian/Ubuntu packages. [`packaging/`](packaging) also builds
+  and signs the Fedora dnf repository on GitHub Pages
+  (<https://dennisklein.github.io/nm-sshuttle/>) from release tags.
 - [`docs/design.md`](docs/design.md) is the design: the research findings,
   the options considered, the architecture, the risks and the roadmap.
 - [`test-vm/`](test-vm) runs the plugin's scenarios in a throwaway Fedora
