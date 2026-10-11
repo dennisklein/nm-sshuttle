@@ -49,6 +49,10 @@ WEB_IP6=2001:db8:99::10
 HAVE_IPV6=no
 [ -e /proc/net/if_inet6 ] && HAVE_IPV6=yes
 CON6=nmtest-corp6
+CONTP=nmtest-corptp   # method=tproxy (docs/later/tproxy.md)
+UDP_PORT=7777         # UDP echo on $WEB_IP
+TPROXY_MARK=0x4e530000
+TPROXY_TABLE=20051
 LANB6_CON=nmtest-lanb6
 UPLINK=""
 BLOCK_TABLE=nmtest-block
@@ -257,6 +261,9 @@ EOF
     systemd-run --quiet --collect --unit=nmtest-web \
         -p NetworkNamespacePath=/run/netns/internal \
         /usr/bin/python3 -m http.server --bind $WEB_IP 8080 --directory "$VARDIR/www"
+    systemd-run --quiet --collect --unit=nmtest-udp \
+        -p NetworkNamespacePath=/run/netns/internal \
+        /usr/bin/python3 "$REPO/lab/udp_echo.py" serve $WEB_IP $UDP_PORT
     [ "$HAVE_IPV6" = yes ] && systemd-run --quiet --collect --unit=nmtest-web6 \
         -p NetworkNamespacePath=/run/netns/internal \
         /usr/bin/python3 -m http.server --bind $WEB_IP6 8080 --directory "$VARDIR/www"
@@ -613,6 +620,10 @@ guard_present() { nft list table inet "$GUARD_TABLE" > /dev/null 2>&1; }
 guard_gone() { ! guard_present; }
 sshuttle_tables() { nft list tables 2> /dev/null | awk '$3 ~ /^sshuttle-ipv[46]-[0-9]+$/ {print $3}'; }
 tunnel_state() { sc is-active "$TUNNEL_UNIT" 2> /dev/null; }
+# method=tproxy: sshuttle's chains in iptables' mangle table, the plugin's rule and route
+mangle_chains() { iptables -w -t mangle -S 2> /dev/null | awk '$1 == "-N" && $2 ~ /^sshuttle-[mtd]-[0-9]+$/ {print $2}'; }
+tproxy_rule() { ip rule list 2> /dev/null | grep "fwmark $TPROXY_MARK lookup $TPROXY_TABLE"; }
+tproxy_route() { ip route show table $TPROXY_TABLE 2> /dev/null | grep '^local default dev lo'; }
 tunnel_active() { [ "$(tunnel_state)" = active ]; }
 tunnel_gone() { case $(tunnel_state) in inactive|failed|unknown) return 0 ;; *) return 1 ;; esac; }
 all_clean() {  # no link, no guard, no tunnel unit, no stale sshuttle table
@@ -721,6 +732,8 @@ leftovers() {
     guard_present && l="$l guard"
     tunnel_gone || l="$l tunnel-unit($(tunnel_state))"
     [ -z "$(sshuttle_tables)" ] || l="$l sshuttle-table"
+    [ -z "$(mangle_chains)" ] || l="$l sshuttle-mangle-chain"
+    [ -z "$(tproxy_rule)$(tproxy_route)" ] || l="$l tproxy-routing"
     echo "${l# }"
 }
 clear_leaked_dns() {  # a leaked VPN DNS entry would spoil later DNS checks
@@ -735,7 +748,7 @@ clear_leaked_dns() {  # a leaked VPN DNS entry would spoil later DNS checks
 reset_state() {
     local c left
     unblock_jump
-    for c in "$CON" "$CON_ZONE" "$CON6"; do
+    for c in "$CON" "$CON_ZONE" "$CON6" "$CONTP"; do
         [ -n "$(con_state "$c")" ] && nmcli connection down "$c" > /dev/null 2>&1
     done
     wait_for 30 con_gone
@@ -768,9 +781,10 @@ cleanup() {
     nmcli connection down "$CON" > /dev/null 2>&1
     nmcli connection down "$CON_ZONE" > /dev/null 2>&1
     nmcli connection down "$CON6" > /dev/null 2>&1
-    nmcli connection delete "$CON" "$CON_ZONE" "$CON6" > /dev/null 2>&1
+    nmcli connection down "$CONTP" > /dev/null 2>&1
+    nmcli connection delete "$CON" "$CON_ZONE" "$CON6" "$CONTP" > /dev/null 2>&1
     sc stop "$PLUGIN_UNIT" "$TUNNEL_UNIT" > /dev/null 2>&1
-    sc stop nmtest-sshd nmtest-dns nmtest-web nmtest-web6 nmtest-dns-local > /dev/null 2>&1
+    sc stop nmtest-sshd nmtest-dns nmtest-web nmtest-web6 nmtest-dns-local nmtest-udp > /dev/null 2>&1
     rv revert h-j > /dev/null 2>&1
     if [ -f "$VARDIR/ssh-config-written" ]; then
         rm -f "$HOME_U/.ssh/config" "$VARDIR/ssh-config-written"
