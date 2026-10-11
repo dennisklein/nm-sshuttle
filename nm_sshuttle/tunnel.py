@@ -14,7 +14,7 @@ import subprocess
 import sys
 
 from .const import GUARD_TABLE, LIBEXEC, TUNNEL_SPEC
-from .profile import collapse
+from .profile import collapse, family
 
 log = logging.getLogger("nm-sshuttle")
 
@@ -25,19 +25,36 @@ SEARCH_PATH = "/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin"
 # Markers in the tunnel unit's journal that mean "the user has to act" (design §4.3).
 AUTH_MARKERS = ("Permission denied", "Host key verification failed",
                 "agent refused operation")
-SSHUTTLE_TABLE_RE = re.compile(r"^sshuttle-ipv[46]-(\d+)$")
+SSHUTTLE_TABLE_RE = re.compile(r"^sshuttle-ipv([46])-(\d+)$")
 
 
 def bridge_command(user):
     return f"{os.path.join(LIBEXEC, 'nm-sshuttle')} ssh-as-user {user}"
 
 
+def first_hops(spec):
+    """The first hop's addresses from a tunnel spec. A spec written before IPv6
+    support holds one address as a string (docs/later/ipv6.md)."""
+    hops = spec["first_hop"]
+    return [hops] if isinstance(hops, str) else list(hops)
+
+
 def sshuttle_argv(spec, sshuttle):
-    """sshuttle's command line for a tunnel spec written by the plugin."""
-    subnets = list(spec["subnets"])
-    argv = [sshuttle, "-v", "--method", spec.get("method", "nft"), "--disable-ipv6",
-            "-r", spec["remote"], "-x", spec["first_hop"]]
-    for net in spec.get("exclude", []):
+    """sshuttle's command line for a tunnel spec written by the plugin.
+
+    Without spec["ipv6"] sshuttle runs with --disable-ipv6 and gets no IPv6
+    network at all, which it would only drop with a warning; the guard still
+    covers them."""
+    ipv6 = bool(spec.get("ipv6"))
+
+    def wanted(nets):
+        return [n for n in nets if ipv6 or family(n) == 4]
+    subnets = wanted(spec["subnets"])
+    argv = [sshuttle, "-v", "--method", spec.get("method", "nft")]
+    if not ipv6:
+        argv.append("--disable-ipv6")
+    argv += ["-r", spec["remote"]]
+    for net in wanted(first_hops(spec) + list(spec.get("exclude", []))):
         argv += ["-x", net]
     argv += ["-e", bridge_command(spec["user"])]
     servers = spec.get("dns_servers") or []
@@ -46,6 +63,19 @@ def sshuttle_argv(spec, sshuttle):
         argv += ["--ns-hosts", ",".join(servers), "--to-ns", servers[0]]
         subnets += [f"{s}/32" for s in servers]   # DNS over TCP goes through too
     return argv + collapse(subnets)
+
+
+def ipv6_available(lo="/proc/sys/net/ipv6/conf/lo/disable_ipv6",
+                   if_inet6="/proc/net/if_inet6"):
+    """Whether sshuttle can listen on ::1: IPv6 is on in the kernel and on lo.
+    Without it sshuttle stops with "Could not bind to an IPv6 socket"."""
+    try:
+        with open(lo) as f:
+            if f.read().strip() != "0":
+                return False
+    except OSError:
+        return False
+    return os.path.exists(if_inet6)
 
 
 def exec_tunnel():
@@ -151,11 +181,13 @@ def ssh_g(user, target):
     return p.stdout
 
 
-def first_hop(user, remote, ssh_g=ssh_g):
-    """The first hop's IPv4 address, worked out as the user (design §2.2).
+def first_hop(user, remote, ssh_g=ssh_g, getaddrinfo=socket.getaddrinfo):
+    """Every address of the first hop, worked out as the user (design §2.2).
 
     A ProxyJump host may itself be an alias from the user's config, and may have
-    a ProxyJump of its own, so follow the chain with 'ssh -G' as the user."""
+    a ProxyJump of its own, so follow the chain with 'ssh -G' as the user. ssh
+    connects to whichever of the name's addresses works first, of either family,
+    so all of them are returned (docs/later/ipv6.md)."""
     target = remote
     for _ in range(5):
         if target.startswith("-"):
@@ -166,7 +198,14 @@ def first_hop(user, remote, ssh_g=ssh_g):
         target = jump
     else:
         raise ValueError("too many nested ProxyJump hosts; set 'gateway' in the profile")
-    return socket.getaddrinfo(hostname, 22, socket.AF_INET, socket.SOCK_STREAM)[0][4][0]
+    addrs = []
+    for *_, sockaddr in getaddrinfo(hostname, 22, socket.AF_UNSPEC, socket.SOCK_STREAM):
+        addr = sockaddr[0].split("%", 1)[0]       # no scope id: it is no network
+        if addr not in addrs:
+            addrs.append(addr)
+    if not addrs:
+        raise ValueError(f"{hostname} has no address")
+    return addrs
 
 
 # ------------------------------------------------------------------ sweep
@@ -200,7 +239,7 @@ def sshuttle_tables(nft_list_tables, ports, live):
     out = []
     for name in inet_tables(nft_list_tables):
         m = SSHUTTLE_TABLE_RE.match(name)
-        if m and (int(m.group(1)) in ports) == live:
+        if m and (int(m.group(2)) in ports) == live:
             out.append(name)
     return out
 
@@ -212,8 +251,8 @@ def stale_tables(nft_list_tables, ports):
 
 def nft_health():
     """What the health check reads from nft (design §4.4, "Health"): is the
-    guard table there, and does a sshuttle table have a listener on its port?
-    None when nft cannot be asked."""
+    guard table there, and for which families (4, 6) does a sshuttle table
+    have a listener on its port? None when nft cannot be asked."""
     try:
         p = subprocess.run(["nft", "list", "tables"], capture_output=True, text=True,
                            timeout=10)
@@ -221,8 +260,9 @@ def nft_health():
         return None
     if p.returncode:
         return None
+    live = sshuttle_tables(p.stdout, listening_ports(), live=True)
     return {"guard": GUARD_TABLE in inet_tables(p.stdout),
-            "sshuttle": bool(sshuttle_tables(p.stdout, listening_ports(), live=True))}
+            "sshuttle": {int(SSHUTTLE_TABLE_RE.match(t).group(1)) for t in live}}
 
 
 def sweep():

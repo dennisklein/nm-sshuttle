@@ -64,31 +64,35 @@ def remove_link(name=LINK):
 
 
 def guard_ruleset(networks, exclude):
-    """The guard table (design §4.6) as an nft script.
+    """The guard table (design §4.6, docs/later/ipv6.md) as an nft script.
 
     sshuttle's redirect runs at priority dstnat, so its packets carry conntrack
     status dnat when they reach this output hook; everything else to the
-    tunnelled networks is refused at once instead of leaking."""
-    def elements(items):
-        return ", ".join(items) if items else ""
-
-    def set_def(name, items):
-        items = collapse(items)
-        body = "type ipv4_addr; flags interval;"
+    tunnelled networks is refused at once instead of leaking. Each family has
+    its own pair of sets; the IPv6 ones are empty for an IPv4-only profile."""
+    def set_def(name, items, version):
+        items = collapse(items, version)
+        body = f"type ipv{version}_addr; flags interval;"
         if items:
-            body += f" elements = {{ {elements(items)} }}"
+            body += f" elements = {{ {', '.join(items)} }}"
         return f"    set {name} {{ {body} }}"
 
     return "\n".join([
         f"table inet {GUARD_TABLE} {{",
-        set_def("subnets4", networks),
-        set_def("exclude4", exclude),
+        set_def("subnets4", networks, 4),
+        set_def("exclude4", exclude, 4),
+        set_def("subnets6", networks, 6),
+        set_def("exclude6", exclude, 6),
         "    chain output {",
         "        type filter hook output priority filter; policy accept;",
         "        ip daddr @exclude4 accept",
+        "        ip6 daddr @exclude6 accept",
         "        ip daddr @subnets4 ct status dnat accept",
+        "        ip6 daddr @subnets6 ct status dnat accept",
         "        ip daddr @subnets4 meta l4proto tcp reject with tcp reset",
-        "        ip daddr @subnets4 reject with icmp admin-prohibited",
+        "        ip6 daddr @subnets6 meta l4proto tcp reject with tcp reset",
+        "        ip daddr @subnets4 reject with icmpx admin-prohibited",
+        "        ip6 daddr @subnets6 reject with icmpx admin-prohibited",
         "    }",
         "}",
         "",

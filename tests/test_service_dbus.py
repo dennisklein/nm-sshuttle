@@ -327,7 +327,8 @@ def world(bus, monkeypatch, tmp_path):
     monkeypatch.setattr(guard, "install_guard", lambda n, e: host["ops"].append("guard"))
     monkeypatch.setattr(guard, "remove_guard", lambda: host["ops"].append("unguard"))
     monkeypatch.setattr(tunnel, "sweep", lambda: None)
-    monkeypatch.setattr(tunnel, "nft_health", lambda: {"guard": True, "sshuttle": True})
+    monkeypatch.setattr(tunnel, "nft_health", lambda: {"guard": True, "sshuttle": {4, 6}})
+    monkeypatch.setattr(tunnel, "ipv6_available", lambda: True)
     monkeypatch.setattr(service.pwd, "getpwnam", fake_getpwnam)
     monkeypatch.setattr(service.Service, "run_cleanup", lambda self, done: done())
     monkeypatch.setattr(service.Service, "write_tunnel_spec", lambda self, spec: None)
@@ -487,6 +488,14 @@ def test_network_and_logind_watchers(world):
     fake.props_changed(SESSION_PATH, "org.freedesktop.login1.Session",
                        {"LockedHint": GLib.Variant("b", True)})
     iterate_until(lambda: seen)
+
+
+def test_config_carries_an_ipv6_gateway_as_bytes():
+    cfg = service.config_variant({"gateway": "2001:db8::7", "tundev": "nmss0"})
+    assert bytes(cfg["gateway"].unpack()) == socket.inet_pton(socket.AF_INET6, "2001:db8::7")
+    assert cfg["gateway"].get_type_string() == "ay"
+    assert u32_ip(service.config_variant({"gateway": "203.0.113.7"})["gateway"].unpack()) \
+        == "203.0.113.7"
 
 
 def test_probe_needs_data_from_the_far_end():

@@ -107,7 +107,9 @@ class Supervisor:
         self.ac_state = AC_UNKNOWN
         self.ac_seen = {}              # AC states seen before our own path was known
         self.invisible = False         # no active connection found: invisible reconnect
-        self.gateway = None
+        self.hops = []                 # every address of the first hop
+        self.gateway = None            # the one of them that Config carries
+        self.ipv6 = False              # sshuttle tunnels IPv6 (docs/later/ipv6.md)
         self.ifindex = None
         self.device_path = None
         self.stale_device = None
@@ -262,8 +264,21 @@ class Supervisor:
 
     def _install_guard(self):
         self.fx.install_guard(self.profile.guarded_networks(),
-                              [self.gateway] + list(self.profile.exclude))
+                              self.hops + list(self.profile.exclude))
         self.guard_installed = True
+
+    def _set_hops(self, addrs):
+        """The first hop's addresses; Config's gateway is the first IPv4 one, or
+        the first IPv6 one when it has none. NM needs only one."""
+        self.hops = list(addrs)
+        v4 = [a for a in self.hops if profile_mod.family(a) == 4]
+        self.gateway = (v4 or self.hops)[0]
+
+    def _tunnelled_families(self):
+        """The families sshuttle has a table for: those of its networks, the DNS
+        servers' included, IPv6 only when it tunnels IPv6."""
+        families = {profile_mod.family(n) for n in self.profile.guarded_networks()}
+        return families if self.ipv6 else families - {6}
 
     def _stop_tunnel(self, cb=None):
         """Stop the tunnel unit; stop_waiters run once no stop is pending."""
@@ -379,6 +394,15 @@ class Supervisor:
             log.warning("ignoring unknown profile keys: %s", ", ".join(p.ignored_keys))
         if not self.asleep:
             self.fx.inhibit_sleep()
+        if p.has_ipv6():
+            self.ipv6 = self.fx.ipv6_available()
+            if not self.ipv6:
+                if not self._tunnelled_families():
+                    self.give_up(FAIL_CONNECT, "IPv6 is off on this host, and the profile "
+                                 "tunnels only IPv6 networks")
+                    return
+                log.warning("IPv6 is off on this host; the IPv6 networks are guarded but not "
+                            "tunnelled")
         if self.nm_version and self.nm_version in self._invisible_versions():
             log.info("NetworkManager %s never completed an nbns reconnect here; reconnects "
                      "will not show in NetworkManager (invisible reconnect)", self.nm_version)
@@ -386,7 +410,7 @@ class Supervisor:
         self.fx.find_active_connection(p.uuid,
                                        self._callback(self._on_ac_found, self.activation_id))
         if p.gateway:
-            self._have_first_hop(p.gateway, None)
+            self._have_first_hop([p.gateway], None)
         else:
             self.fx.resolve_first_hop(p.user, p.remote,
                                       self._callback(self._first_hop_result, self.activation_id))
@@ -411,16 +435,16 @@ class Supervisor:
         self.ac_seen.clear()
         self._ac_changed(seen if seen is not None else state, None)
 
-    def _first_hop_result(self, aid, addr, error):
+    def _first_hop_result(self, aid, addrs, error):
         if aid != self.activation_id or self.phase != "connecting":
             return
-        if addr is None:
+        if not addrs:
             self.give_up(FAIL_CONNECT, f"cannot work out the first hop: {error}")
             return
-        self._have_first_hop(addr, None)
+        self._have_first_hop(addrs, None)
 
-    def _have_first_hop(self, addr, stale_device):
-        self.gateway = addr
+    def _have_first_hop(self, addrs, stale_device):
+        self._set_hops(addrs)
         if self.fx.link_ifindex() is not None and stale_device is None:
             # A leftover nmss0: note NM's device for it, so that the poll below does
             # not take it for the new link's (design §4.1).
@@ -432,18 +456,18 @@ class Supervisor:
             self.ifindex = self.fx.create_link()
             if self.profile.fail_closed:
                 self._install_guard()
-            self.fx.write_tunnel_spec(self.profile.tunnel_spec(addr))
+            self.fx.write_tunnel_spec(self.profile.tunnel_spec(self.hops, self.ipv6))
         except (OSError, RuntimeError) as e:
             self.give_up(FAIL_CONNECT, str(e))
             return
-        log.info("first hop %s; %s has ifindex %s", addr, LINK, self.ifindex)
+        log.info("first hop %s; %s has ifindex %s", ", ".join(self.hops), LINK, self.ifindex)
         self._start_tunnel(self._first_tunnel_result)
 
     def _leftover_device(self, aid, path):
         if aid != self.activation_id or self.phase != "connecting":
             return
         log.info("a leftover %s exists (NM device %s); replacing it", LINK, path)
-        self._have_first_hop(self.gateway, path or "")
+        self._have_first_hop(self.hops, path or "")
 
     def _first_tunnel_result(self, ok, detail):
         if self.phase != "connecting":
@@ -769,21 +793,21 @@ class Supervisor:
         self.retry_after_stop = False
         self._retry()
 
-    def _hop_refreshed(self, aid, addr, error):
-        """After a network change or resume: the first hop may have a new address,
-        which goes into the guard's exclude set before the tunnel starts."""
+    def _hop_refreshed(self, aid, addrs, error):
+        """After a network change or resume: the first hop may have new addresses,
+        which go into the guard's exclude sets before the tunnel starts."""
         if aid != self.attempt_id or self.phase != "gap" or self._nm_ending():
             return
-        if addr is None:
+        if not addrs:
             log.warning("cannot work out the first hop again (%s); keeping %s", error,
-                        self.gateway)
-        elif addr != self.gateway:
-            log.info("the first hop is now %s (was %s)", addr, self.gateway)
-            self.gateway = addr
+                        ", ".join(self.hops))
+        elif list(addrs) != self.hops:
+            log.info("the first hop is now %s (was %s)", ", ".join(addrs), ", ".join(self.hops))
+            self._set_hops(addrs)
             try:
                 if self.profile.fail_closed:
                     self._install_guard()
-                self.fx.write_tunnel_spec(self.profile.tunnel_spec(addr))
+                self.fx.write_tunnel_spec(self.profile.tunnel_spec(self.hops, self.ipv6))
             except (OSError, RuntimeError) as e:
                 self.give_up(FAIL_CONNECT, str(e))
                 return
@@ -975,13 +999,15 @@ class Supervisor:
                 except (OSError, RuntimeError) as e:
                     self.give_up(FAIL_CONNECT, f"cannot restore the guard: {e}")
                     return
-            if self.profile.method == "nft" and not snap["sshuttle"]:
-                self._drop("health: no sshuttle table with a listener on its port")
+            missing = self._tunnelled_families() - snap["sshuttle"]
+            if self.profile.method == "nft" and missing:
+                self._drop("health: no sshuttle table with a listener on its port for " +
+                           " and ".join(f"IPv{f}" for f in sorted(missing)))
                 return
         self.fx.tunnel_active(self._callback(self._health_unit, hid))
         if self.profile.probe:
-            host, _, port = self.profile.probe.rpartition(":")
-            self.fx.probe(host, int(port), self.PROBE_TIMEOUT,
+            host, port = self.profile.probe_target()
+            self.fx.probe(host, port, self.PROBE_TIMEOUT,
                           self._callback(self._probe_result, hid))
 
     def _health_unit(self, hid, active):

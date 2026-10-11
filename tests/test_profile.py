@@ -22,8 +22,31 @@ def test_valid_profile():
     assert prof.guarded_networks() == ["10.0.0.0/8", "172.20.0.0/16"]
     assert p(settings(**{"dns-servers": "192.168.5.5"})).guarded_networks() == [
         "10.0.0.0/8", "192.168.5.5/32"]
-    spec = prof.tunnel_spec("203.0.113.7")
-    assert spec["first_hop"] == "203.0.113.7" and spec["dns_servers"] == ["10.1.0.53"]
+    spec = prof.tunnel_spec(["203.0.113.7"])
+    assert spec["first_hop"] == ["203.0.113.7"] and spec["dns_servers"] == ["10.1.0.53"]
+
+
+def test_ipv6_networks():
+    prof = p(settings(subnets="10.0.0.0/8, 2001:db8:10::/48, 2001:db8:11::/48",
+                      exclude="2001:db8:10:5::/64", gateway="2001:db8:ffff::7",
+                      probe="[2001:DB8:10::22]:22"))
+    assert prof.subnets == ["10.0.0.0/8", "2001:db8:10::/48", "2001:db8:11::/48"]
+    assert prof.exclude == ["2001:db8:10:5::/64"]
+    assert prof.gateway == "2001:db8:ffff::7"
+    assert prof.probe == "[2001:db8:10::22]:22"
+    assert prof.probe_target() == ("2001:db8:10::22", 22)
+    assert prof.has_ipv6()
+    # each family collapsed on its own, IPv4 first
+    assert prof.guarded_networks() == ["10.0.0.0/8", "2001:db8:10::/47"]
+    only6 = p(settings(subnets="fd00::/8", dns="none"))
+    assert only6.guarded_networks() == ["fd00::/8"] and only6.has_ipv6()
+    assert not p(settings()).has_ipv6()
+    assert p(settings(probe="10.1.0.10:22")).probe_target() == ("10.1.0.10", 22)
+
+
+def test_an_ipv6_dns_server_is_refused_with_the_reason():
+    with pytest.raises(ProfileError, match="only IPv4 DNS servers"):
+        p(settings(**{"dns-servers": "10.1.0.53 2001:db8::53"}))
 
 
 def test_dns_modes():
@@ -43,7 +66,6 @@ def test_dns_modes():
     {"local-user": "-alice"},
     {"subnets": ""},
     {"subnets": "10.0.0.0/33"},
-    {"subnets": "fd00::/8"},
     {"exclude": "nonsense"},
     {"dns": "maybe"},
     {"dns-servers": ""},
@@ -54,6 +76,10 @@ def test_dns_modes():
     {"gateway": "corp.example"},
     {"probe": "10.1.0.10"},
     {"probe": "10.1.0.10:99999"},
+    {"probe": "2001:db8::10:22"},
+    {"probe": "[10.1.0.10]:22"},
+    {"dns-servers": "2001:db8::53"},
+    {"exclude": "2001:db8::/129"},
     {"fail-closed": "perhaps"},
 ])
 def test_rejected(data):

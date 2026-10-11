@@ -52,11 +52,12 @@ class FakeEffects:
         self.inhibited = False
         self.inhibit_calls = 0
         self.invisible = set()
-        self.health = {"guard": True, "sshuttle": True}
+        self.health = {"guard": True, "sshuttle": {4}}
         self.unit_active = True       # None: no answer yet (tunnel_cbs)
         self.tunnel_cbs = []
         self.probe_cbs = []
         self.lock_cbs = []
+        self.ipv6 = True              # IPv6 is on on the host
 
     # recording helpers
     def _rec(self, *event):
@@ -124,6 +125,9 @@ class FakeEffects:
     # health
     def nft_health(self):
         return None if self.health is None else dict(self.health)
+
+    def ipv6_available(self):
+        return self.ipv6
 
     def tunnel_active(self, done):
         if self.unit_active is None:
@@ -234,7 +238,7 @@ def bring_up(fx, sup, activated=True, **data):
     """Connect through to STARTED (and NM's "activated")."""
     sup.connect(settings(**data), NM)
     if fx.first_hop_cbs:
-        fx.first_hop_cbs.pop(0)("203.0.113.7", None)
+        fx.first_hop_cbs.pop(0)(["203.0.113.7"], None)
     fx.finish_start(True)
     assert sup.phase == "up", sup.phase
     assert sup.state == ST_STARTED

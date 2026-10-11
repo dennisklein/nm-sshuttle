@@ -95,10 +95,16 @@ def ip4_u32(addr):
 
 
 def config_variant(cfg):
-    types = {"gateway": "u", "tundev": "s", "has-ip4": "b", "has-ip6": "b", "can-persist": "b"}
+    """An IPv4 gateway is a uint32; an IPv6 one goes as 16 bytes (docs/later/ipv6.md)."""
+    types = {"tundev": "s", "has-ip4": "b", "has-ip6": "b", "can-persist": "b"}
     out = {}
     for key, value in cfg.items():
-        out[key] = GLib.Variant(types[key], ip4_u32(value) if key == "gateway" else value)
+        if key != "gateway":
+            out[key] = GLib.Variant(types[key], value)
+        elif ":" in value:
+            out[key] = GLib.Variant("ay", socket.inet_pton(socket.AF_INET6, value))
+        else:
+            out[key] = GLib.Variant("u", ip4_u32(value))
     return out
 
 
@@ -463,9 +469,11 @@ class Service:
         proc.communicate_utf8_async(None, None, finished)
 
     def resolve_first_hop(self, user, remote, done):
+        """done(addresses, error): first-hop prints one address per line."""
         def finished(ok, out, err):
-            if ok and out.strip():
-                done(out.strip(), None)
+            addrs = out.split()
+            if ok and addrs:
+                done(addrs, None)
             else:
                 done(None, err.strip() or "no address")
         self._spawn([os.path.join(LIBEXEC, "nm-sshuttle"), "first-hop", user, remote],
@@ -501,6 +509,9 @@ class Service:
 
     def nft_health(self):
         return tunnel.nft_health()
+
+    def ipv6_available(self):
+        return tunnel.ipv6_available()
 
     def probe(self, host, port, timeout_s, done):
         """Connect through the tunnel and wait for the first byte: sshuttle accepts
@@ -543,7 +554,8 @@ class Service:
 
         state["timer"] = GLib.timeout_add(int(timeout_s * 1000), expired)
         client = Gio.SocketClient.new()
-        client.connect_to_host_async(f"{host}:{port}", port, cancel, connected)
+        target = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+        client.connect_to_host_async(target, port, cancel, connected)
 
     def write_tunnel_spec(self, spec):
         os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)

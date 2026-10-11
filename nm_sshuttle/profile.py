@@ -39,11 +39,12 @@ class Profile:
     fail_closed: bool = True
     ignored_keys: list = field(default_factory=list)
 
-    def tunnel_spec(self, first_hop):
-        """What exec-tunnel needs, as JSON-friendly data."""
+    def tunnel_spec(self, first_hop, ipv6=False):
+        """What exec-tunnel needs, as JSON-friendly data. first_hop is the list
+        of the first hop's addresses; ipv6 says whether sshuttle tunnels IPv6."""
         return {"remote": self.remote, "user": self.user, "subnets": self.subnets,
                 "exclude": self.exclude, "dns": self.dns, "dns_servers": self.dns_servers,
-                "method": self.method, "first_hop": first_hop}
+                "method": self.method, "first_hop": list(first_hop), "ipv6": ipv6}
 
     def guarded_networks(self):
         """Networks the guard makes fail closed: the subnets plus the DNS servers."""
@@ -52,39 +53,68 @@ class Profile:
             nets += [f"{s}/32" for s in self.dns_servers]
         return collapse(nets)
 
+    def has_ipv6(self):
+        """Whether any subnet is IPv6, so that sshuttle has IPv6 to tunnel."""
+        return any(family(n) == 6 for n in self.subnets)
 
-def collapse(networks):
-    """Merge overlapping and adjacent IPv4 networks, as strings.
+    def probe_target(self):
+        """(host, port) of the probe, the host without brackets."""
+        host, _, port = self.probe.rpartition(":")
+        return host.strip("[]"), int(port)
+
+
+def family(network):
+    """4 or 6 for an address or network string."""
+    return ipaddress.ip_network(network, strict=False).version
+
+
+def collapse(networks, version=None):
+    """Merge overlapping and adjacent networks, as strings: IPv4 first, then
+    IPv6, each family on its own (version: only that family).
 
     nft refuses an interval set with overlapping elements ("conflicting
     intervals"), and a DNS server's /32 usually lies inside a profile subnet."""
     nets = [ipaddress.ip_network(n, strict=False) for n in networks]
-    return [str(n) for n in ipaddress.collapse_addresses(nets)]
+    out = []
+    for v in (4, 6):
+        if version in (None, v):
+            out += [str(n) for n in ipaddress.collapse_addresses(
+                [n for n in nets if n.version == v])]
+    return out
 
 
 def _split(value):
     return [v for v in re.split(r"[\s,]+", value or "") if v]
 
 
-def _ipv4_networks(key, value):
+def _networks(key, value):
     nets = []
     for item in _split(value):
         try:
-            net = ipaddress.ip_network(item, strict=False)
+            nets.append(str(ipaddress.ip_network(item, strict=False)))
         except ValueError:
             raise ProfileError(f"{key}: {item!r} is not a network") from None
-        if net.version != 4:
-            # sshuttle runs with --disable-ipv6 and the guard covers IPv4 only (design §4.5).
-            raise ProfileError(f"{key}: {item} is IPv6, which is not supported yet")
-        nets.append(str(net))
     return nets
+
+
+def _address(key, value):
+    try:
+        return str(ipaddress.ip_address(value))
+    except ValueError:
+        raise ProfileError(f"{key}: {value!r} is not an IP address") from None
 
 
 def _ipv4(key, value):
     try:
         return str(ipaddress.IPv4Address(value))
     except ValueError:
+        pass
+    try:
+        ipaddress.IPv6Address(value)
+    except ValueError:
         raise ProfileError(f"{key}: {value!r} is not an IPv4 address") from None
+    # An IPv6 server would need an Ip6Config on nmss0 (docs/later/ipv6.md).
+    raise ProfileError(f"{key}: {value} is IPv6; only IPv4 DNS servers are supported")
 
 
 def _bool(key, value, default):
@@ -127,10 +157,10 @@ def parse(settings, getpwnam=pwd.getpwnam):
     if method4 != "auto":
         raise ProfileError(f"ipv4.method must be auto, got {method4!r}")
 
-    subnets = _ipv4_networks("subnets", data.get("subnets"))
+    subnets = _networks("subnets", data.get("subnets"))
     if not subnets:
         raise ProfileError("subnets: at least one network is required")
-    exclude = _ipv4_networks("exclude", data.get("exclude"))
+    exclude = _networks("exclude", data.get("exclude"))
 
     dns = data.get("dns", "none")
     if dns not in ("none", "split", "all"):
@@ -156,14 +186,18 @@ def parse(settings, getpwnam=pwd.getpwnam):
 
     gateway = data.get("gateway") or None
     if gateway:
-        gateway = _ipv4("gateway", gateway)
+        gateway = _address("gateway", gateway)
 
     probe = data.get("probe") or None
     if probe:
         host, sep, port = probe.rpartition(":")
         if not sep or not port.isdigit() or not 0 < int(port) < 65536:
-            raise ProfileError(f"probe: expected ADDRESS:PORT, got {probe!r}")
-        probe = f"{_ipv4('probe', host)}:{int(port)}"
+            raise ProfileError(f"probe: expected ADDRESS:PORT or [IPV6]:PORT, got {probe!r}")
+        bracketed = host.startswith("[") and host.endswith("]")
+        addr = _address("probe", host[1:-1] if bracketed else host)
+        if (family(addr) == 6) != bracketed:
+            raise ProfileError(f"probe: expected ADDRESS:PORT or [IPV6]:PORT, got {probe!r}")
+        probe = f"[{addr}]:{int(port)}" if bracketed else f"{addr}:{int(port)}"
 
     return Profile(
         id=s_con.get("id", "?"), uuid=s_con.get("uuid", ""), remote=remote, user=user,

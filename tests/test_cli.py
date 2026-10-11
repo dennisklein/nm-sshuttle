@@ -42,7 +42,7 @@ class Nmcli:
 def conn(name="corp", **over):
     c = {"vpn.service-type": SERVICE_TYPE, "connection.id": name,
          "connection.permissions": "user:dennis", "vpn.persistent": "yes",
-         "ipv4.method": "auto",
+         "ipv4.method": "auto", "ipv6.auto-route-ext-gw": "no",
          "vpn.data": "remote = corp, local-user = dennis, subnets = 10.0.0.0/8 172.20.0.0/16"}
     return {**c, **over}
 
@@ -68,8 +68,8 @@ def test_add_sets_the_defaults(dennis):
     assert argv[:6] == ("connection", "add", "type", "vpn", "con-name", "corp")
     for pair in [("connection.permissions", "user:dennis"), ("connection.autoconnect", "no"),
                  ("vpn.persistent", "yes"), ("ipv4.method", "auto"),
-                 ("ipv4.auto-route-ext-gw", "no"), ("ipv4.never-default", "yes"),
-                 ("ipv6.never-default", "yes")]:
+                 ("ipv4.auto-route-ext-gw", "no"), ("ipv6.auto-route-ext-gw", "no"),
+                 ("ipv4.never-default", "yes"), ("ipv6.never-default", "yes")]:
         assert argv[argv.index(pair[0]) + 1] == pair[1]
     data = cli.parse_vpn_data(argv[argv.index("vpn.data") + 1])
     assert data["subnets"] == "10.0.0.0/8 172.20.0.0/16"
@@ -120,7 +120,16 @@ def test_check_passes(dennis, capsys):
         return SimpleNamespace(returncode=0)
     assert cli.check(argparse.Namespace(name="corp"), Nmcli({"u1": conn()}), ssh_g_ok, run) == 0
     assert ran == [["ssh", "-o", "ConnectTimeout=15", "--", "corp", "true"]]
-    assert "first hop 192.0.2.7" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "first hop 192.0.2.7" in out and "WARN" not in out
+
+
+def test_check_warns_about_a_profile_from_before_ipv6(dennis, capsys):
+    def run(argv):
+        return SimpleNamespace(returncode=0)
+    nm = Nmcli({"u1": conn(**{"ipv6.auto-route-ext-gw": "-1 (default)"})})
+    assert cli.check(argparse.Namespace(name="corp"), nm, ssh_g_ok, run) == 0
+    assert "WARN ipv6.auto-route-ext-gw is not no" in capsys.readouterr().out
 
 
 def test_check_flags_gnome_edits(dennis, capsys):
