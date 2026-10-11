@@ -31,7 +31,8 @@ from . import profile as profile_mod
 from .const import (AC_ACTIVATED, AC_ACTIVATING, AC_DEACTIVATED, AC_DEACTIVATING,
                     AC_NAMES, AC_UNKNOWN, CONN_PORTAL, DEVICE_UNMANAGED, FAIL_CONNECT,
                     FAIL_LOGIN, LINK, LINK_ADDRESS, NBNS_SENTINEL,
-                    ST_INIT, ST_STARTED, ST_STARTING, ST_STOPPED, ST_STOPPING, STATE_NAMES)
+                    ST_INIT, ST_STARTED, ST_STARTING, ST_STOPPED, ST_STOPPING, STATE_NAMES,
+                    TPROXY_MARK)
 from .tunnel import classify_failure
 
 log = logging.getLogger("nm-sshuttle")
@@ -115,6 +116,7 @@ class Supervisor:
         self.stale_device = None
         self.last_config = None
         self.guard_installed = False
+        self.routing_installed = False  # method=tproxy (docs/later/tproxy.md)
         self.activated_once = False
         self.link_managed = None       # result of the unmanaged check (design §4.1)
         self.stopped_sent = False
@@ -263,9 +265,24 @@ class Supervisor:
         return cfg
 
     def _install_guard(self):
+        mark = TPROXY_MARK if self.profile.method == "tproxy" else None
         self.fx.install_guard(self.profile.guarded_networks(),
-                              self.hops + list(self.profile.exclude))
+                              self.hops + list(self.profile.exclude), mark)
         self.guard_installed = True
+
+    def _install_routing(self):
+        """method=tproxy: the rule and route that take marked packets to lo. They
+        stay for the whole activation, like the guard, fail-closed or not."""
+        self.fx.install_policy_routing(sorted(self._tunnelled_families()))
+        self.routing_installed = True
+
+    def _remove_guard(self):
+        if self.guard_installed:
+            self.fx.remove_guard()
+            self.guard_installed = False
+        if self.routing_installed:
+            self.fx.remove_policy_routing()
+            self.routing_installed = False
 
     def _set_hops(self, addrs):
         """The first hop's addresses; Config's gateway is the first IPv4 one, or
@@ -407,6 +424,9 @@ class Supervisor:
                     return
                 log.warning("IPv6 is off on this host; the IPv6 networks are guarded but not "
                             "tunnelled")
+        if p.method == "tproxy" and not self.fx.iptables_available():
+            self.give_up(FAIL_CONNECT, "method=tproxy needs iptables and ip6tables")
+            return
         if self.nm_version and self.nm_version in self._invisible_versions():
             log.info("NetworkManager %s never completed an nbns reconnect here; reconnects "
                      "will not show in NetworkManager (invisible reconnect)", self.nm_version)
@@ -460,6 +480,8 @@ class Supervisor:
             self.ifindex = self.fx.create_link()
             if self.profile.fail_closed:
                 self._install_guard()
+            if self.profile.method == "tproxy":
+                self._install_routing()
             self.fx.write_tunnel_spec(self.profile.tunnel_spec(self.hops, self.ipv6))
         except (OSError, RuntimeError) as e:
             self.give_up(FAIL_CONNECT, str(e))
@@ -993,7 +1015,8 @@ class Supervisor:
         if self.phase != "up" or hid != self.health_id:
             return
         self._timer("health", self.HEALTH_INTERVAL, self._health, hid)
-        snap = self.fx.nft_health()
+        method = self.profile.method
+        snap = self.fx.nft_health(method)
         if snap is not None:
             if self.profile.fail_closed and not snap["guard"]:
                 log.warning("the guard table is gone (was the ruleset flushed?); installing it "
@@ -1004,9 +1027,18 @@ class Supervisor:
                     self.give_up(FAIL_CONNECT, f"cannot restore the guard: {e}")
                     return
             missing = self._tunnelled_families() - snap["sshuttle"]
-            if self.profile.method == "nft" and missing:
-                self._drop("health: no sshuttle table with a listener on its port for " +
+            if method in ("nft", "tproxy") and missing:
+                what = "mark chain" if method == "tproxy" else "table"
+                self._drop(f"health: no sshuttle {what} with a listener on its port for " +
                            " and ".join(f"IPv{f}" for f in sorted(missing)))
+                return
+        if method == "tproxy" and not self.fx.policy_routing_present(
+                sorted(self._tunnelled_families())):
+            log.warning("the policy routing for method=tproxy is gone; installing it again")
+            try:
+                self._install_routing()
+            except (OSError, RuntimeError) as e:
+                self.give_up(FAIL_CONNECT, f"cannot restore the policy routing: {e}")
                 return
         self.fx.tunnel_active(self._callback(self._health_unit, hid))
         if self.profile.probe:
@@ -1237,9 +1269,7 @@ class Supervisor:
         self._cancel("link", "link-cap")
         self.link_removed = True
         self.fx.remove_link()
-        if self.guard_installed:
-            self.fx.remove_guard()
-            self.guard_installed = False
+        self._remove_guard()
         self._maybe_finish()
 
     def _maybe_finish(self):
@@ -1343,9 +1373,7 @@ class Supervisor:
     def _exit_after_stop(self):
         if self.phase != "exiting":
             return
-        if self.guard_installed:
-            self.fx.remove_guard()
-            self.guard_installed = False
+        self._remove_guard()
         self._quit_now()
 
     @guarded

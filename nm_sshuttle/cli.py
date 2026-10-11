@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: MIT
 """nm-sshuttle: the commands the units and the plugin run.
 
-  cleanup        stop the tunnel unit, remove nmss0, the guard and stale
-                 sshuttle tables (ExecStopPost of nm-sshuttle.service, and
-                 the plugin's startup cleanup)
-  sweep          remove stale sshuttle tables (the tunnel unit's
+  cleanup        stop the tunnel unit, remove nmss0, the guard, the tproxy
+                 policy routing and stale sshuttle tables and chains
+                 (ExecStopPost of nm-sshuttle.service, and the plugin's
+                 startup cleanup)
+  sweep          remove stale sshuttle tables and chains (the tunnel unit's
                  ExecStartPre and ExecStopPost)
   exec-tunnel    ExecStart of the tunnel unit
   ssh-as-user    sshuttle's ssh command
@@ -58,6 +59,7 @@ def cleanup():
     if guard.guard_present():
         log.info("removing a leftover guard table %s", GUARD_TABLE)
         ok &= guard.remove_guard()
+    ok &= guard.remove_policy_routing()
     tunnel.sweep()
     try:
         os.remove(TUNNEL_SPEC)
@@ -217,7 +219,8 @@ def ssh_g_as_self(_user, target):
     return p.stdout
 
 
-def check(args, nmcli=nmcli_run, ssh_g=ssh_g_as_self, run=subprocess.run):
+def check(args, nmcli=nmcli_run, ssh_g=ssh_g_as_self, run=subprocess.run,
+          iptables_available=None):
     """Check a profile as the user it belongs to (design §4.2, §4.3).
 
     Returns 0 when everything passes. The test login may prompt for a host key
@@ -232,6 +235,9 @@ def check(args, nmcli=nmcli_run, ssh_g=ssh_g_as_self, run=subprocess.run):
               "fix with nmcli or remove and add again)")
         return 1
     print("ok   profile fields")
+    if prof.method == "tproxy" and not (iptables_available or tunnel.iptables_available)():
+        print("FAIL method=tproxy needs iptables and ip6tables; install iptables")
+        return 1
     if settings["ipv6"]["auto-route-ext-gw"] != "no":
         # Profiles added before IPv6 support lack it; NM then adds a host route
         # towards an IPv6 first hop (docs/later/ipv6.md).
@@ -298,7 +304,7 @@ def main(argv=None):
     for opt in ("exclude", "dns-servers", "dns-domains", "gateway", "probe"):
         a.add_argument("--" + opt)
     a.add_argument("--dns", choices=["none", "split", "all"])
-    a.add_argument("--method", choices=["nft", "nat"])
+    a.add_argument("--method", choices=["nft", "nat", "tproxy"])
     a.add_argument("--fail-closed", choices=["yes", "no"])
     c = sub.add_parser("check", help="check a profile as its user")
     c.add_argument("name")

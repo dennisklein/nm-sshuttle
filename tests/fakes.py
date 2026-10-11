@@ -58,6 +58,10 @@ class FakeEffects:
         self.probe_cbs = []
         self.lock_cbs = []
         self.ipv6 = True              # IPv6 is on on the host
+        self.iptables = True          # iptables and ip6tables exist
+        self.guard_mark = None        # the guard's tproxy mark, as last installed
+        self.routing = None           # families with tproxy policy routing, or None
+        self.health_methods = []
 
     # recording helpers
     def _rec(self, *event):
@@ -123,8 +127,15 @@ class FakeEffects:
         self.lock_cbs.append(done)
 
     # health
-    def nft_health(self):
+    def nft_health(self, method="nft"):
+        self.health_methods.append(method)
         return None if self.health is None else dict(self.health)
+
+    def policy_routing_present(self, families):
+        return self.routing is not None and set(families) <= self.routing
+
+    def iptables_available(self):
+        return self.iptables
 
     def ipv6_available(self):
         return self.ipv6
@@ -172,8 +183,17 @@ class FakeEffects:
         self._rec("remove_link")
         self.link = None
 
-    def install_guard(self, networks, exclude):
+    def install_guard(self, networks, exclude, mark=None):
         self._rec("install_guard", list(networks), list(exclude))
+        self.guard_mark = mark
+
+    def install_policy_routing(self, families):
+        self._rec("install_routing", list(families))
+        self.routing = set(families)
+
+    def remove_policy_routing(self):
+        self._rec("remove_routing")
+        self.routing = None
 
     def remove_guard(self):
         self._rec("remove_guard")

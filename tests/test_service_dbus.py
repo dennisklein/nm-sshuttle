@@ -339,10 +339,11 @@ def world(bus, monkeypatch, tmp_path):
     monkeypatch.setattr(guard, "create_link", create_link)
     monkeypatch.setattr(guard, "remove_link", remove_link)
     monkeypatch.setattr(guard, "link_ifindex", lambda name="nmss0": host["link"])
-    monkeypatch.setattr(guard, "install_guard", lambda n, e: host["ops"].append("guard"))
+    monkeypatch.setattr(guard, "install_guard", lambda n, e, mark=None: host["ops"].append("guard"))
     monkeypatch.setattr(guard, "remove_guard", lambda: host["ops"].append("unguard"))
     monkeypatch.setattr(tunnel, "sweep", lambda: None)
-    monkeypatch.setattr(tunnel, "nft_health", lambda: {"guard": True, "sshuttle": {4, 6}})
+    monkeypatch.setattr(tunnel, "nft_health",
+                        lambda method="nft": {"guard": True, "sshuttle": {4, 6}})
     monkeypatch.setattr(tunnel, "ipv6_available", lambda: True)
     monkeypatch.setattr(service.pwd, "getpwnam", fake_getpwnam)
     monkeypatch.setattr(service.Service, "run_cleanup", lambda self, done: done())

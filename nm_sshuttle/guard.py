@@ -10,7 +10,7 @@ import subprocess
 
 from .profile import collapse
 
-from .const import GUARD_TABLE, LINK
+from .const import GUARD_TABLE, LINK, TPROXY_MARK, TPROXY_PRIORITY, TPROXY_TABLE
 
 log = logging.getLogger("nm-sshuttle")
 
@@ -63,13 +63,17 @@ def remove_link(name=LINK):
     return True
 
 
-def guard_ruleset(networks, exclude):
+def guard_ruleset(networks, exclude, mark=None):
     """The guard table (design §4.6, docs/later/ipv6.md) as an nft script.
 
     sshuttle's redirect runs at priority dstnat, so its packets carry conntrack
     status dnat when they reach this output hook; everything else to the
     tunnelled networks is refused at once instead of leaking. Each family has
-    its own pair of sets; the IPv6 ones are empty for an IPv4-only profile."""
+    its own pair of sets; the IPv6 ones are empty for an IPv4-only profile.
+
+    With method=tproxy there is no NAT: sshuttle's mangle chain marks what it
+    takes (priority mangle, before this hook), so a packet with that mark is
+    let through (docs/later/tproxy.md)."""
     def set_def(name, items, version):
         items = collapse(items, version)
         body = f"type ipv{version}_addr; flags interval;"
@@ -87,6 +91,8 @@ def guard_ruleset(networks, exclude):
         "        type filter hook output priority filter; policy accept;",
         "        ip daddr @exclude4 accept",
         "        ip6 daddr @exclude6 accept",
+        *([f"        ip daddr @subnets4 meta mark {mark:#010x} accept",
+           f"        ip6 daddr @subnets6 meta mark {mark:#010x} accept"] if mark else []),
         "        ip daddr @subnets4 ct status dnat accept",
         "        ip6 daddr @subnets6 ct status dnat accept",
         "        ip daddr @subnets4 meta l4proto tcp reject with tcp reset",
@@ -99,10 +105,10 @@ def guard_ruleset(networks, exclude):
     ])
 
 
-def install_guard(networks, exclude):
+def install_guard(networks, exclude, mark=None):
     """Install (or replace) the guard table in one nft transaction."""
     script = f"table inet {GUARD_TABLE}\ndelete table inet {GUARD_TABLE}\n"
-    script += guard_ruleset(networks, exclude)
+    script += guard_ruleset(networks, exclude, mark)
     ok, out = run(["nft", "-f", "-"], input=script)
     if not ok:
         raise RuntimeError(f"cannot install the guard table: {out}")
@@ -120,3 +126,71 @@ def remove_guard():
         log.warning("cannot remove the guard table: %s", out)
         return False
     return True
+
+
+# ------------------------------------------------------- policy routing
+# method=tproxy: packets sshuttle marked must be routed to lo, where TPROXY
+# hands them to its listener. sshuttle leaves that to the user; the plugin
+# owns it and removes it by its exact values, never flushing a table or rules
+# it does not own (docs/later/tproxy.md).
+def tproxy_mark(slot=0):
+    return TPROXY_MARK + slot
+
+
+def _ip(family):
+    return ["ip", "-6"] if family == 6 else ["ip", "-4"]
+
+
+def _rule(slot):
+    return ["priority", str(TPROXY_PRIORITY + slot),
+            "fwmark", f"{tproxy_mark(slot):#x}/0xffffffff", "lookup", str(TPROXY_TABLE + slot)]
+
+
+def _local_route(slot):
+    return ["local", "default", "dev", "lo", "table", str(TPROXY_TABLE + slot)]
+
+
+def _routing_parts(family, slot):
+    """(rule there, route there) for one family."""
+    ok, rules = run(_ip(family) + ["rule", "list"])
+    rule = ok and any(
+        line.startswith(f"{TPROXY_PRIORITY + slot}:")
+        and f"fwmark {tproxy_mark(slot):#x}" in line
+        and f"lookup {TPROXY_TABLE + slot}" in line
+        for line in rules.splitlines())
+    ok, routes = run(_ip(family) + ["route", "show", "table", str(TPROXY_TABLE + slot)])
+    route = ok and any(line.startswith("local default dev lo") for line in routes.splitlines())
+    return rule, route
+
+
+def policy_routing_present(families, slot=0):
+    """Whether the rule and the route are there for every one of families."""
+    return all(all(_routing_parts(f, slot)) for f in families)
+
+
+def install_policy_routing(families, slot=0):
+    """Install the rule and the route for each family, replacing any copy."""
+    for family in families:
+        for _ in range(10):         # "ip rule add" twice makes two rules
+            if not run(_ip(family) + ["rule", "del", *_rule(slot)])[0]:
+                break
+        ok, out = run(_ip(family) + ["rule", "add", *_rule(slot)])
+        if ok:
+            ok, out = run(_ip(family) + ["route", "replace", *_local_route(slot)])
+        if not ok:
+            raise RuntimeError(f"cannot install the policy routing for IPv{family}: {out}")
+
+
+def remove_policy_routing(slot=0):
+    """Remove the rule and the route for both families; True when none is left."""
+    clean = True
+    for family in (4, 6):
+        for _ in range(10):
+            if not run(_ip(family) + ["rule", "del", *_rule(slot)])[0]:
+                break
+        if _routing_parts(family, slot)[1]:
+            run(_ip(family) + ["route", "del", *_local_route(slot)])
+        if any(_routing_parts(family, slot)):
+            log.warning("cannot remove the policy routing for IPv%d", family)
+            clean = False
+    return clean

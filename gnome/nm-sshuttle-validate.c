@@ -283,8 +283,8 @@ nmss_check_dns_domains(const char *dns, const char *value, GError **error)
 gboolean
 nmss_check_method(const char *value, GError **error)
 {
-    if (value && !g_strv_contains((const char *const[]) {"nft", "nat", NULL}, value))
-        return fail(error, NMSS_FIELD_METHOD, _("Method: expected nft or nat, not “%s”"), value);
+    if (value && !g_strv_contains((const char *const[]) {"nft", "nat", "tproxy", NULL}, value))
+        return fail(error, NMSS_FIELD_METHOD, _("Method: expected nft, nat or tproxy, not “%s”"), value);
     return TRUE;
 }
 

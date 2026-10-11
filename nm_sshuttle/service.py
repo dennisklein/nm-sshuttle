@@ -498,17 +498,29 @@ class Service:
     def remove_link(self):
         guard.remove_link()
 
-    def install_guard(self, networks, exclude):
-        guard.install_guard(networks, exclude)
+    def install_guard(self, networks, exclude, mark=None):
+        guard.install_guard(networks, exclude, mark)
 
     def remove_guard(self):
         guard.remove_guard()
 
+    def install_policy_routing(self, families):
+        guard.install_policy_routing(families)
+
+    def remove_policy_routing(self):
+        guard.remove_policy_routing()
+
+    def policy_routing_present(self, families):
+        return guard.policy_routing_present(families)
+
+    def iptables_available(self):
+        return tunnel.iptables_available()
+
     def sweep(self):
         tunnel.sweep()
 
-    def nft_health(self):
-        return tunnel.nft_health()
+    def nft_health(self, method="nft"):
+        return tunnel.nft_health(method)
 
     def ipv6_available(self):
         return tunnel.ipv6_available()

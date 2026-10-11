@@ -33,6 +33,12 @@ LINK = "nmss0"
 LINK_ADDRESS = "192.0.0.8"      # RFC 7600 IPv4 dummy address (design §4.1)
 NBNS_SENTINEL = "192.0.0.10"    # the reconnect sentinel (design §4.4)
 GUARD_TABLE = "nm-sshuttle-guard"
+# method=tproxy (docs/later/tproxy.md): the mark sshuttle sets ("NS" in the high
+# half, nobody else's), the routing table that sends marked packets to lo, and
+# the rule's priority, ahead of Tailscale's and wg-quick's rules.
+TPROXY_MARK = 0x4e530000
+TPROXY_TABLE = 0x4e53
+TPROXY_PRIORITY = 100
 
 # Overridable for development and tests; packages use the defaults.
 LIBEXEC = os.environ.get("NM_SSHUTTLE_LIBEXEC", "/usr/libexec/nm-sshuttle")

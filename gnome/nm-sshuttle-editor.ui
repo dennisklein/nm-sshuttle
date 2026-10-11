@@ -404,6 +404,7 @@
                     <items>
                       <item>nft</item>
                       <item>nat</item>
+                      <item>tproxy</item>
                     </items>
                   </object>
                 </property>
@@ -419,7 +420,7 @@
             </child>
             <child>
               <object class="GtkLabel" id="hint_method">
-                <property name="label" translatable="yes">How traffic is captured. nft is the default</property>
+                <property name="label" translatable="yes">How traffic is captured. nft is the default; tproxy also carries UDP</property>
                 <property name="xalign">0</property>
                 <property name="wrap">True</property>
                 <property name="max-width-chars">64</property>
