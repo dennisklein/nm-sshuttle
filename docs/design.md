@@ -39,7 +39,7 @@ The four open questions from the brief, answered:
 | Undecided | Proposal |
 |---|---|
 | Full VPN plugin or lighter integration | A **thin VPN service plugin**: no editor, and an auth dialog that is a stub. A GTK4 editor is optional later work. |
-| One tunnel or several profiles | **Many profiles** (ordinary NetworkManager connections), **one active at a time** in v1. |
+| One tunnel or several profiles | **Many profiles** (ordinary NetworkManager connections), **one active at a time** in v1; up to 8 with [several tunnels](later/multiple-tunnels.md). |
 | Target distributions and GNOME | NetworkManager ≥ 1.42, systemd-resolved, nftables, sshuttle ≥ 1.3.1 (2.0.0 preferred). Test on Fedora 43/44, Ubuntu 26.04 LTS and Debian 13. That covers GNOME 48 to 50. |
 | Implementation language | **Python ≥ 3.10** with PyGObject (Gio D-Bus), the same runtime sshuttle needs. No compiled code in v1. |
 
@@ -628,6 +628,14 @@ DNS behaviour.
   └─────────────────────────────────────────────────────────────────────────┘
 ```
 
+With [several tunnels](later/multiple-tunnels.md), the shim asks a
+dispatcher for a slot instead, and each activation gets its own plugin
+instance, `nm-sshuttle@N.service`, under the bus name NM picks for it.
+Everything below that is named after the one activation carries the slot
+number: `nm-sshuttle-tunnel@N.service`, `nmssN`,
+`nm-sshuttle-guard-N`, `/run/nm-sshuttle/N/`. This section keeps v1's
+single names.
+
 ### 4.1 NetworkManager integration
 
 Files installed:
@@ -914,11 +922,11 @@ user's config for this connection only:
 inside the domain that the tunnel's DNS answers (`bastion.corp.example`
 under `~corp.example`). During a reconnect that DNS is down, so ssh cannot
 look the name up and every attempt fails at once (seen on a notebook:
-"Could not resolve hostname"). The first connect is not affected:
-`nmss0` has no DNS yet. So `exec-tunnel` checks whether the first hop's
-name resolves, in at most 5 s, when the profile sends DNS through the
-tunnel. If it does not, it writes `/run/nm-sshuttle-ssh/ssh_config` and
-the bridge runs ssh with `-F` on it:
+"Could not resolve hostname"). The first connect is not affected: the
+tunnel's link has no DNS yet. So `exec-tunnel` checks whether the first
+hop's name resolves, in at most 5 s, when the profile sends DNS through the
+tunnel. If it does not, it writes `/run/nm-sshuttle-ssh/ssh_config-N`,
+where N is the tunnel's slot, and the bridge runs ssh with `-F` on it:
 
 ```
 Host bastion
@@ -1264,6 +1272,9 @@ Events and what the supervisor does:
     does, for each tunnelled family, and the plugin's rule and route are
     there (put back if not);
   - the guard table exists (re-install it if something flushed the ruleset);
+  - an `ssh` process runs in the tunnel unit: sshuttle 1.3 can outlive
+    its ssh and keep listening with nothing behind it (VM MT-02, where the
+    lab's ssh ran over corp's tunnel and corp's sshuttle was killed);
   - optionally, the `probe` TCP connect through the tunnel, where two
     failures in a row cause a restart. This covers sshuttle's "process
     alive, forwarding dead" reports (#285 and others).
@@ -1871,4 +1882,7 @@ Later, also propose a hook for an externally provided firewall helper
    through the tunnel, the guard's mark rules, policy routing the plugin
    owns, the sweep of sshuttle's mangle chains and a per-method health
    check, with unit tests, lab tests T15 to T19 and VM scenarios TP-01 to
-   TP-03.
+   TP-03. **So are several tunnels:** a dispatcher that gives each
+   activation a slot and starts a plugin instance for it, names per slot,
+   the conflict rules between active profiles, and `cleanup --slot` and
+   `--all`, with unit and D-Bus tests and VM scenarios MT-01 to MT-03.

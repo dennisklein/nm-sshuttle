@@ -52,7 +52,7 @@ installed with their development files (`-Dgnome-editor=disabled` leaves it
 out, `=enabled` makes it an error to lack them).
 
 The packages run `post-install` themselves. It reloads NetworkManager's
-configuration so that the tunnel's link, `nmss0`, stays unmanaged. If an
+configuration so that the tunnels' links, `nmss0` to `nmss7`, stay unmanaged. If an
 nm-sshuttle VPN is active at that moment, it skips the reload, and the
 setting takes effect at NetworkManager's next start.
 
@@ -174,13 +174,41 @@ Once on, it stays on until you switch it off:
 - **Giving up:** after 10 minutes of failed attempts, not counting time
   offline, asleep or locked, the VPN fails and GNOME shows it as off.
 
+## Several VPNs at once
+
+Up to 8 nm-sshuttle profiles can be active together, each with its own
+tunnel, link (`nmss0`, `nmss1` …) and guard. A profile is refused, and
+GNOME says only "Connection failed", when it would fight an active one:
+
+- its networks overlap the other's (after `--exclude`), in either family;
+- both use `--dns all`;
+- both list the same DNS domain (a domain and a subdomain of it are fine);
+- the first hops would run in a loop: each profile's jump host inside the
+  other's networks.
+
+`nm-sshuttle check NAME` runs the same checks against the VPNs active at
+that moment, and `nm-sshuttle list` marks the active ones.
+
+To nest a smaller network inside a larger one, exclude it from the larger
+profile:
+
+```console
+$ nm-sshuttle add corp --remote corp --subnets 10.0.0.0/8 --exclude 10.50.0.0/16 …
+$ nm-sshuttle add lab --remote lab --subnets 10.50.0.0/16 …
+```
+
+While the lab VPN is off, traffic to 10.50.0.0/16 is not tunnelled and
+not blocked. If the lab's jump host lies inside the corporate network, the
+lab tunnel runs over the corporate one; when the corporate tunnel has a
+gap the lab one reconnects too, at once after the corporate one is back.
+
 ## Troubleshooting
 
 GNOME shows the same "Connection failed" whatever went wrong. The reason
 is in the journal:
 
 ```console
-$ journalctl -b -u nm-sshuttle -u nm-sshuttle-tunnel
+$ journalctl -b -u 'nm-sshuttle*'
 ```
 
 Common causes:
@@ -193,7 +221,8 @@ Common causes:
   installed, set them back in Settings (permissions private, IPv4 on
   Automatic); without it, remove the profile and add it again.
 - **Names on the far side do not resolve:** check `resolvectl status
-  nmss0`. It should list the `--dns-servers` and the domains. Short names
+  nmss0` (or the link of that VPN, `nmss1` and so on, when several are
+  up). It should list the `--dns-servers` and the domains. Short names
   are completed only with domains given without a leading `~`.
 - **The journal says `nmss0` is managed:** the setting in
   `/usr/lib/NetworkManager/conf.d/90-nm-sshuttle.conf` is overridden or
@@ -201,6 +230,10 @@ Common causes:
 - **`check` warns about `ipv6.auto-route-ext-gw`:** the profile was made
   before IPv6 support. Run the `nmcli connection modify` command it
   prints.
+- **"subnets overlap with the active profile …", "… also uses dns=all",
+  "… also has the DNS domain …" or "the first hops would run in a
+  loop":** another active VPN claims the same traffic or DNS. See
+  [Several VPNs at once](#several-vpns-at-once).
 - **Something is left over after a crash** (an `nmss0` link, or blocked
   traffic to the tunnelled networks): with the VPN off,
   `sudo nm-sshuttle cleanup` removes it. The plugin also cleans up when it
@@ -208,7 +241,8 @@ Common causes:
 
 ## Limits
 
-- One tunnel at a time.
+- Up to 8 tunnels at a time, and only ones that do not conflict (see
+  [Several VPNs at once](#several-vpns-at-once)).
 - TCP and DNS go through the tunnel; other UDP traffic, such as QUIC,
   does so only with `--method tproxy`. A UDP flow that is silent for 30 s
   starts afresh. `ping` never goes through: it is blocked.

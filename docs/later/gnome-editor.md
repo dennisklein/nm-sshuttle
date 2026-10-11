@@ -276,6 +276,7 @@ NetworkManager or the plugin.
   both tabs.
 - **`method=tproxy`** is in the drop-down and accepted, as in the plugin
   ([tproxy](tproxy.md)).
-- **Not done yet:** the keys of several tunnels. That is a change to
-  `nm-sshuttle-validate.c` and to the cases when the plugin gets them; the
-  shared cases fail on whichever side is behind.
+- **Several tunnels** added no profile keys, so the editor needs nothing
+  for them ([several tunnels](multiple-tunnels.md)). A future key is a
+  change to `nm-sshuttle-validate.c` and to the cases; the shared cases fail
+  on whichever side is behind.

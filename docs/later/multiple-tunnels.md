@@ -1,7 +1,9 @@
 # Several tunnels at once
 
-Status: design, not implemented. One of the "Later" items of the
+Status: implemented. One of the "Later" items of the
 [design](../design.md) (§7); the index is in [README.md](README.md).
+"What was built" at the end lists the results and where the code differs
+from this design.
 
 v1 allows many profiles but one active at a time (§1). The `.name` file
 says `supports-multiple-connections=false`, and every name the plugin uses
@@ -361,11 +363,62 @@ About 400 lines of Python, the dispatcher included, plus tests.
   - no SELinux denials, in particular for the shim's call to the
     dispatcher.
 
+## What was built
+
+The design as above, with these results and details:
+
+- **The same 192.0.0.8/32 on two links works:** the kernel keeps the
+  `local` route while either link has the address, and each link keeps
+  its own DNS in resolved (VM MT-01).
+- **The pinned ssh config is per slot:** the first-hop pin of design §4.3
+  arrived after this design; each tunnel writes its own
+  `/run/nm-sshuttle-ssh/ssh_config-N`, so two tunnels behind different jump
+  hosts do not overwrite each other's.
+- **The health check finds the tunnel's own listener through its unit's
+  cgroup** (`cgroup.procs` of `nm-sshuttle-tunnel@N.service`), not
+  through `MainPID`, so it does not depend on which process holds the
+  socket. Where the cgroup is not at the expected path, it falls back to
+  any listener, as v1 did.
+- **`list` marks active profiles without their slot:** the claims under
+  `/run/nm-sshuttle/` are readable by root only.
+- **An error while reading or writing the claims fails the activation**,
+  as a conflict does, with the error as the reason.
+- **An instance started by hand** (`systemctl start nm-sshuttle@0`), with
+  no bus-name file, takes NM's fixed name.
+- **The dispatcher** treats a slot as taken for 10 s after it handed it
+  out, since systemd may not show the new unit as activating yet.
+- **NetworkManager passes `--bus-name`** with a per-activation name
+  (`….Connection_N`) to the shim (VM M2-02k).
+- **The D-Bus policy names the dispatcher** rather than allowing
+  `send_destination_prefix`: on Fedora 44, dbus-broker denied the shim's
+  call to the dispatcher under the prefix rule. NetworkManager reaches
+  the instances' per-activation names through the
+  `org.freedesktop.NetworkManager.VPN.Plugin` interface, which the policy
+  allows for root.
+- **Start-up is far inside NM's 5 s:** in the VM, 257 ms from the
+  dispatcher's start to the instance's `READY=1` when the dispatcher was
+  not running, and 124 ms from `StartUnit` when it was (MT-03). With a
+  corp gap, the lab over corp was back 643 ms after corp (MT-02).
+- **sshuttle can outlive its ssh:** in about one MT-02 run in three,
+  killing corp's sshuttle ended the lab's ssh, whose connection ran
+  through it, but not the lab's sshuttle, which listened on with nothing
+  behind it. The health check now wants an `ssh` process in the tunnel
+  unit and reconnects without one, within 10 s.
+- **Tests:** unit tests for the slot names, the conflict rules, the
+  claims files, the slot choice, the listener lookup on a fake cgroup and
+  `/proc`, the supervisor's claim, exit after one activation and the
+  kick, and `cleanup --slot` and `--all`; a D-Bus test of the dispatcher
+  against a fake systemd. The single-tunnel VM scenarios follow the slot
+  of the newest instance; M2-09, M2-10 and M2-11 now expect one instance
+  per activation. MT-01 covers two tunnels with their own DNS, a
+  reconnect of one, a refused overlap, a kill and an NM restart; MT-02 the
+  lab over corp; MT-03 the start-up time. Not automated: the upgrade from
+  v1 and suspend with two tunnels.
+
 ## Open questions
 
-- The same 192.0.0.8/32 on several links (the first VM check above).
 - Whether NM rereads a `.name` file that a package update replaces.
 - How long the cold path takes on slow hardware: two Python starts (the
-  dispatcher and the instance) inside NM's 5 s. If it is tight, the
-  dispatcher can stay running while any instance runs, which leaves one
-  start on the path.
+  dispatcher and the instance) inside NM's 5 s, 257 ms in the VM. If it
+  is tight, the dispatcher can stay running while any instance runs,
+  which leaves one start on the path.
