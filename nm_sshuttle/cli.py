@@ -164,6 +164,12 @@ def read_settings(uuid, nmcli=nmcli_run):
             "ipv4": {"method": get("ipv4.method") or "auto"}}
 
 
+# Design §4.1: no host route towards the first hop, and the VPN's DNS entry can
+# never take resolved's default route by itself.
+PROFILE_IP_SETTINGS = ("ipv4.auto-route-ext-gw", "no",
+                       "ipv4.never-default", "yes", "ipv6.never-default", "yes")
+
+
 def default_user():
     return os.environ.get("SUDO_USER") or pwd.getpwuid(os.getuid()).pw_name
 
@@ -191,6 +197,7 @@ def add(args, nmcli=nmcli_run):
           "vpn-type", SERVICE_TYPE,
           "connection.permissions", f"user:{args.user}",
           "connection.autoconnect", "no", "vpn.persistent", "yes", "ipv4.method", "auto",
+          *PROFILE_IP_SETTINGS,
           "vpn.data", ", ".join(f"{k}={v}" for k, v in data.items()))
     print(f"added {args.name}; try: nm-sshuttle check {args.name}")
     return 0
