@@ -26,6 +26,8 @@
 #   M2-24 no default route         M2-25 lock screen (LockedHint set by root)
 #   M2-26 park candidate           M2-27 probe with forwarding dead
 #   M2-28 suspend and resume (only with --suspend: the VM must wake by RTC)
+#   V6-01 IPv6 subnet through the tunnel, fail closed in a gap
+#   V6-02 roams that change only the uplink's IPv6 addresses
 #
 # Result ids are M2-NN (scenario) and M2-NNx (a check in it). PASS and FAIL are
 # asserted; INFO prints something the design marks unobserved. A FAIL prints
@@ -52,7 +54,7 @@ while [ $# -gt 0 ]; do
         --keep) KEEP=1; shift ;;
         --suspend) SUSPEND=1; shift ;;
         cleanup) CMD=cleanup; shift ;;
-        -h|--help) sed -n '3,33p' "$0"; exit 0 ;;
+        -h|--help) sed -n '3,35p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -973,6 +975,96 @@ s_probe() {
     end_checks M2-27
 }
 
+# --------------------------------------------------------- IPv6 (docs/later/ipv6.md)
+refused6_fast() {
+    local t0 out rc
+    t0=$(now_ms)
+    out=$(curl -g -s -m 5 -o /dev/null -w '%{http_code}' --noproxy '*' "http://[$WEB_IP6]:8080/" 2>&1)
+    rc=$?
+    echo "curl exit $rc, http '$out', $(( $(now_ms) - t0 )) ms"
+    [ "$rc" = 7 ] && [ $(( $(now_ms) - t0 )) -lt 3000 ]
+}
+guard_has_v6() { nft list set inet "$GUARD_TABLE" subnets6 | grep -F '2001:db8:99::/64'; }
+sshuttle_has_v6() { sshuttle_tables; sshuttle_tables | grep -q ipv6; }
+network_changed_logged() { plog_has "the network changed"; }
+con6_is() { [ "$(con_state "$CON6")" = "$1" ]; }
+con6_gone() { [ -z "$(con_state "$CON6")" ]; }
+
+s_ipv6() {
+    begin V6-01 "IPv6: a subnet through the tunnel, fail closed in a gap"
+    [ "$HAVE_IPV6" = yes ] || { result V6-01 SKIP "the kernel has no IPv6"; return; }
+    SUBNETS="10.99.0.0/24 2001:db8:99::/64" create_profile "$CON6"
+    connect_ok V6-01 "activation of a profile with an IPv6 subnet" "$CON6" || return
+    local ifi
+    ifi=$(link_ifindex)
+    check V6-01a "the guard's subnets6 set holds 2001:db8:99::/64" guard_has_v6
+    check V6-01b "sshuttle runs without --disable-ipv6 and has an IPv6 table" sshuttle_has_v6
+    check V6-01c "IPv6 traffic to $WEB_IP6 goes through the tunnel" http_ok "http://[$WEB_IP6]:8080/"
+    check V6-01d "... and arrives from the jump host, not from $HOST_IP6" web6_from 2001:db8:99::1
+    check V6-01e "IPv4 traffic still goes through the tunnel" traffic_ok
+    block_jump
+    drop_tunnel
+    wait_for 15 con6_is activating || { result V6-01f FAIL "no gap: state '$(con_state "$CON6")'"; gap_end; return; }
+    check V6-01f "IPv6 traffic to the subnet is refused at once during the gap (fail closed)" refused6_fast
+    check V6-01g "IPv4 likewise" refused_fast
+    gap_end
+    if WAIT_POLL=0.5 wait_for 150 con6_is activated; then
+        result V6-01h PASS "activated again after the gap"
+        sleep 1
+        check V6-01i "IPv6 traffic flows through the tunnel again" http_ok "http://[$WEB_IP6]:8080/"
+        check V6-01j "same ifindex ($ifi) after the reconnect" test "$(link_ifindex)" = "$ifi"
+    else
+        result V6-01h FAIL "not activated again within 150 s (state '$(con_state "$CON6")')"
+    fi
+    end_checks V6-01
+}
+
+s_ipv6_roam() {
+    begin V6-02 "IPv6: roams that change only the uplink's IPv6 addresses"
+    [ "$HAVE_IPV6" = yes ] || { result V6-02 SKIP "the kernel has no IPv6"; return; }
+    lanb6_setup || { result V6-02 SKIP "cannot create the second uplink"; return; }
+    if ! nmcli --wait 30 connection up "$LANB6_CON" >> "$REPORT/raw/roam6.txt" 2>&1; then
+        result V6-02 FAIL "cannot activate $LANB6_CON"
+        lanb6_teardown
+        return
+    fi
+    result V6-02i INFO "primary connection: $(primary_con)"
+    # The first hop by its IPv6 address: the IPv6 part of the network counts.
+    REMOTE="$USER_NAME@$JUMP_IP6" create_profile "$CON6"
+    connect_ok V6-02 "activation with the first hop $JUMP_IP6" "$CON6" || { lanb6_teardown; return; }
+    check V6-02a "plugin log: the first hop is the IPv6 address" plog_show "first hop $JUMP_IP6"
+    local ifi
+    ifi=$(link_ifindex)
+    log_mark
+    lanb6_address 2001:db8:77::2/64 2001:db8:77::4d2f/64
+    sleep 5
+    check V6-02b "a second address in the same prefix (as a temporary one) is no network change" \
+        plog_has_not "the network changed"
+    check V6-02c "... and the VPN stays activated" con6_is activated
+    log_mark
+    lanb6_address 2001:db8:78::2/64
+    check V6-02d "a new IPv6 prefix is a network change" wait_for 10 network_changed_logged
+    if WAIT_POLL=0.5 wait_for 60 con6_is activated; then
+        result V6-02e PASS "activated again after the prefix change"
+        check V6-02f "the reconnect took at most 10 s (at once, not after a backoff)" reconnected_quickly 10
+        check V6-02g "traffic flows through the tunnel again" http_ok "http://$WEB_IP:8080/"
+    else
+        result V6-02e FAIL "not activated again within 60 s (state '$(con_state "$CON6")')"
+    fi
+    # The same prefix change with an IPv4 first hop and IPv4 networks: no change.
+    nmcli connection down "$CON6" > /dev/null 2>&1
+    wait_for 30 con6_gone
+    connect_ok V6-02k "activation of the IPv4 profile" || { lanb6_teardown; return; }
+    log_mark
+    lanb6_address 2001:db8:77::2/64
+    sleep 5
+    check V6-02l "a new IPv6 prefix is no network change for an IPv4 tunnel" \
+        plog_has_not "the network changed"
+    check V6-02m "... and the VPN stays activated" con_is activated
+    lanb6_teardown
+    end_checks V6-02
+}
+
 s_suspend() {
     begin M2-28 "suspend and resume"
     if [ "$SUSPEND" != 1 ]; then
@@ -1080,6 +1172,8 @@ want M2-25 && s_lock
 want M2-26 && s_park
 want M2-27 && s_probe
 want M2-28 && s_suspend
+want V6-01 && s_ipv6
+want V6-02 && s_ipv6_roam
 s_selinux
 reset_state
 collect
