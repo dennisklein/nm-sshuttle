@@ -38,6 +38,8 @@ GUARD_TABLE = "nm-sshuttle-guard"
 LIBEXEC = os.environ.get("NM_SSHUTTLE_LIBEXEC", "/usr/libexec/nm-sshuttle")
 STATE_DIR = os.environ.get("NM_SSHUTTLE_STATE_DIR", "/run/nm-sshuttle")
 TUNNEL_SPEC = os.path.join(STATE_DIR, "tunnel.json")
+# World-readable, unlike STATE_DIR: ssh reads it as the user (design §4.3).
+SSH_CONFIG = os.environ.get("NM_SSHUTTLE_SSH_CONFIG", "/run/nm-sshuttle-ssh/ssh_config")
 # NM versions on which the nbns reconnect never completed (design §4.4)
 INVISIBLE_MARK = os.path.join(STATE_DIR, "invisible-reconnect")
 
