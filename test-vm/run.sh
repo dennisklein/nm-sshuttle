@@ -202,7 +202,7 @@ bounce_signals_ok() { signal_sequence "$1" | grep -q 'StateChanged:4 StateChange
 guard_and_refused() { guard_present && refused_fast; }
 stays_down() { sleep 3; echo "state '$(con_state)'"; con_gone; }
 zone_con_gone() { [ -z "$(con_state "$CON_ZONE")" ]; }
-sigterm_logged() { plog_has "SIGTERM during gap" && plog_has "giving up"; }
+sigterm_logged() { plog_show "SIGTERM during gap" && plog_show "giving up"; }
 new_instance_running() { local p; p=$(plugin_pid); echo "MainPID $p, before $1"; [ -n "$p" ] && [ "$p" != 0 ] && [ "$p" != "$1" ]; }
 new_instance_started() { plog | grep -o 'starting (pid [0-9]*' | grep -v "pid $1\$" | grep -q .; }
 idle_exit_done() { plugin_unit_down && ! bus_owned; }
@@ -313,6 +313,7 @@ s_reconnect_nofw() {
 
 gap_len_ok() {
     local l
+    journal_catch_up
     l=$(plog | grep -o 'reconnected after [0-9.]*' | tail -n 1 | awk '{print $3}')
     echo "the plugin measured ${l:-no reconnect} s"
     awk -v l="${l:-0}" 'BEGIN {exit !(l >= 10)}'
@@ -645,6 +646,7 @@ s_selinux() {
 # --------------------------------------------------- M2 completion scenarios
 reconnected_quickly() {  # the last reconnect, as the plugin measured it, took at most $1 s
     local l
+    journal_catch_up
     l=$(plog | grep -o 'reconnected after [0-9.]*' | tail -n 1 | awk '{print $3}')
     echo "the plugin measured ${l:-no reconnect} s"
     [ -n "$l" ] && awk -v l="$l" -v m="$1" 'BEGIN {exit !(l <= m)}'
@@ -1011,7 +1013,7 @@ jump_name_teardown() {
     fi
     return 0
 }
-pin_count() { jsync; jc -u "$TUNNEL_UNIT" --since "@$START_EPOCH" -o cat | grep -c -F "the first hop's name does not resolve"; }
+pin_count() { journal_catch_up; grep -c -F "the first hop's name does not resolve" "$JOURNAL_LOG"; }
 pinned_jump() { grep -A2 "^Host $JUMP_NAME\$" /run/nm-sshuttle-ssh/ssh_config | grep -q "HostName $JUMP_IP"; }
 
 s_jump_name() {
@@ -1316,6 +1318,8 @@ collect() {
 preflight
 cleanup > /dev/null 2>&1   # leftovers of an earlier run
 mkdir -p "$REPORT/raw" "$VARDIR"
+journal_follow
+[ "$KEEP" = 1 ] && trap journal_stop EXIT
 agent_setup
 topology
 create_profile "$CON"
