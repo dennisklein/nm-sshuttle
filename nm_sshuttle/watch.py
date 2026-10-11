@@ -9,6 +9,7 @@ asynchronously and reports whole values, so the supervisor never sees D-Bus
 types.
 """
 
+import ipaddress
 import logging
 
 import gi
@@ -18,8 +19,8 @@ gi.require_version("GLib", "2.0")
 from gi.repository import Gio, GLib  # noqa: E402
 
 from .const import (AC_ACTIVATED, LOGIN_MANAGER_IFACE, LOGIN_NAME, LOGIN_PATH,  # noqa: E402
-                    LOGIN_SESSION_IFACE, LOGIN_USER_IFACE, NM_AC_IFACE, NM_IP4_IFACE, NM_NAME,
-                    NM_PATH)
+                    LOGIN_SESSION_IFACE, LOGIN_USER_IFACE, NM_AC_IFACE, NM_IP4_IFACE,
+                    NM_IP6_IFACE, NM_NAME, NM_PATH)
 
 log = logging.getLogger("nm-sshuttle")
 
@@ -38,11 +39,27 @@ def is_uplink(props):
             and not props.get("StateFlags", 0) & AC_FLAG_EXTERNAL)
 
 
+def ipv6_prefixes(address_data):
+    """The global prefixes of IPv6 AddressData, without the addresses: temporary
+    (privacy) addresses rotate within a prefix and must not count as a roam."""
+    nets = set()
+    for a in address_data:
+        try:
+            net = ipaddress.ip_interface(f"{a.get('address')}/{a.get('prefix')}").network
+        except ValueError:
+            continue
+        if net.version == 6 and not net.is_link_local:
+            nets.add(str(net))
+    return tuple(sorted(nets))
+
+
 class NetworkWatcher:
     """Reports whether an uplink is activated, NM's Connectivity, and a key for
     the network: the primary connection's UUID with its IPv4 addresses and
-    gateway. The key changes on a roam to another network or connection, and
-    not on a DHCP renewal or an IPv6 change (the tunnel is IPv4).
+    gateway, then (prefixes, gateway) of its IPv6 config. The key changes on a
+    roam to another network or connection, and not on a DHCP renewal or a new
+    temporary IPv6 address. The supervisor ignores the IPv6 part unless the
+    tunnel uses IPv6 (docs/later/ipv6.md).
 
     NM's global State is no use for "offline": an activating VPN, the plugin's
     own during a reconnect included, turns it into CONNECTING."""
@@ -54,6 +71,7 @@ class NetworkWatcher:
         self.on_version = on_version
         self.primary = None
         self.ip4 = None
+        self.ip6 = None
         self.version = None
         self.generation = 0
 
@@ -65,6 +83,8 @@ class NetworkWatcher:
             Gio.DBusSignalFlags.NONE, self._on_ac_props)
         sub(NM_NAME, PROPS_IFACE, "PropertiesChanged", None, NM_IP4_IFACE,
             Gio.DBusSignalFlags.NONE, self._on_ip4_props)
+        sub(NM_NAME, PROPS_IFACE, "PropertiesChanged", None, NM_IP6_IFACE,
+            Gio.DBusSignalFlags.NONE, self._on_ip6_props)
 
     # NetworkManager appeared (again): read everything afresh
     def refresh(self):
@@ -74,7 +94,7 @@ class NetworkWatcher:
 
     def forget(self):
         self.generation += 1
-        self.primary = self.ip4 = self.version = None
+        self.primary = self.ip4 = self.ip6 = self.version = None
 
     def _on_nm_props(self, conn, sender, path, iface, name, params):
         _iface, changed, invalidated = params.unpack()
@@ -84,12 +104,17 @@ class NetworkWatcher:
     def _on_ac_props(self, conn, sender, path, iface, name, params):
         _iface, changed, invalidated = params.unpack()
         keys = set(changed) | set(invalidated)
-        if AC_KEYS & keys or (path == self.primary and "Ip4Config" in keys):
+        if AC_KEYS & keys or (path == self.primary and {"Ip4Config", "Ip6Config"} & keys):
             self.refresh()
 
     def _on_ip4_props(self, conn, sender, path, iface, name, params):
         _iface, changed, invalidated = params.unpack()
         if path == self.ip4 and {"AddressData", "Gateway"} & (set(changed) | set(invalidated)):
+            self.refresh()
+
+    def _on_ip6_props(self, conn, sender, path, iface, name, params):
+        _iface, changed, invalidated = params.unpack()
+        if path == self.ip6 and {"AddressData", "Gateway"} & (set(changed) | set(invalidated)):
             self.refresh()
 
     def _get_all(self, path, iface, done):
@@ -124,26 +149,33 @@ class NetworkWatcher:
         uplink = any(is_uplink(ac) for ac in acs.values())
         ac = acs.get(primary) if primary and primary != "/" else None
         if not ac:
-            self.primary = self.ip4 = None
+            self.primary = self.ip4 = self.ip6 = None
             self.on_network(uplink, conn, None)
             return
         self.primary = primary
         uuid = ac.get("Uuid", "")
-        ip4 = ac.get("Ip4Config")
-        if not ip4 or ip4 == "/":
-            self.ip4 = None
-            self.on_network(uplink, conn, (uuid, (), ""))
-            return
-        self.ip4 = ip4
-        self._get_all(ip4, NM_IP4_IFACE, lambda p: self._got_ip4(gen, uplink, conn, uuid, p))
+        self.ip4, self.ip6 = (p if p and p != "/" else None
+                              for p in (ac.get("Ip4Config"), ac.get("Ip6Config")))
+        configs = {}
 
-    def _got_ip4(self, gen, uplink, conn, uuid, props):
-        if gen != self.generation:
-            return
-        props = props or {}
+        def got(name, props):
+            if gen != self.generation:
+                return
+            configs[name] = props or {}
+            if len(configs) == 2:
+                self._got_configs(uplink, conn, uuid, configs["ip4"], configs["ip6"])
+        for name, path, iface in (("ip4", self.ip4, NM_IP4_IFACE),
+                                  ("ip6", self.ip6, NM_IP6_IFACE)):
+            if path:
+                self._get_all(path, iface, lambda props, name=name: got(name, props))
+            else:
+                got(name, {})
+
+    def _got_configs(self, uplink, conn, uuid, ip4, ip6):
         addrs = tuple(sorted(f"{a.get('address')}/{a.get('prefix')}"
-                             for a in props.get("AddressData", [])))
-        self.on_network(uplink, conn, (uuid, addrs, props.get("Gateway", "")))
+                             for a in ip4.get("AddressData", [])))
+        v6 = (ipv6_prefixes(ip6.get("AddressData", [])), ip6.get("Gateway", ""))
+        self.on_network(uplink, conn, (uuid, addrs, ip4.get("Gateway", ""), v6))
 
 
 class LogindWatcher:

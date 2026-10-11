@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: MIT
-"""IPv6 networks and first hops in the supervisor
+"""IPv6 networks, first hops and network keys in the supervisor
 (docs/later/ipv6.md), with fake events and a fake clock."""
 
 from fakes import AC, NM, bring_up, make, settings
-from nm_sshuttle.const import AC_ACTIVATING, CONN_FULL, FAIL_CONNECT, ST_STOPPED
+from nm_sshuttle.const import AC_ACTIVATED, AC_ACTIVATING, CONN_FULL, FAIL_CONNECT, ST_STOPPED
 
 V6 = "10.0.0.0/8, 2001:db8:10::/48"
-WIFI = ("wifi-1", ("192.168.1.20/24",), "192.168.1.1")
+WIFI = ("wifi-1", ("192.168.1.20/24",), "192.168.1.1", (("2001:db8:1::/64",), "fe80::1"))
+WIFI_NEW_PREFIX = WIFI[:3] + ((("2001:db8:2::/64",), "fe80::1"),)
 
 
 def connect(fx, sup, hops, **data):
@@ -76,6 +77,31 @@ def test_health_wants_a_table_for_each_tunnelled_family():
     fx3.health = {"guard": True, "sshuttle": {6}}
     fx3.advance(10)
     assert sup3.phase == "up"                        # no IPv4 network, no IPv4 table
+
+
+def test_the_ipv6_part_of_the_network_key_counts_only_when_ipv6_is_used():
+    fx, sup = make()
+    sup.on_network(True, CONN_FULL, WIFI)
+    bring_up(fx, sup)
+    sup.on_network(True, CONN_FULL, WIFI_NEW_PREFIX)
+    assert sup.phase == "up"
+    fx2, sup2 = make()
+    sup2.on_network(True, CONN_FULL, WIFI)
+    bring_up(fx2, sup2, subnets=V6)
+    sup2.on_network(True, CONN_FULL, WIFI_NEW_PREFIX)
+    assert sup2.phase == "gap"
+
+
+def test_a_first_hop_reached_over_ipv6_counts_the_ipv6_part():
+    fx, sup = make()
+    sup.on_network(True, CONN_FULL, WIFI)
+    sup.connect(settings(), NM)
+    fx.first_hop_cbs.pop(0)(["2001:db8:ffff::7"], None)
+    fx.finish_start(True)
+    fx.ac_cbs.pop(0)(AC, AC_ACTIVATING)
+    sup.on_ac_state(AC, AC_ACTIVATED, 0)
+    sup.on_network(True, CONN_FULL, WIFI_NEW_PREFIX)
+    assert sup.phase == "gap"
 
 
 def test_a_refreshed_first_hop_list_updates_guard_spec_and_config():

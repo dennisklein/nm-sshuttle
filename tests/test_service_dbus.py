@@ -32,6 +32,8 @@ AC_PATH = "/org/freedesktop/NetworkManager/ActiveConnection/1"
 PRIMARY_PATH = "/org/freedesktop/NetworkManager/ActiveConnection/0"
 AC_IFACE = "org.freedesktop.NetworkManager.Connection.Active"
 IP4_PATH = "/org/freedesktop/NetworkManager/IP4Config/3"
+IP6_PATH = "/org/freedesktop/NetworkManager/IP6Config/3"
+IP6_IFACE = "org.freedesktop.NetworkManager.IP6Config"
 SESSION_PATH = "/org/freedesktop/login1/session/_32"
 DEV_PATH = "/org/freedesktop/NetworkManager/Devices/5"
 UNIT_PATH = "/org/freedesktop/systemd1/unit/nm_2dsshuttle_2dtunnel_2eservice"
@@ -55,12 +57,17 @@ NM_XML = """
     <property name="Vpn" type="b" access="read"/>
     <property name="Type" type="s" access="read"/>
     <property name="Ip4Config" type="o" access="read"/>
+    <property name="Ip6Config" type="o" access="read"/>
     <signal name="StateChanged"><arg type="u"/><arg type="u"/></signal>
   </interface>
   <interface name="org.freedesktop.NetworkManager.Device">
     <property name="State" type="u" access="read"/>
   </interface>
   <interface name="org.freedesktop.NetworkManager.IP4Config">
+    <property name="AddressData" type="aa{sv}" access="read"/>
+    <property name="Gateway" type="s" access="read"/>
+  </interface>
+  <interface name="org.freedesktop.NetworkManager.IP6Config">
     <property name="AddressData" type="aa{sv}" access="read"/>
     <property name="Gateway" type="s" access="read"/>
   </interface>
@@ -163,6 +170,7 @@ class FakeWorld:
         self.nm_state = 70
         self.primary_state = AC_ACTIVATED
         self.address = "192.168.1.20"
+        self.addresses6 = ["2001:db8:1::20", "fe80::20"]
         self.locked = False
         self.inhibit_fds = []
         self.signals = []
@@ -179,6 +187,7 @@ class FakeWorld:
         self.conn.register_object(UNIT_PATH, sd.interfaces[1], self.on_call, self.on_prop, None)
         self.conn.register_object(PRIMARY_PATH, nm.interfaces[1], self.on_call, self.on_prop, None)
         self.conn.register_object(IP4_PATH, nm.interfaces[3], self.on_call, self.on_prop, None)
+        self.conn.register_object(IP6_PATH, nm.interfaces[4], self.on_call, self.on_prop, None)
         lg = Gio.DBusNodeInfo.new_for_xml(LOGIN_XML)
         self.conn.register_object("/org/freedesktop/login1", lg.interfaces[0], self.on_call,
                                   self.on_prop, None)
@@ -210,12 +219,18 @@ class FakeWorld:
             "PrimaryConnection": GLib.Variant("o", PRIMARY_PATH),
             "Version": GLib.Variant("s", "1.56.1"),
             "Ip4Config": GLib.Variant("o", IP4_PATH if path == PRIMARY_PATH else "/"),
+            "Ip6Config": GLib.Variant("o", IP6_PATH if path == PRIMARY_PATH else "/"),
             "AddressData": GLib.Variant("aa{sv}", [{"address": GLib.Variant("s", self.address),
                                                     "prefix": GLib.Variant("u", 24)}]),
             "Gateway": GLib.Variant("s", "192.168.1.1"),
             "Sessions": GLib.Variant("a(so)", [("2", SESSION_PATH)]),
             "LockedHint": GLib.Variant("b", self.locked),
         }
+        if iface == IP6_IFACE:
+            return {"AddressData": GLib.Variant("aa{sv}", [
+                        {"address": GLib.Variant("s", a), "prefix": GLib.Variant("u", 64)}
+                        for a in self.addresses6]),
+                    "Gateway": GLib.Variant("s", "fe80::1")}.get(prop)
         if prop == "State":
             if path == "/org/freedesktop/NetworkManager":
                 return GLib.Variant("u", self.nm_state)
@@ -294,13 +309,13 @@ class FakeWorld:
                          "/org/freedesktop/NetworkManager/VPN/Plugin", iface, method, args)
 
 
-def settings_variant():
+def settings_variant(subnets="10.0.0.0/8"):
     return GLib.Variant("(a{sa{sv}})", ({
         "connection": {"id": GLib.Variant("s", "corp"), "uuid": GLib.Variant("s", "uuid-1"),
                        "permissions": GLib.Variant("as", ["user:alice:"])},
         "vpn": {"persistent": GLib.Variant("b", True),
                 "data": GLib.Variant("a{ss}", {
-                    "remote": "corp", "local-user": "alice", "subnets": "10.0.0.0/8",
+                    "remote": "corp", "local-user": "alice", "subnets": subnets,
                     "dns": "split", "dns-servers": "10.1.0.53",
                     "dns-domains": "~corp.example", "gateway": "203.0.113.7"})},
         "ipv4": {"method": GLib.Variant("s", "auto")},
@@ -431,7 +446,8 @@ def test_network_and_logind_watchers(world):
     sup = svc.sup
     iterate_until(lambda: sup.net_key is not None)
     assert sup.uplink is True and sup.connectivity == 4 and sup.nm_version == "1.56.1"
-    assert sup.net_key == ("wifi-1", ("192.168.1.20/24",), "192.168.1.1")
+    assert sup.net_key == ("wifi-1", ("192.168.1.20/24",), "192.168.1.1",
+                           (("2001:db8:1::/64",), "fe80::1"))
 
     fake.call_plugin("Connect", settings_variant())
     iterate_until(lambda: sup.phase == "up" and svc.inhibit_fd is not None)
@@ -452,6 +468,13 @@ def test_network_and_logind_watchers(world):
     fake.nm_state = 70
     fake.set_ac(AC_ACTIVATED)
     iterate_until(lambda: sup.phase == "up")
+
+    # a new IPv6 prefix is no change for a tunnel that does not use IPv6
+    fake.signals.clear()
+    fake.addresses6 = ["2001:db8:2::20"]
+    fake.props_changed(IP6_PATH, IP6_IFACE, {"AddressData": GLib.Variant("aa{sv}", [])})
+    iterate_until(lambda: sup.net_key[3][0] == ("2001:db8:2::/64",))
+    assert sup.phase == "up" and fake.signals == []
 
     # the uplink goes away: offline, and the tunnel drops
     fake.signals.clear()
@@ -488,6 +511,33 @@ def test_network_and_logind_watchers(world):
     fake.props_changed(SESSION_PATH, "org.freedesktop.login1.Session",
                        {"LockedHint": GLib.Variant("b", True)})
     iterate_until(lambda: seen)
+
+
+def test_ipv6_prefix_changes_count_for_an_ipv6_tunnel(world):
+    fake, svc, host = world
+    sup = svc.sup
+    iterate_until(lambda: sup.net_key is not None)
+    fake.call_plugin("Connect", settings_variant("10.0.0.0/8, 2001:db8:10::/48"))
+    iterate_until(lambda: f"State{ST_STARTED}" in fake.names())
+    fake.set_ac(AC_ACTIVATED)
+    iterate_until(lambda: sup.ac_state == AC_ACTIVATED)
+    assert sup.ipv6 is True
+
+    # a new temporary address within the prefix is no roam
+    fake.signals.clear()
+    fake.addresses6 = ["2001:db8:1::20", "2001:db8:1::4d2f", "fe80::20"]
+    fake.props_changed(IP6_PATH, IP6_IFACE, {"AddressData": GLib.Variant("aa{sv}", [])})
+    seen = []
+    svc.network.on_network = lambda *a: (seen.append(a), sup.on_network(*a))
+    iterate_until(lambda: seen)
+    assert sup.phase == "up" and fake.signals == []
+
+    # a new prefix is: the tunnel restarts at once
+    fake.addresses6 = ["2001:db8:2::20"]
+    fake.props_changed(IP6_PATH, IP6_IFACE, {"AddressData": GLib.Variant("aa{sv}", [])})
+    iterate_until(lambda: sup.net_key[3][0] == ("2001:db8:2::/64",))
+    iterate_until(lambda: f"State{ST_STARTED}" in fake.names(), timeout=2)
+    assert fake.names()[0] == f"State{ST_STARTING}"
 
 
 def test_config_carries_an_ipv6_gateway_as_bytes():
