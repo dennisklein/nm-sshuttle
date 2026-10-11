@@ -42,6 +42,14 @@ JUMP_IP=198.51.100.1
 HOST_IP=198.51.100.2
 WEB_IP=10.99.0.10
 DNS_IP=10.99.0.53
+# IPv6 on the same links (docs/later/ipv6.md), where the kernel has it
+JUMP_IP6=2001:db8:51::1
+HOST_IP6=2001:db8:51::2
+WEB_IP6=2001:db8:99::10
+HAVE_IPV6=no
+[ -e /proc/net/if_inet6 ] && HAVE_IPV6=yes
+CON6=nmtest-corp6
+LANB6_CON=nmtest-lanb6
 UPLINK=""
 BLOCK_TABLE=nmtest-block
 LANB_CON=nmtest-lanb
@@ -187,6 +195,8 @@ agent_setup() {
 
 # ----------------------------------------------------------------- topology
 # host --h-j--> jump (198.51.100.1, sshd) --> internal (DNS 10.99.0.53, web 10.99.0.10)
+# With IPv6 also 2001:db8:51::/64 and 2001:db8:99::/64 (web ::10). The host has
+# a route to 2001:db8:99::/64 through the jump host, so that a leak would arrive.
 topology() {
     note "topology: host -> jump ($JUMP_IP, sshd) -> internal (DNS $DNS_IP, web $WEB_IP)"
     local i
@@ -213,6 +223,15 @@ topology() {
     ip -n internal link set lo up
     ip -n internal route add default via 10.99.0.1
     ip netns exec jump sysctl -qw net.ipv4.ip_forward=1
+    if [ "$HAVE_IPV6" = yes ]; then
+        ip -6 addr add $HOST_IP6/64 dev h-j nodad
+        ip -n jump -6 addr add $JUMP_IP6/64 dev j-h nodad
+        ip -n jump -6 addr add 2001:db8:99::1/64 dev j-i nodad
+        ip -n internal -6 addr add $WEB_IP6/64 dev i-j nodad
+        ip -n internal -6 route add default via 2001:db8:99::1
+        ip netns exec jump sysctl -qw net.ipv6.conf.all.forwarding=1
+        ip -6 route add 2001:db8:99::/64 via $JUMP_IP6
+    fi
 
     install -d -m 755 "$SSHD_DIR" "$SSHD_DIR/authorized_keys" "$VARDIR/www"
     ssh-keygen -q -t ed25519 -N '' -f "$SSHD_DIR/host_ed25519"
@@ -226,6 +245,7 @@ PubkeyAuthentication yes
 UsePAM no
 PidFile none
 EOF
+    if [ "$HAVE_IPV6" = yes ]; then echo "ListenAddress $JUMP_IP6" >> "$SSHD_DIR/sshd_config"; fi
     install -m 644 "$HOME_U/.ssh/nmtest_auto.pub" "$SSHD_DIR/authorized_keys/$USER_NAME"
     echo "nm-sshuttle test-vm: reached through the tunnel" > "$VARDIR/www/index.html"
     restorecon -RF "$SSHD_DIR" "$VARDIR" 2> /dev/null || true
@@ -237,6 +257,9 @@ EOF
     systemd-run --quiet --collect --unit=nmtest-web \
         -p NetworkNamespacePath=/run/netns/internal \
         /usr/bin/python3 -m http.server --bind $WEB_IP 8080 --directory "$VARDIR/www"
+    [ "$HAVE_IPV6" = yes ] && systemd-run --quiet --collect --unit=nmtest-web6 \
+        -p NetworkNamespacePath=/run/netns/internal \
+        /usr/bin/python3 -m http.server --bind $WEB_IP6 8080 --directory "$VARDIR/www"
     for i in $(seq 1 50); do
         ss -N jump -ltnH 'sport = :22' | grep -q . &&
             ss -N internal -ltnH 'sport = :8080' | grep -q . &&
@@ -245,9 +268,15 @@ EOF
     done
     ssh-keyscan -T 5 -t ed25519 $JUMP_IP > "$VARDIR/known_hosts.tmp" 2> /dev/null
     as_user ssh-keygen -R $JUMP_IP > /dev/null 2>&1
+    if [ "$HAVE_IPV6" = yes ]; then
+        ssh-keyscan -T 5 -t ed25519 $JUMP_IP6 >> "$VARDIR/known_hosts.tmp" 2> /dev/null
+        as_user ssh-keygen -R $JUMP_IP6 > /dev/null 2>&1
+    fi
     cat "$VARDIR/known_hosts.tmp" >> "$HOME_U/.ssh/known_hosts"
     chown "$USER_NAME:" "$HOME_U/.ssh/known_hosts"
     raw topology systemctl --no-pager status nmtest-sshd nmtest-dns nmtest-web
+    [ "$HAVE_IPV6" = yes ] && raw topology systemctl --no-pager status nmtest-web6
+    return 0
 }
 
 # The jump host stops answering: tcp is reset at once (a retry fails fast),
@@ -296,6 +325,26 @@ lanb_teardown() {
     ip link del "$LANB_IF" 2> /dev/null
     ip netns del lanb 2> /dev/null
     return 0
+}
+# The second uplink with IPv6 too (2001:db8:77::2/64), for roams that change
+# only the IPv6 prefix: lanb6_setup, then lanb6_address ADDR... reapplies.
+lanb6_setup() {
+    lanb_setup || return 1
+    nmcli connection delete "$LANB_CON" > /dev/null 2>&1
+    nmcli connection add type ethernet ifname "$LANB_IF" con-name "$LANB6_CON" \
+        connection.autoconnect no ipv4.method manual ipv4.addresses 192.168.77.2/24 \
+        ipv4.gateway 192.168.77.1 ipv4.route-metric 10 ipv4.ignore-auto-dns yes \
+        ipv6.method manual ipv6.addresses 2001:db8:77::2/64 ipv6.addr-gen-mode eui64 \
+        ipv6.ignore-auto-dns yes >> "$REPORT/raw/profiles.txt" 2>&1
+}
+lanb6_address() {  # lanb6_address ADDR/PREFIX... : the uplink's IPv6 addresses, reapplied
+    nmcli connection modify "$LANB6_CON" ipv6.addresses "$(IFS=,; echo "$*")" &&
+        nmcli device reapply "$LANB_IF"
+} >> "$REPORT/raw/roam6.txt" 2>&1
+lanb6_teardown() {
+    nmcli connection down "$LANB6_CON" > /dev/null 2>&1
+    nmcli connection delete "$LANB6_CON" > /dev/null 2>&1
+    lanb_teardown
 }
 primary_con() {
     bc get-property org.freedesktop.NetworkManager /org/freedesktop/NetworkManager \
@@ -368,9 +417,9 @@ attempts_logged() { plog | grep -c 'reconnect attempt [0-9]* in'; }
 inhibitor_held() { systemd-inhibit --list --no-pager 2>&1 | grep -i 'nm-sshuttle'; }
 
 # ----------------------------------------------------------------- profiles
-profile_data() {  # profile_data [EXTRA-KEY=VALUE]
-    printf 'remote = %s@%s, local-user = %s, subnets = 10.99.0.0/24, dns = split, dns-servers = %s, dns-domains = ~corp.test%s' \
-        "$USER_NAME" "$JUMP_IP" "$USER_NAME" "$DNS_IP" "${1:+, $1}"
+profile_data() {  # profile_data [EXTRA-KEY=VALUE] ; REMOTE= and SUBNETS= override
+    printf 'remote = %s, local-user = %s, subnets = %s, dns = split, dns-servers = %s, dns-domains = ~corp.test%s' \
+        "${REMOTE:-$USER_NAME@$JUMP_IP}" "$USER_NAME" "${SUBNETS:-10.99.0.0/24}" "$DNS_IP" "${1:+, $1}"
 }
 # create_profile NAME [VPN-DATA-EXTRA [NMCLI-ARGS...]]  (design §4.2)
 create_profile() {
@@ -379,7 +428,8 @@ create_profile() {
     nmcli connection delete "$name" > /dev/null 2>&1
     nmcli connection add type vpn con-name "$name" vpn-type sshuttle \
         connection.autoconnect no connection.permissions "user:$USER_NAME" \
-        ipv4.auto-route-ext-gw no ipv4.never-default yes ipv6.never-default yes \
+        ipv4.auto-route-ext-gw no ipv6.auto-route-ext-gw no \
+        ipv4.never-default yes ipv6.never-default yes \
         vpn.persistent yes vpn.data "$(profile_data "$extra")" "$@" \
         >> "$REPORT/raw/profiles.txt" 2>&1
 }
@@ -524,7 +574,9 @@ outside_lookup_ok() {  # a fresh outside name is not sent to the tunnel's DNS se
     sleep 1
     ! dnslog_has "$n" || { echo "the internal DNS server saw $n"; return 1; }
 }
-http_ok() { [ "$(curl -s -m 5 -o /dev/null -w '%{http_code}' --noproxy '*' "$1")" = 200 ]; }
+http_ok() { [ "$(curl -g -s -m 5 -o /dev/null -w '%{http_code}' --noproxy '*' "$1")" = 200 ]; }
+# web6_from ADDRESS : the IPv6 web server logged a request from ADDRESS since log_mark
+web6_from() { jsync; jc -u nmtest-web6 --since "@$MARK_EPOCH" -o cat | grep "^$1 "; }
 
 # info_or_check ID TEXT CMD... : like check, but only INFO with what CMD saw
 # when INFO_ONLY lists ID's last letter (an answer, not an assertion)
@@ -683,7 +735,7 @@ clear_leaked_dns() {  # a leaked VPN DNS entry would spoil later DNS checks
 reset_state() {
     local c left
     unblock_jump
-    for c in "$CON" "$CON_ZONE"; do
+    for c in "$CON" "$CON_ZONE" "$CON6"; do
         [ -n "$(con_state "$c")" ] && nmcli connection down "$c" > /dev/null 2>&1
     done
     wait_for 30 con_gone
@@ -715,9 +767,10 @@ cleanup() {
     unblock_jump
     nmcli connection down "$CON" > /dev/null 2>&1
     nmcli connection down "$CON_ZONE" > /dev/null 2>&1
-    nmcli connection delete "$CON" "$CON_ZONE" > /dev/null 2>&1
+    nmcli connection down "$CON6" > /dev/null 2>&1
+    nmcli connection delete "$CON" "$CON_ZONE" "$CON6" > /dev/null 2>&1
     sc stop "$PLUGIN_UNIT" "$TUNNEL_UNIT" > /dev/null 2>&1
-    sc stop nmtest-sshd nmtest-dns nmtest-web > /dev/null 2>&1
+    sc stop nmtest-sshd nmtest-dns nmtest-web nmtest-web6 > /dev/null 2>&1
     if [ -f "$VARDIR/packaged-conf.bak" ]; then
         mv -f "$VARDIR/packaged-conf.bak" "$NM_PACKAGED"
     fi
@@ -734,7 +787,7 @@ cleanup() {
     if [ -f "$VARDIR/never-default" ] && [ -n "$UPLINK" ]; then
         nmcli device modify "$UPLINK" ipv4.never-default no > /dev/null 2>&1
     fi
-    lanb_teardown
+    lanb6_teardown
     banner_stop
     lock_session_stop
     if [ -f "$PARK_DROPIN" ]; then rm -f "$PARK_DROPIN"; sc daemon-reload; fi
@@ -746,6 +799,7 @@ cleanup() {
         done
         rm -f "$HOME_U"/.ssh/nmtest_auto*
         as_user ssh-keygen -R "$JUMP_IP" > /dev/null 2>&1
+        as_user ssh-keygen -R "$JUMP_IP6" > /dev/null 2>&1
     fi
     if [ -f "$VARDIR/started-agent" ]; then
         as_user systemctl --user --no-pager stop nmtest-agent 2> /dev/null
