@@ -1,0 +1,323 @@
+name: packages
+
+# Builds signed Fedora RPMs of nm-sshuttle from a release tag and publishes
+# them, with the nm-sshuttle-release repository package, as a dnf repository
+# on GitHub Pages. See packaging/ for the scripts each job runs. The release
+# workflow starts this one after a tag is pushed. Pull requests, and
+# runs before the first tag or the signing key exist, assemble and test the
+# repository with a throwaway key instead of publishing it.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - packaging/**
+      - .github/workflows/packages.yaml
+  pull_request:
+    paths:
+      - packaging/**
+      - .github/workflows/packages.yaml
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to package (default newest vX.Y.Z tag)
+        required: false
+        default: ""
+      rebuild:
+        description: Rebuild even if the packages are already published
+        type: boolean
+        default: false
+      discard-published:
+        description: >-
+          Publish only what this run builds, dropping the published packages
+          (after a signing key compromise; implies rebuild)
+        type: boolean
+        default: false
+
+permissions: {}
+
+# By default a waiting run is replaced by a newer one, which would drop a
+# push's republish or a dispatch's rebuild. Queue them all instead.
+concurrency:
+  group: packages-${{ github.ref }}
+  cancel-in-progress: false
+  queue: max
+
+env:
+  PAGES_URL: https://dennisklein.github.io/nm-sshuttle
+  KEEP_VERSIONS: "2"
+
+# Job names are fixed: GitHub shows the name of a skipped job unexpanded, and
+# appends the Fedora release to the names of the matrix jobs itself. The plan
+# job's summary names what a run builds.
+jobs:
+  plan:
+    name: Plan what to build and publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.plan.outputs.tag }}
+      fedora: ${{ steps.plan.outputs.fedora }}
+      build: ${{ steps.plan.outputs.build }}
+      publish: ${{ steps.plan.outputs.publish }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - id: plan
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          REBUILD: ${{ inputs.rebuild || inputs.discard-published }}
+        run: packaging/plan.sh
+      - name: Summary
+        env:
+          TAG: ${{ steps.plan.outputs.tag }}
+          FEDORA: ${{ steps.plan.outputs.fedora }}
+          BUILD: ${{ steps.plan.outputs.build }}
+          PUBLISH: ${{ steps.plan.outputs.publish }}
+        run: |
+          echo "nm-sshuttle ${TAG:-HEAD} for Fedora $FEDORA: build=$BUILD publish=$PUBLISH" >> "$GITHUB_STEP_SUMMARY"
+
+  srpm:
+    name: Source RPMs
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    container:
+      image: registry.fedoraproject.org/fedora:44
+    steps:
+      - name: Install tools
+        run: dnf -y install git-core rpm-build
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - name: Build source RPMs
+        env:
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          packaging/make-srpm.sh out ${TAG:+"$TAG"}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: srpm-nm-sshuttle
+          path: out/*.src.rpm
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  rpm:
+    name: RPMs for Fedora
+    needs: [plan, srpm]
+    runs-on: ubuntu-latest
+    permissions: {}
+    strategy:
+      fail-fast: false
+      matrix:
+        fedora: ${{ fromJSON(needs.plan.outputs.fedora) }}
+    container:
+      image: registry.fedoraproject.org/fedora:${{ matrix.fedora }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: srpm-nm-sshuttle
+      - name: Install build dependencies
+        run: |
+          dnf -y install rpm-build dnf5-plugins
+          for srpm in ./*.src.rpm; do dnf -y builddep "$srpm"; done
+      - name: Build RPMs
+        run: |
+          # The binaries name the SRPM of this build as their SOURCERPM, with
+          # this release's dist tag. Publish that SRPM, so that dnf can find
+          # the source of an installed package in the nm-sshuttle-source
+          # repository.
+          for srpm in ./*.src.rpm; do
+            rpmbuild -rs --nodeps --define "_topdir $PWD/rpmbuild" "$srpm"
+          done
+          # One rpmbuild per SRPM: given several, the noarch package would
+          # make the next one noarch too.
+          for srpm in rpmbuild/SRPMS/*.src.rpm; do
+            rpmbuild --rebuild --define "_topdir $PWD/rpmbuild" "$srpm"
+          done
+          mkdir out
+          cp -t out rpmbuild/SRPMS/*.src.rpm
+          find rpmbuild/RPMS -name '*.rpm' ! -name '*-debuginfo-*' ! -name '*-debugsource-*' -exec cp -t out {} +
+          ls -l out
+          for pkg in out/*.rpm; do rpm -qp --requires "$pkg" | sed "s|^|${pkg##*/}: |"; done
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rpm-nm-sshuttle-fc${{ matrix.fedora }}
+          path: out/*.rpm
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  release-rpm:
+    name: nm-sshuttle-release RPM
+    needs: plan
+    if: needs.plan.outputs.publish == 'real'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    container:
+      image: registry.fedoraproject.org/fedora:44
+    steps:
+      - run: dnf -y install rpm-build
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build nm-sshuttle-release
+        run: |
+          packaging/nm-sshuttle-release/build.sh out
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rpm-nm-sshuttle-release
+          path: out/*.rpm
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Sign and assemble the repository
+    needs: [plan, srpm, rpm, release-rpm]
+    # A build job that timed out ends cancelled, which !failure() misses.
+    # Without a build, the published packages are restored.
+    if: >-
+      !cancelled() && needs.plan.outputs.publish == 'real' &&
+      contains(fromJSON('["success","skipped"]'), needs.srpm.result) &&
+      contains(fromJSON('["success","skipped"]'), needs.rpm.result) &&
+      needs.release-rpm.result == 'success'
+    runs-on: ubuntu-latest
+    environment: rpm-signing
+    permissions:
+      contents: read
+    container:
+      image: registry.fedoraproject.org/fedora:44
+    steps:
+      - run: dnf -y install createrepo_c findutils gnupg2 jq python3-rpm rpm-sign
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: "rpm-*"
+          path: incoming
+          merge-multiple: true
+      - name: Assemble signed repository
+        env:
+          RPM_SIGNING_KEY: ${{ secrets.RPM_SIGNING_KEY }}
+          RESTORE: ${{ inputs.discard-published && 'false' || 'true' }}
+        run: packaging/publish.sh incoming site
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site
+      # For the smoke test, which installs from it before it goes live.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: site
+          path: site
+          if-no-files-found: error
+          retention-days: 7
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: [publish, smoke-test]
+    # A publish without a build skips the build jobs, and the default
+    # condition would skip this job with them.
+    if: >-
+      !cancelled() && needs.publish.result == 'success' &&
+      needs.smoke-test.result == 'success'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    permissions:
+      pages: write
+      id-token: write
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+
+  # Assembles the repository with a throwaway key, so packaging changes are
+  # verified end to end (see smoke-test) without the real key or a deploy.
+  dry-run:
+    name: Assemble the repository with a throwaway key
+    needs: [plan, srpm, rpm]
+    if: >-
+      !cancelled() && needs.plan.outputs.publish == 'dry-run' &&
+      needs.srpm.result == 'success' && needs.rpm.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    container:
+      image: registry.fedoraproject.org/fedora:44
+    steps:
+      - run: dnf -y install createrepo_c findutils gnupg2 jq python3-rpm rpm-build rpm-sign
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: "rpm-*"
+          path: incoming
+          merge-multiple: true
+      - name: Assemble repository with a throwaway key
+        env:
+          # The published packages carry the real key's signatures.
+          RESTORE: "false"
+        run: |
+          GNUPGHOME=$(mktemp -d)
+          export GNUPGHOME
+          gpg --batch --quiet --pinentry-mode loopback --passphrase '' \
+            --quick-gen-key 'nm-sshuttle dry run <dry-run@invalid>' rsa4096 sign never
+          gpg --batch --armor --export > packaging/nm-sshuttle-release/RPM-GPG-KEY-nm-sshuttle
+          RPM_SIGNING_KEY=$(gpg --batch --armor --export-secret-keys)
+          export RPM_SIGNING_KEY
+          rm -rf "$GNUPGHOME"
+          unset GNUPGHOME
+          packaging/nm-sshuttle-release/build.sh incoming
+          packaging/publish.sh incoming site
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: site
+          path: site
+          if-no-files-found: error
+          retention-days: 7
+
+  # Installs from the assembled site, real or dry run, before a real one is
+  # deployed.
+  smoke-test:
+    name: Smoke test on Fedora
+    needs: [plan, publish, dry-run]
+    if: >-
+      !cancelled() &&
+      (needs.publish.result == 'success' || needs.dry-run.result == 'success')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        fedora: ${{ fromJSON(needs.plan.outputs.fedora) }}
+    container:
+      image: registry.fedoraproject.org/fedora:${{ matrix.fedora }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: site
+          path: site
+      - name: Install from the repository
+        run: |
+          dnf -y install python3
+          python3 -m http.server --directory site 8080 > /dev/null 2>&1 &
+          sleep 2
+          packaging/smoke-test.sh http://127.0.0.1:8080
