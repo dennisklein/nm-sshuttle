@@ -1,0 +1,26 @@
+name: release
+
+# Puts a tagged release into the package repository. The repository is
+# published from main, the only branch that may use the signing key, so this
+# workflow starts the packages workflow there instead of publishing itself.
+# Pre-releases (a tag with a hyphen, such as v1.0.0-rc.1) are not packaged.
+
+on:
+  push:
+    tags:
+      - "v[0-9]*"
+
+permissions: {}
+
+jobs:
+  packages:
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Run the packages workflow
+        run: gh workflow run packages.yaml --ref main -f tag="$GITHUB_REF_NAME"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
