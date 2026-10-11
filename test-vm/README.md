@@ -45,6 +45,9 @@ block is lifted. Each scenario has an id `M2-NN`; its checks are `M2-NNx`.
 | M2-29 | a ProxyJump host named inside `~corp.test`: resolved from the local network at connect, pinned to that address on the reconnect |
 | V6-01 | an IPv6 subnet through the tunnel, arriving from the jump host; refused at once in a gap ([IPv6](../docs/later/ipv6.md)) |
 | V6-02 | the uplink's IPv6 addresses change: a second address in the prefix is no network change, a new prefix restarts a tunnel whose first hop is IPv6, and not an IPv4 one |
+| TP-01 | `method=tproxy` ([tproxy](../docs/later/tproxy.md)): sshuttle's mark chain and the plugin's rule and route; UDP echo, TCP and split DNS through the tunnel; UDP and TCP refused at once in a gap; nothing left after the disconnect |
+| TP-02 | `method=tproxy`: sshuttle killed while up, then `nft flush ruleset`: the guard comes back, the missing mark chain causes a reconnect, the rule and route stay |
+| TP-03 | `method=tproxy`: `nmcli general reload` and a roam to a second uplink leave the rule and route alone |
 
 `PASS` and `FAIL` are asserted. `INFO` prints something the design marks as
 unobserved (for example firewalld's zone binding after a link loss, or what

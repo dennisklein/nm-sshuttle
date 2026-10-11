@@ -29,6 +29,9 @@
 #   M2-29 a ProxyJump host named inside the tunnelled DNS domain
 #   V6-01 IPv6 subnet through the tunnel, fail closed in a gap
 #   V6-02 roams that change only the uplink's IPv6 addresses
+#   TP-01 method=tproxy: UDP and TCP through the tunnel, fail closed in a gap
+#   TP-02 method=tproxy: kill sshuttle and nft flush ruleset while up
+#   TP-03 method=tproxy: NM leaves the policy routing alone; teardown removes it
 #
 # Result ids are M2-NN (scenario) and M2-NNx (a check in it). PASS and FAIL are
 # asserted; INFO prints something the design marks unobserved. A FAIL prints
@@ -55,7 +58,7 @@ while [ $# -gt 0 ]; do
         --keep) KEEP=1; shift ;;
         --suspend) SUSPEND=1; shift ;;
         cleanup) CMD=cleanup; shift ;;
-        -h|--help) sed -n '3,35p' "$0"; exit 0 ;;
+        -h|--help) sed -n '3,38p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -1116,6 +1119,120 @@ s_ipv6_roam() {
     end_checks V6-02
 }
 
+# ------------------------------------------------- tproxy (docs/later/tproxy.md)
+udp_echo() { python3 "$REPO/lab/udp_echo.py" send $WEB_IP $UDP_PORT "$@"; }
+udp_ok() { local out; out=$(udp_echo "$1"); echo "$out"; [ "$out" = "ECHO $1 from 10.99.0.1" ]; }
+udp_refused() { local out; out=$(udp_echo gap); echo "$out"; [ "$out" = "ERROR Operation not permitted" ]; }
+contp_is() { [ "$(con_state "$CONTP")" = "$1" ]; }
+contp_gone() { [ -z "$(con_state "$CONTP")" ]; }
+has_mark_chain() { mangle_chains; mangle_chains | grep -q '^sshuttle-m-'; }
+routing_present() { tproxy_rule && tproxy_route; }
+routing_gone() { [ -z "$(tproxy_rule)$(tproxy_route)" ]; }
+tproxy_clean() {
+    echo "chains: '$(mangle_chains | xargs)'; rule: '$(tproxy_rule)'; route: '$(tproxy_route)'"
+    [ -z "$(mangle_chains)" ] && routing_gone
+}
+have_iptables() { command -v iptables > /dev/null && command -v ip6tables > /dev/null; }
+# Fedora's sshuttle pulls in iptables-legacy, and which backend iptables uses
+# then depends on the install order
+iptables_legacy() { iptables -V 2> /dev/null | grep -q legacy; }
+# tp_recovered ID IFINDEX : activated again, same link, UDP through the tunnel
+tp_recovered() {
+    if WAIT_POLL=0.5 wait_for 150 contp_is activated; then
+        result "$1" PASS "activated again ($((WAITED_MS / 1000)) s)"
+    else
+        result "$1" FAIL "not activated again within 150 s (state '$(con_state "$CONTP")')"
+        plog | tail -n 30 | detail "$1" "plugin journal"
+        return 1
+    fi
+    sleep 1
+    check "$1-i" "same ifindex ($2) after the reconnect" test "$(link_ifindex)" = "$2"
+    check "$1-c" "sshuttle's mark chain is back" has_mark_chain
+    check "$1-u" "UDP flows through the tunnel again" udp_ok again
+}
+
+s_tproxy() {
+    begin TP-01 "method=tproxy: UDP and TCP through the tunnel, fail closed in a gap"
+    have_iptables || { result TP-01 SKIP "iptables and ip6tables are not installed"; return; }
+    create_profile "$CONTP" "method = tproxy"
+    connect_ok TP-01 "activation of a method=tproxy profile" "$CONTP" || return
+    local ifi
+    ifi=$(link_ifindex)
+    result TP-01i INFO "$(iptables -V 2>&1)"
+    check TP-01a "sshuttle has a mark chain in iptables' mangle table" has_mark_chain
+    check TP-01b "the plugin's rule and local route are in place" routing_present
+    check TP-01c "UDP echo to $WEB_IP:$UDP_PORT answers, from the jump host" udp_ok hello
+    check TP-01d "TCP, by address and by a split DNS name" traffic_ok
+    check TP-01e "a fresh split name resolves through the tunnel (resolved, IP_UNICAST_IF)" split_lookup_ok
+    block_jump
+    drop_tunnel
+    wait_for 15 contp_is activating || { result TP-01f FAIL "no gap: state '$(con_state "$CONTP")'"; gap_end; return; }
+    check TP-01f "UDP to the subnet is refused at once during the gap (fail closed)" udp_refused
+    check TP-01g "TCP likewise" refused_fast
+    check TP-01h "the rule and route stay during the gap" routing_present
+    gap_end
+    tp_recovered TP-01r "$ifi"
+    nmcli connection down "$CONTP" > /dev/null 2>&1
+    wait_for 30 contp_gone
+    check TP-01z "after the disconnect: no mark chain, rule or route left" wait_for 10 tproxy_clean
+    end_checks TP-01
+}
+
+s_tproxy_health() {
+    begin TP-02 "method=tproxy: kill sshuttle and nft flush ruleset while up"
+    have_iptables || { result TP-02 SKIP "iptables and ip6tables are not installed"; return; }
+    create_profile "$CONTP" "method = tproxy"
+    connect_ok TP-02 "activation of a method=tproxy profile" "$CONTP" || return
+    local ifi t0 v=""
+    ifi=$(link_ifindex)
+    drop_tunnel
+    wait_for 15 plog_has "tunnel dropped"
+    check TP-02a "plugin log: the tunnel unit stopped, then a reconnect" plog_show "tunnel dropped (the tunnel unit stopped)"
+    tp_recovered TP-02b "$ifi" || { end_checks TP-02; return; }
+    log_mark
+    t0=$(now_ms)
+    nft flush ruleset
+    if WAIT_POLL=0.2 wait_for 15 guard_present; then v=$(( $(now_ms) - t0 )); fi
+    check_le TP-02c "the guard table is back after the flush" "$v" 11000 ms
+    if iptables_legacy; then        # its chains are not in nft, so the flush leaves them
+        check TP-02d "iptables-legacy: the flush left sshuttle's mark chain, so no reconnect" \
+            has_mark_chain
+    else
+        wait_for 15 plog_has "no sshuttle mark chain with a listener"
+        check TP-02d "plugin log: no sshuttle mark chain with a listener, so a reconnect" \
+            plog_show "no sshuttle mark chain with a listener"
+    fi
+    check TP-02e "the flush left the rule and route alone" routing_present
+    tp_recovered TP-02f "$ifi"
+    if fw_running; then
+        firewall-cmd --reload > /dev/null 2>&1
+        result TP-02z INFO "firewalld reloaded after the flush: $(fw_running && echo running)"
+    fi
+    end_checks TP-02
+}
+
+s_tproxy_nm() {
+    begin TP-03 "method=tproxy: NM leaves the policy routing alone"
+    have_iptables || { result TP-03 SKIP "iptables and ip6tables are not installed"; return; }
+    create_profile "$CONTP" "method = tproxy"
+    connect_ok TP-03 "activation of a method=tproxy profile" "$CONTP" || return
+    local ifi
+    ifi=$(link_ifindex)
+    nmcli general reload > /dev/null 2>&1
+    sleep 3
+    check TP-03a "after 'nmcli general reload' the rule and route are still there" routing_present
+    check TP-03b "... and UDP flows" udp_ok reload
+    if lanb_setup && nmcli --wait 30 connection up "$LANB_CON" >> "$REPORT/raw/roam.txt" 2>&1; then
+        check TP-03c "plugin log: the network changed" wait_for 10 plog_has "the network changed"
+        tp_recovered TP-03d "$ifi"
+        check TP-03e "after the roam the rule and route are still there" routing_present
+    else
+        result TP-03c SKIP "cannot activate the second uplink"
+    fi
+    lanb_teardown
+    end_checks TP-03
+}
+
 s_suspend() {
     begin M2-28 "suspend and resume"
     if [ "$SUSPEND" != 1 ]; then
@@ -1226,6 +1343,9 @@ want M2-28 && s_suspend
 want M2-29 && s_jump_name
 want V6-01 && s_ipv6
 want V6-02 && s_ipv6_roam
+want TP-01 && s_tproxy
+want TP-02 && s_tproxy_health
+want TP-03 && s_tproxy_nm
 s_selinux
 reset_state
 collect

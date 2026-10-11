@@ -79,7 +79,8 @@ prepare() {
     fi
     say "installing meson, ninja and firewalld in the VM"
     # gcc and the -devel packages let meson build the editor for GNOME Settings
-    vm "sudo dnf -y install meson ninja-build firewalld nftables iproute python3-gobject-base sshuttle &&
+    vm "sudo dnf -y install meson ninja-build firewalld nftables iproute python3-gobject-base sshuttle \
+            iptables-nft &&
         sudo dnf -y install gcc 'pkgconfig(gtk4)' 'pkgconfig(libnm)' 'pkgconfig(json-glib-1.0)' &&
         sudo systemctl enable --now firewalld &&
         sudo loginctl enable-linger $VM_USER &&
