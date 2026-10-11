@@ -24,7 +24,16 @@ it.
 
 ## Installing
 
-The packages are built in CI (`rpm` and `deb` jobs; download them from a
+On Fedora, install from the signed package repository, which also brings
+updates:
+
+```console
+$ sudo rpm --import https://dennisklein.github.io/nm-sshuttle/RPM-GPG-KEY-nm-sshuttle
+$ sudo dnf install https://dennisklein.github.io/nm-sshuttle/nm-sshuttle-release.noarch.rpm
+$ sudo dnf install nm-sshuttle
+```
+
+The packages are also built in CI (`rpm` and `deb` jobs; download them from a
 run's artifacts) or from the repository:
 
 ```console
@@ -35,9 +44,9 @@ $ sudo apt install ./nm-sshuttle_*_all.deb
 ```
 
 To create and edit profiles in GNOME Settings as well, install the editor,
-which is a separate package (`nm-sshuttle-gnome-*.rpm`,
-`nm-sshuttle-gnome_*.deb`). Settings reads its list of VPN types once, so
-restart it afterwards (log out, or `pkill gnome-control-center`).
+which is a separate package (`nm-sshuttle-gnome`; `nm-sshuttle-gnome-*.rpm`,
+`nm-sshuttle-gnome_*.deb` as files). Settings reads its list of VPN types
+once, so restart it afterwards (log out, or `pkill gnome-control-center`).
 
 From source:
 
