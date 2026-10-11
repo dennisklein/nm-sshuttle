@@ -1,16 +1,20 @@
 # SPDX-License-Identifier: MIT
-"""Several tunnels (docs/later/multiple-tunnels.md): slots, the dispatcher's
-choice of slot, a tunnel unit's own ports, the supervisor's names and its
-exit after one activation, and cleanup per slot."""
+"""Several tunnels (docs/later/multiple-tunnels.md): slots, the claims and
+their conflict rules, the dispatcher's choice of slot, a tunnel unit's own
+ports, the supervisor's claim, and cleanup per slot."""
 
+import argparse
+import json
 import os
 from types import SimpleNamespace
 
 import pytest
 
-from fakes import NM, bring_up, fake_getpwnam, make, settings
-from nm_sshuttle import cli, const, dispatcher, tunnel
-from nm_sshuttle.const import Slot, slot_number
+from fakes import AC, NM, bring_up, fake_getpwnam, make, settings
+from test_cli import Nmcli, conn, ssh_g_ok
+from nm_sshuttle import claims, cli, const, dispatcher, tunnel
+from nm_sshuttle.const import (AC_ACTIVATING, CONN_FULL, FAIL_CONNECT, ST_STOPPED, Slot,
+                               slot_number)
 from nm_sshuttle.profile import parse
 
 
@@ -36,10 +40,127 @@ def test_the_spec_carries_the_slots_own_mark():
     assert p.tunnel_spec(["203.0.113.7"], slot=5)["tmark"] == 0x4e530005
 
 
+# ------------------------------------------------------------------- claims
+def claim(name, networks=(), dns="split", domains=(), hops=()):
+    return {"id": name, "uuid": "u-" + name, "pid": 1, "networks": list(networks),
+            "dns": dns, "domains": list(domains), "first_hop": list(hops)}
+
+
+def test_effective_networks_take_the_excludes_out():
+    assert claims.effective_networks(["10.0.0.0/8"], ["10.0.0.0/9"]) == ["10.128.0.0/9"]
+    assert claims.effective_networks(["10.1.0.0/16", "2001:db8::/48"], ["10.0.0.0/8"]) == [
+        "2001:db8::/48"]
+    assert claims.effective_networks(["10.1.0.0/16", "10.0.0.0/8"], []) == ["10.0.0.0/8"]
+
+
+def test_make_claim_from_a_profile():
+    p = parse(settings(subnets="10.0.0.0/8", exclude="10.200.0.0/16",
+                       **{"dns-domains": "~Corp.Example., lab.example"}), fake_getpwnam)
+    c = claims.make_claim(p, ["203.0.113.7"], pid=42)
+    assert c["id"] == "corp" and c["uuid"] == "u-1" and c["pid"] == 42
+    assert "10.200.0.0/16" not in c["networks"] and "10.0.0.0/9" in c["networks"]
+    assert c["domains"] == ["corp.example", "lab.example"]
+    assert c["first_hop"] == ["203.0.113.7"]
+    none = parse(settings(dns="none", **{"dns-servers": "", "dns-domains": ""}), fake_getpwnam)
+    assert claims.make_claim(none, [])["domains"] == []
+
+
+def test_overlapping_subnets_conflict():
+    mine = claim("lab", ["10.50.1.0/24"])
+    why = claims.conflict(mine, [claim("corp", ["10.50.0.0/16"])])
+    assert why == "subnets overlap with the active profile corp: 10.50.1.0/24"
+    assert claims.conflict(claim("lab", ["10.51.0.0/16"]), [claim("corp", ["10.50.0.0/16"])]) \
+        is None
+
+
+def test_an_exclude_that_carves_out_the_other_avoids_the_overlap():
+    corp = claim("corp", claims.effective_networks(["10.0.0.0/8"], ["10.50.0.0/16"]))
+    assert claims.conflict(claim("lab", ["10.50.0.0/16"]), [corp]) is None
+
+
+def test_ipv4_and_ipv6_networks_never_overlap():
+    assert claims.conflict(claim("a", ["2001:db8::/32"]), [claim("b", ["0.0.0.0/0"])]) is None
+    assert claims.conflict(claim("a", ["2001:db8:1::/48"]), [claim("b", ["2001:db8::/32"])])
+
+
+def test_two_dns_all_conflict():
+    assert claims.conflict(claim("a", dns="all"), [claim("b", dns="all")]) == \
+        "the active profile b also uses dns=all"
+    assert claims.conflict(claim("a", dns="all"), [claim("b", dns="split")]) is None
+
+
+def test_a_shared_dns_domain_conflicts():
+    why = claims.conflict(claim("a", domains=["corp.example", "x.example"]),
+                          [claim("b", domains=["corp.example"])])
+    assert why == "the active profile b also has the DNS domain corp.example"
+
+
+def test_a_first_hop_inside_another_tunnel_is_fine_but_a_loop_is_not():
+    corp = claim("corp", ["10.0.0.0/8"], hops=["203.0.113.7"])
+    lab = claim("lab", ["192.168.50.0/24"], hops=["10.1.2.3"])     # ssh to lab runs over corp
+    assert claims.conflict(lab, [corp]) is None
+    looped = claim("corp", ["10.0.0.0/8"], hops=["192.168.50.9"])  # and corp's over lab
+    assert claims.conflict(lab, [looped]) == \
+        "the first hops would run in a loop: lab -> corp -> lab"
+
+
+def test_a_three_way_loop_is_found():
+    a = claim("a", ["10.1.0.0/16"], hops=["10.2.0.1"])
+    b = claim("b", ["10.2.0.0/16"], hops=["10.3.0.1"])
+    c = claim("c", ["10.3.0.0/16"], hops=["10.1.0.1"])
+    assert claims.first_hop_loop(a, [b, c]) == ["a", "b", "c", "a"]
+    assert claims.first_hop_loop(a, [b]) is None
+
+
 @pytest.fixture
 def state_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(const, "STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(claims, "STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(claims, "CLAIMS_LOCK", str(tmp_path / "claims.lock"))
     return tmp_path
+
+
+def test_take_writes_the_claim_and_refuses_a_conflicting_one(state_dir):
+    alive = {1, 2}.__contains__
+    assert claims.take(0, dict(claim("corp", ["10.0.0.0/8"]), pid=1), alive) is None
+    path = state_dir / "0" / "claim.json"
+    assert json.loads(path.read_text())["id"] == "corp"
+    assert oct(path.stat().st_mode & 0o777) == "0o600"
+    why = claims.take(1, dict(claim("lab", ["10.1.0.0/16"]), pid=2), alive)
+    assert why.startswith("subnets overlap with the active profile corp")
+    assert not (state_dir / "1" / "claim.json").exists()
+
+
+def test_a_dead_instances_claim_does_not_count(state_dir):
+    claims.take(0, dict(claim("corp", ["10.0.0.0/8"]), pid=1), lambda pid: True)
+    assert claims.take(1, dict(claim("lab", ["10.1.0.0/16"]), pid=2),
+                       lambda pid: pid != 1) is None
+
+
+def test_an_instance_may_retake_its_own_slot(state_dir):
+    alive = lambda pid: True          # noqa: E731
+    claims.take(2, dict(claim("corp", ["10.0.0.0/8"]), pid=1), alive)
+    assert claims.take(2, dict(claim("corp", ["10.0.0.0/8"], hops=["1.2.3.4"]), pid=1),
+                       alive) is None
+    assert claims.read_claims(skip=None, alive=alive)[0]["first_hop"] == ["1.2.3.4"]
+
+
+def test_release_removes_the_claim(state_dir):
+    claims.take(0, claim("corp"), lambda pid: True)
+    claims.release(0)
+    claims.release(0)                 # twice is fine
+    assert claims.read_claims(skip=None, alive=lambda pid: True) == []
+
+
+def test_a_broken_claim_file_is_ignored(state_dir):
+    (state_dir / "3").mkdir()
+    (state_dir / "3" / "claim.json").write_text("{")
+    assert claims.read_claims(skip=None, alive=lambda pid: True) == []
+
+
+def test_alive_needs_a_plugin_process():
+    assert not claims._alive(None)
+    assert not claims._alive(os.getpid())     # pytest, not nm-sshuttle-service
 
 
 # --------------------------------------------------------------- dispatcher
@@ -167,6 +288,79 @@ def test_the_supervisor_names_everything_after_its_slot():
     assert [e[1] for e in fx.events if e[0] == "spec"][0]["tmark"] == 0x4e530002
 
 
+def test_the_claim_is_taken_before_anything_is_created():
+    fx, sup = make()
+    bring_up(fx, sup)
+    assert len(fx.claims) == 1
+    c = fx.claims[0]
+    assert c["id"] == "corp" and c["first_hop"] == ["203.0.113.7"]
+    assert c["domains"] == ["corp.example"]
+
+
+def test_a_conflict_fails_the_activation_untouched():
+    fx, sup = make()
+    fx.conflict = "subnets overlap with the active profile lab: 10.50.0.0/16"
+    sup.connect(settings(), NM)
+    fx.first_hop_cbs.pop(0)(["203.0.113.7"], None)
+    names = fx.names()
+    assert "create_link" not in names and "install_guard" not in names
+    assert ("failure", FAIL_CONNECT) in fx.events
+    assert ("state", ST_STOPPED) in fx.events
+
+
+def test_a_claim_error_is_a_failure():
+    fx, sup = make()
+    fx.take_claim = lambda c: (_ for _ in ()).throw(OSError("read-only"))
+    sup.connect(settings(), NM)
+    fx.first_hop_cbs.pop(0)(["203.0.113.7"], None)
+    assert ("failure", FAIL_CONNECT) in fx.events and "create_link" not in fx.names()
+
+
+def test_the_claim_is_released_once_stopped():
+    fx, sup = make()
+    bring_up(fx, sup)
+    sup.disconnect()
+    assert fx.released == 1
+    fx.advance(120)
+    assert fx.released == 1
+
+
+def test_no_release_without_a_claim():
+    fx, sup = make()
+    fx.conflict = "x"
+    sup.connect(settings(), NM)
+    fx.first_hop_cbs.pop(0)(["203.0.113.7"], None)
+    assert fx.released == 0
+
+
+def test_a_new_first_hop_is_claimed_again_and_a_loop_gives_up():
+    fx, sup = make()
+    sup.on_network(True, CONN_FULL, ("wifi-1", ("192.168.1.20/24",), "192.168.1.1"))
+    bring_up(fx, sup)
+    sup.on_network(True, CONN_FULL, ("wifi-2", ("10.20.0.7/16",), "10.20.0.1"))
+    sup.on_ac_state(AC, AC_ACTIVATING, 6)
+    fx.advance(0)
+    fx.finish_stops()
+    fx.conflict = "the first hops would run in a loop: corp -> lab -> corp"
+    fx.clear()
+    fx.first_hop_cbs.pop(0)(["10.9.9.9"], None)
+    assert "install_guard" not in fx.names() and "start_tunnel" not in fx.names()
+    assert ("failure", FAIL_CONNECT) in fx.events
+
+
+def test_a_new_first_hop_that_fits_is_claimed():
+    fx, sup = make()
+    sup.on_network(True, CONN_FULL, ("wifi-1", ("192.168.1.20/24",), "192.168.1.1"))
+    bring_up(fx, sup)
+    sup.on_network(True, CONN_FULL, ("wifi-2", ("10.20.0.7/16",), "10.20.0.1"))
+    sup.on_ac_state(AC, AC_ACTIVATING, 6)
+    fx.advance(0)
+    fx.finish_stops()
+    fx.first_hop_cbs.pop(0)(["198.51.100.200"], None)
+    assert [c["first_hop"] for c in fx.claims] == [["203.0.113.7"], ["198.51.100.200"]]
+    assert "start_tunnel" in fx.names()
+
+
 def test_one_activation_exits_after_the_teardown():
     fx, sup = make()
     sup.one_activation = True
@@ -189,6 +383,7 @@ def test_the_fixed_name_stays_for_the_idle_window():
 def host(monkeypatch, tmp_path):
     """Record what cleanup does; plugin units in `running` are active."""
     monkeypatch.setattr(const, "STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(claims, "STATE_DIR", str(tmp_path))
     rec = SimpleNamespace(stopped=[], removed=[], routing=[], running=set(), swept=0)
 
     def systemctl(*args, timeout=30):
@@ -214,11 +409,13 @@ def host(monkeypatch, tmp_path):
 def test_cleanup_of_one_slot_touches_only_that_slot(host, tmp_path):
     (tmp_path / "2").mkdir()
     (tmp_path / "2" / "tunnel.json").write_text("{}")
+    (tmp_path / "2" / "claim.json").write_text("{}")
     assert cli.main(["cleanup", "--slot", "2"]) == 0
     assert host.stopped == ["nm-sshuttle-tunnel@2.service"]
     assert host.removed == ["nmss2", "nm-sshuttle-guard-2"]
     assert host.routing == [2] and host.swept == 1
     assert not (tmp_path / "2" / "tunnel.json").exists()
+    assert not (tmp_path / "2" / "claim.json").exists()
 
 
 def test_cleanup_all_skips_running_slots_and_takes_the_v1_names(host):
@@ -246,3 +443,37 @@ def test_cleanup_refuses_a_bad_slot(host):
         cli.main(["cleanup", "--slot", "1", "--all"])
 
 
+@pytest.fixture
+def dennis(monkeypatch):
+    pw = SimpleNamespace(pw_uid=1000, pw_gid=1000, pw_name="dennis")
+    monkeypatch.setattr(cli.pwd, "getpwnam", lambda n: pw if n == "dennis" else 1 / 0)
+    monkeypatch.setattr(cli.pwd, "getpwuid", lambda uid: pw)
+
+
+def run_ok(argv):
+    return SimpleNamespace(returncode=0)
+
+
+def test_check_fails_on_a_conflict_with_an_active_profile(dennis, capsys):
+    nmcli = Nmcli({"u1": conn(), "u2": conn("lab", **{
+        "vpn.data": "remote = lab, local-user = dennis, subnets = 10.0.0.0/16"})},
+        active={"u2"})
+    assert cli.check(argparse.Namespace(name="corp"), nmcli, ssh_g_ok, run_ok) == 1
+    out = capsys.readouterr().out
+    assert "FAIL subnets overlap with the active profile lab: 10.0.0.0/16" in out
+
+
+def test_check_ignores_the_profile_itself_and_others_that_fit(dennis, capsys):
+    nmcli = Nmcli({"u1": conn(), "u2": conn("lab", **{
+        "vpn.data": "remote = lab, local-user = dennis, subnets = 192.168.7.0/24"})},
+        active={"u1", "u2"})
+    assert cli.check(argparse.Namespace(name="corp"), nmcli, ssh_g_ok, run_ok) == 0
+    assert "FAIL" not in capsys.readouterr().out
+
+
+def test_list_marks_active_profiles():
+    nmcli = Nmcli({"u1": conn(), "u2": conn("lab")}, active={"u2"})
+    lines = []
+    cli.list_profiles(nmcli, lines.append)
+    assert lines[0].split("\t")[0] == "corp" and not lines[0].endswith("\tactive")
+    assert lines[1].startswith("lab\t") and lines[1].endswith("\tactive")

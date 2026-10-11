@@ -50,6 +50,7 @@ SSH_CONFIG = os.environ.get("NM_SSHUTTLE_SSH_CONFIG", "/run/nm-sshuttle-ssh/ssh_
 # NM versions on which the nbns reconnect never completed (design §4.4); global,
 # instances append to it
 INVISIBLE_MARK = os.path.join(STATE_DIR, "invisible-reconnect")
+CLAIMS_LOCK = os.path.join(STATE_DIR, "claims.lock")
 
 # What a single-tunnel version created; cleanup --all removes it after an upgrade.
 V1_PLUGIN_UNIT = "nm-sshuttle.service"
@@ -94,6 +95,10 @@ class Slot:
     @property
     def bus_name_file(self):
         return os.path.join(self.dir, "bus-name")
+
+    @property
+    def claim(self):
+        return os.path.join(self.dir, "claim.json")
 
     @property
     def tproxy_mark(self):

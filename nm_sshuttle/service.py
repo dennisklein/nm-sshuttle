@@ -25,7 +25,7 @@ gi.require_version("Gio", "2.0")
 gi.require_version("GLib", "2.0")
 from gi.repository import Gio, GLib  # noqa: E402
 
-from . import guard, tunnel, watch  # noqa: E402
+from . import claims, guard, tunnel, watch  # noqa: E402
 from .const import (BUS_NAME, INVISIBLE_MARK, LIBEXEC, LOGIN_MANAGER_IFACE,  # noqa: E402
                     LOGIN_NAME, LOGIN_PATH, NM_AC_IFACE, NM_DEVICE_IFACE, NM_NAME, NM_PATH,
                     PLUGIN_IFACE, PLUGIN_PATH, STATE_DIR, SYSTEMD_MANAGER_IFACE, SYSTEMD_NAME,
@@ -535,6 +535,12 @@ class Service:
 
     def policy_routing_present(self, families):
         return guard.policy_routing_present(families, self.slot.n)
+
+    def take_claim(self, claim):
+        return claims.take(self.slot.n, dict(claim, pid=os.getpid()))
+
+    def release_claim(self):
+        claims.release(self.slot.n)
 
     def iptables_available(self):
         return tunnel.iptables_available()
