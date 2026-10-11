@@ -11,11 +11,14 @@ not an option.
 
 ## Status
 
-**M3, usable, in progress.** The plugin runs its whole lifecycle (M2):
+**M3, usable, done.** The plugin runs its whole lifecycle (M2):
 reconnects with backoff, suspend, roaming, captive portals, a health check,
-the lock screen and the fail-closed guard. The profile commands and RPM and
-deb packages exist. The [user guide](docs/user-guide.md) covers installing,
-creating a profile and troubleshooting.
+the lock screen and the fail-closed guard. The profile commands are on PATH,
+RPM packages (Fedora 43, 44) and deb packages (Debian 13, Ubuntu 26.04) are
+built in CI, and the VM tests run in CI too. The
+[user guide](docs/user-guide.md) covers installing, creating a profile and
+troubleshooting. Still open from M2 are the checks CI cannot run: suspend,
+GNOME by hand, and DNS without systemd-resolved (design §7).
 
 ```console
 $ nm-sshuttle add corp --remote corp --subnets 10.0.0.0/8 \
