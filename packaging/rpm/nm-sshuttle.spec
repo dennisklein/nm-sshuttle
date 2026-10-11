@@ -82,5 +82,5 @@ fi
 %{_unitdir}/nm-sshuttle-tunnel@.service
 
 %changelog
-* Sat Oct 10 2026 Dennis Klein <ilmt2000@googlemail.com> - 0.1.0-1
+* Sat Oct 10 2026 Dennis Klein <d.klein@gsi.de> - 0.1.0-1
 - Initial package

@@ -1,7 +1,7 @@
 Source: nm-sshuttle
 Section: net
 Priority: optional
-Maintainer: Dennis Klein <ilmt2000@googlemail.com>
+Maintainer: Dennis Klein <d.klein@gsi.de>
 Build-Depends:
  debhelper-compat (= 13),
  dh-python,
