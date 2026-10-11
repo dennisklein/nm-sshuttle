@@ -11,9 +11,9 @@ import pwd
 import re
 from dataclasses import dataclass, field
 
-REMOTE_RE = re.compile(r"^[A-Za-z0-9._@:%\[\]-]+$")
-DOMAIN_RE = re.compile(r"^~?(\.|[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.?)$")
-USER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")   # also keeps it one word for sshuttle -e
+REMOTE_RE = re.compile(r"[A-Za-z0-9._@:%\[\]-]+")
+DOMAIN_RE = re.compile(r"~?(\.|[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.?)")
+USER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*")   # also keeps it one word for sshuttle -e
 KNOWN_KEYS = {"remote", "local-user", "subnets", "exclude", "dns", "dns-servers",
               "dns-domains", "method", "gateway", "probe", "fail-closed"}
 
@@ -135,11 +135,11 @@ def parse(settings, getpwnam=pwd.getpwnam):
     data = s_vpn.get("data", {})
 
     remote = data.get("remote", "")
-    if not REMOTE_RE.match(remote) or remote.startswith("-"):
+    if not REMOTE_RE.fullmatch(remote) or remote.startswith("-"):
         raise ProfileError(f"remote: {remote!r} is not a valid ssh destination")
 
     user = data.get("local-user", "")
-    if not USER_RE.match(user):
+    if not USER_RE.fullmatch(user):
         raise ProfileError(f"local-user: {user!r} is not a plain user name")
     try:
         pw = getpwnam(user)
@@ -168,7 +168,7 @@ def parse(settings, getpwnam=pwd.getpwnam):
     servers = [_ipv4("dns-servers", s) for s in _split(data.get("dns-servers"))]
     domains = _split(data.get("dns-domains"))
     for d in domains:
-        if not DOMAIN_RE.match(d):
+        if not DOMAIN_RE.fullmatch(d):
             raise ProfileError(f"dns-domains: {d!r} is not a domain")
     if dns != "none" and not servers:
         raise ProfileError(f"dns-servers is required for dns={dns}")

@@ -34,9 +34,11 @@
     {"name": "remote that looks like an option", "data": {"remote": "-oProxyCommand=x"}, "error": "remote"},
     {"name": "remote with a shell command", "data": {"remote": "corp; rm -rf /"}, "error": "remote"},
     {"name": "remote with a space", "data": {"remote": "corp example"}, "error": "remote"},
+    {"name": "remote with a trailing newline", "data": {"remote": "corp\n"}, "error": "remote"},
 
     {"name": "local user with a space", "data": {"local-user": "alice x"}, "error": "local-user"},
     {"name": "local user that looks like an option", "data": {"local-user": "-alice"}, "error": "local-user"},
+    {"name": "local user with a trailing newline", "data": {"local-user": "alice\n"}, "error": "local-user"},
     {"name": "local user that is empty", "data": {"local-user": ""}, "error": "local-user"},
     {"name": "local user that does not exist", "data": {"local-user": "mallory"}, "error": "local-user", "plugin_only": true},
     {"name": "local user that is root", "data": {"local-user": "root"}, "error": "local-user", "plugin_only": true},
