@@ -142,6 +142,6 @@ display (`test-vm/vm.sh viewer`), and create the profile as in
 The editor needs a real GNOME session; the protocol for it, which also covers
 building the packages, is [gnome-editor-protocol.md](gnome-editor-protocol.md).
 It runs on a laptop, or in this VM with `vm.sh up --gnome` and the VNC display.
-The VM's preparation installs the packages that build the editor (`gcc`,
-`gtk4-devel`, `libnm-devel`, `json-glib-devel`), and `vm.sh run` installs it
+The VM's preparation installs what builds the editor (`gcc` and the
+`pkgconfig(...)` names the RPM spec lists), and `vm.sh run` installs it
 with the plugin.
