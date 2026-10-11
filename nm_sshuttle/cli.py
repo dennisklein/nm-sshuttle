@@ -1,13 +1,17 @@
 # SPDX-License-Identifier: MIT
 """nm-sshuttle: the commands the units and the plugin run.
 
-  cleanup        stop the tunnel unit, remove nmss0, the guard, the tproxy
-                 policy routing and stale sshuttle tables and chains
-                 (ExecStopPost of nm-sshuttle.service, and the plugin's
-                 startup cleanup)
+  cleanup --slot N
+                 stop slot N's tunnel unit, remove its link, guard, tproxy
+                 policy routing and files, and stale sshuttle tables and
+                 chains (ExecStopPost of nm-sshuttle@N.service, and the
+                 plugin's startup cleanup)
+  cleanup [--all]
+                 the same for every slot whose plugin is not running, and
+                 what a single-tunnel version left behind
   sweep          remove stale sshuttle tables and chains (the tunnel unit's
                  ExecStartPre and ExecStopPost)
-  exec-tunnel    ExecStart of the tunnel unit
+  exec-tunnel N  ExecStart of the tunnel unit nm-sshuttle-tunnel@N
   ssh-as-user    sshuttle's ssh command
   first-hop      print the first hop's addresses, one per line, worked out as
                  the user
@@ -27,7 +31,8 @@ import subprocess
 import sys
 
 from . import guard, profile, tunnel
-from .const import GUARD_TABLE, LINK, SERVICE_TYPE, TUNNEL_SPEC, TUNNEL_UNIT
+from .const import (SERVICE_TYPE, SLOTS, V1_GUARD_TABLE, V1_PLUGIN_UNIT, V1_TUNNEL_SPEC,
+                    V1_TUNNEL_UNIT, Slot, slot_number)
 
 log = logging.getLogger("nm-sshuttle")
 
@@ -40,33 +45,71 @@ def systemctl(*args, timeout=30):
         return subprocess.CompletedProcess(args, 255, "", str(e))
 
 
-def cleanup():
-    """Remove everything an activation leaves behind (design §4.4, §4.7).
-
-    Safe at any time no activation runs in a live plugin: after a kill NM has
-    already disconnected the VPN, because it does so whenever the plugin's
-    bus name vanishes."""
-    ok = True
-    # Always stop it: "is-active" is false for a unit that is still starting,
-    # and stop does nothing for an inactive one.
-    p = systemctl("stop", TUNNEL_UNIT)
-    if p.returncode:
-        log.warning("cannot stop %s: %s", TUNNEL_UNIT, p.stderr.strip())
-        ok = False
-    if guard.link_ifindex() is not None:
-        log.info("removing a leftover %s", LINK)
-        ok &= guard.remove_link()
-    if guard.guard_present():
-        log.info("removing a leftover guard table %s", GUARD_TABLE)
-        ok &= guard.remove_guard()
-    ok &= guard.remove_policy_routing()
-    tunnel.sweep()
+def _remove(path):
     try:
-        os.remove(TUNNEL_SPEC)
+        os.remove(path)
     except FileNotFoundError:
         pass
     except OSError as e:
-        log.warning("cannot remove %s: %s", TUNNEL_SPEC, e)
+        log.warning("cannot remove %s: %s", path, e)
+
+
+def _stop(unit):
+    # Always stop it: "is-active" is false for a unit that is still starting,
+    # and stop does nothing for an inactive one.
+    p = systemctl("stop", unit)
+    if p.returncode:
+        log.warning("cannot stop %s: %s", unit, p.stderr.strip())
+        return False
+    return True
+
+
+def cleanup_slot(n):
+    """Remove everything slot n's activation leaves behind (design §4.4, §4.7)."""
+    slot = Slot(n)
+    ok = _stop(slot.tunnel_unit)
+    if guard.link_ifindex(slot.link) is not None:
+        log.info("removing a leftover %s", slot.link)
+        ok &= guard.remove_link(slot.link)
+    if guard.guard_present(slot.guard_table):
+        log.info("removing a leftover guard table %s", slot.guard_table)
+        ok &= guard.remove_guard(slot.guard_table)
+    ok &= guard.remove_policy_routing(n)
+    _remove(slot.spec)
+    return ok
+
+
+def cleanup_v1():
+    """What a single-tunnel version created, unless its plugin still runs."""
+    ok = _stop(V1_TUNNEL_UNIT)
+    if guard.guard_present(V1_GUARD_TABLE):
+        log.info("removing a leftover guard table %s", V1_GUARD_TABLE)
+        ok &= guard.remove_guard(V1_GUARD_TABLE)
+    _remove(V1_TUNNEL_SPEC)
+    return ok
+
+
+def unit_running(unit):
+    return systemctl("is-active", "--quiet", unit).returncode == 0
+
+
+def cleanup(slot=None):
+    """Remove what an activation leaves behind: slot's, or with slot None every
+    slot whose plugin is not running, and a single-tunnel version's names.
+
+    Safe at any time no activation runs in that slot's live plugin: after a
+    kill NM has already disconnected the VPN, because it does so whenever the
+    plugin's bus name vanishes."""
+    if slot is not None:
+        ok = cleanup_slot(slot)
+    else:
+        ok = True
+        for n in range(SLOTS):
+            if not unit_running(Slot(n).plugin_unit):
+                ok &= cleanup_slot(n)
+        if not unit_running(V1_PLUGIN_UNIT):
+            ok &= cleanup_v1()
+    tunnel.sweep()
     return 0 if ok else 1
 
 
@@ -97,8 +140,8 @@ def post_install():
               "configuration", file=sys.stderr)
         return 0
     if active:
-        print("nm-sshuttle: a VPN is active; the unmanaged setting for nmss0 takes effect "
-              "at NetworkManager's next start", file=sys.stderr)
+        print("nm-sshuttle: a VPN is active; the unmanaged setting for the nmss links takes "
+              "effect at NetworkManager's next start", file=sys.stderr)
         return 0
     p = subprocess.run(["nmcli", "general", "reload", "conf"], capture_output=True, text=True)
     if p.returncode:
@@ -289,9 +332,13 @@ def main(argv=None):
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
     parser = argparse.ArgumentParser(prog="nm-sshuttle")
     sub = parser.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("cleanup")
+    cl = sub.add_parser("cleanup")
+    which = cl.add_mutually_exclusive_group()
+    which.add_argument("--slot", type=slot_number)
+    which.add_argument("--all", action="store_true")
     sub.add_parser("sweep")
-    sub.add_parser("exec-tunnel")
+    et = sub.add_parser("exec-tunnel")
+    et.add_argument("slot", type=slot_number, nargs="?")
     sub.add_parser("post-install")
     fh = sub.add_parser("first-hop")
     fh.add_argument("user")
@@ -321,12 +368,12 @@ def main(argv=None):
             print(f"nm-sshuttle: {e}", file=sys.stderr)
             return 1
     if args.cmd == "cleanup":
-        return cleanup()
+        return cleanup(args.slot)
     if args.cmd == "sweep":
         tunnel.sweep()
         return 0
     if args.cmd == "exec-tunnel":
-        return tunnel.exec_tunnel()
+        return tunnel.exec_tunnel(args.slot)
     if args.cmd == "post-install":
         return post_install()
     if args.cmd == "first-hop":

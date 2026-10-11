@@ -29,7 +29,7 @@ from . import guard, tunnel, watch  # noqa: E402
 from .const import (BUS_NAME, INVISIBLE_MARK, LIBEXEC, LOGIN_MANAGER_IFACE,  # noqa: E402
                     LOGIN_NAME, LOGIN_PATH, NM_AC_IFACE, NM_DEVICE_IFACE, NM_NAME, NM_PATH,
                     PLUGIN_IFACE, PLUGIN_PATH, STATE_DIR, SYSTEMD_MANAGER_IFACE, SYSTEMD_NAME,
-                    SYSTEMD_PATH, SYSTEMD_UNIT_IFACE, TUNNEL_SPEC, TUNNEL_UNIT)
+                    SYSTEMD_PATH, SYSTEMD_UNIT_IFACE, Slot, slot_number)
 from .supervisor import Supervisor  # noqa: E402
 
 # GLib.unix_signal_add and DBusConnection.register_object are deprecated in
@@ -137,16 +137,33 @@ def unit_object_path(unit):
     return f"{SYSTEMD_PATH}/unit/{''.join(out)}"
 
 
+def sd_notify(text):
+    """Tell systemd (Type=notify) without libsystemd; a no-op outside a unit."""
+    path = os.environ.get("NOTIFY_SOCKET")
+    if not path:
+        return
+    if path.startswith("@"):
+        path = "\0" + path[1:]
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM | socket.SOCK_CLOEXEC) as s:
+            s.connect(path)
+            s.sendall(text.encode())
+    except OSError as e:
+        log.warning("cannot notify systemd: %s", e)
+
+
 class Service:
     """Owns the bus name, dispatches VPN.Plugin calls and implements Effects."""
 
-    def __init__(self, conn, loop):
+    def __init__(self, conn, loop, slot=0, one_activation=False):
         self.conn = conn
         self.loop = loop
-        self.sup = Supervisor(self)
+        self.slot = Slot(slot)
+        self.tunnel_unit = self.slot.tunnel_unit
+        self.sup = Supervisor(self, one_activation=one_activation)
         self.jobs = {}            # systemd job path -> callback(result)
         self.finished_jobs = {}   # JobRemoved that arrived before StartUnit's reply
-        self.unit_path = unit_object_path(TUNNEL_UNIT)
+        self.unit_path = unit_object_path(self.tunnel_unit)
         self.node = Gio.DBusNodeInfo.new_for_xml(INTROSPECTION)
         self.network = watch.NetworkWatcher(conn, self._call, self.sup.on_network,
                                             self.sup.on_nm_version)
@@ -186,6 +203,7 @@ class Service:
 
     def on_name_acquired(self, conn, name):
         log.info("owns %s", name)
+        sd_notify("READY=1")
 
     def on_name_lost(self, conn, name):
         self.sup.on_name_lost()
@@ -197,6 +215,10 @@ class Service:
 
     def on_nm_vanished(self, conn, name):
         self.network.forget()
+        if self.sup.one_activation:
+            # A restarted NM counts its connections from the start again: its
+            # first activation may want this very name (docs/later/multiple-tunnels.md).
+            self._release_name()
         self.sup.on_nm_owner(None)
 
     def on_term(self):
@@ -373,14 +395,14 @@ class Service:
         cb = self.jobs.pop(job, None)
         if cb:
             cb(result)
-        elif unit == TUNNEL_UNIT:
+        elif unit == self.tunnel_unit:
             self.finished_jobs[job] = result
 
     def on_unit_changed(self, conn, sender, path, iface, signal_name, params):
         changed_iface, changed, _ = params.unpack()
         if changed_iface == SYSTEMD_UNIT_IFACE and "ActiveState" in changed:
             state = changed["ActiveState"]
-            log.info("%s is %s", TUNNEL_UNIT, state)
+            log.info("%s is %s", self.tunnel_unit, state)
             if state in ("inactive", "failed"):
                 self.sup.on_tunnel_inactive()
 
@@ -396,7 +418,7 @@ class Service:
             else:
                 self.jobs[job] = lambda result: done(result, None)
         self._call(SYSTEMD_NAME, SYSTEMD_PATH, SYSTEMD_MANAGER_IFACE, method,
-                   GLib.Variant("(ss)", (TUNNEL_UNIT, "replace")), "(o)", queued)
+                   GLib.Variant("(ss)", (self.tunnel_unit, "replace")), "(o)", queued)
 
     def start_tunnel(self, done):
         def started(result, err):
@@ -410,12 +432,12 @@ class Service:
         def reset(_r, _err):
             self._job("StartUnit", started)
         self._call(SYSTEMD_NAME, SYSTEMD_PATH, SYSTEMD_MANAGER_IFACE, "ResetFailedUnit",
-                   GLib.Variant("(s)", (TUNNEL_UNIT,)), None, reset)
+                   GLib.Variant("(s)", (self.tunnel_unit,)), None, reset)
 
     def stop_tunnel(self, done):
         def stopped(result, err):
             if err and "not loaded" not in err:
-                log.warning("stopping %s: %s", TUNNEL_UNIT, err)
+                log.warning("stopping %s: %s", self.tunnel_unit, err)
             done()
         self._job("StopUnit", stopped)
 
@@ -486,32 +508,33 @@ class Service:
             if not ok:
                 log.warning("startup cleanup failed")
             done()
-        self._spawn([os.path.join(LIBEXEC, "nm-sshuttle"), "cleanup"], 60, finished)
+        self._spawn([os.path.join(LIBEXEC, "nm-sshuttle"), "cleanup", "--slot", str(self.slot.n)],
+                    60, finished)
 
     # ------------------------------------------------------- link and guard
     def link_ifindex(self):
-        return guard.link_ifindex()
+        return guard.link_ifindex(self.slot.link)
 
     def create_link(self):
-        return guard.create_link()
+        return guard.create_link(self.slot.link)
 
     def remove_link(self):
-        guard.remove_link()
+        guard.remove_link(self.slot.link)
 
     def install_guard(self, networks, exclude, mark=None):
-        guard.install_guard(networks, exclude, mark)
+        guard.install_guard(self.slot.guard_table, networks, exclude, mark)
 
     def remove_guard(self):
-        guard.remove_guard()
+        guard.remove_guard(self.slot.guard_table)
 
     def install_policy_routing(self, families):
-        guard.install_policy_routing(families)
+        guard.install_policy_routing(families, self.slot.n)
 
     def remove_policy_routing(self):
-        guard.remove_policy_routing()
+        guard.remove_policy_routing(self.slot.n)
 
     def policy_routing_present(self, families):
-        return guard.policy_routing_present(families)
+        return guard.policy_routing_present(families, self.slot.n)
 
     def iptables_available(self):
         return tunnel.iptables_available()
@@ -520,7 +543,9 @@ class Service:
         tunnel.sweep()
 
     def nft_health(self, method="nft"):
-        return tunnel.nft_health(method)
+        # Only this tunnel's own listeners count, never another tunnel's.
+        return tunnel.nft_health(method, self.slot.guard_table,
+                                 tunnel.unit_ports(self.tunnel_unit))
 
     def ipv6_available(self):
         return tunnel.ipv6_available()
@@ -570,12 +595,12 @@ class Service:
         client.connect_to_host_async(target, port, cancel, connected)
 
     def write_tunnel_spec(self, spec):
-        os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
-        tmp = TUNNEL_SPEC + ".tmp"
+        os.makedirs(self.slot.dir, mode=0o700, exist_ok=True)
+        tmp = self.slot.spec + ".tmp"
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as f:
             json.dump(spec, f)
-        os.replace(tmp, TUNNEL_SPEC)
+        os.replace(tmp, self.slot.spec)
 
     # ----------------------------------------------------------------- loop
     def now(self):
@@ -596,13 +621,16 @@ class Service:
         except GLib.Error as e:
             log.warning("D-Bus flush failed: %s", e.message)
 
-    def quit(self):
-        # Release the name before the loop ends, so that NM's next call starts a
-        # new instance instead of going to a process that is leaving.
+    def _release_name(self):
         if getattr(self, "name_id", 0):
             Gio.bus_unown_name(self.name_id)
             self.name_id = 0
             self.flush()
+
+    def quit(self):
+        # Release the name before the loop ends, so that NM's next call starts a
+        # new instance instead of going to a process that is leaving.
+        self._release_name()
         self.loop.quit()
 
 
@@ -616,19 +644,39 @@ def connect_bus():
         | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION, None, None)
 
 
+def read_bus_name(slot):
+    """The name the dispatcher handed this slot (docs/later/multiple-tunnels.md)."""
+    with open(Slot(slot).bus_name_file) as f:
+        return f.read().strip()
+
+
 def main(argv=None):
+    """nm-sshuttle-service --slot N: the instance nm-sshuttle@N.service runs,
+    under the bus name the dispatcher wrote for it. --bus-name NAME overrides
+    it (development and tests)."""
     argv = sys.argv[1:] if argv is None else argv
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
-    bus_name = BUS_NAME
+    slot = slot_number(argv[argv.index("--slot") + 1]) if "--slot" in argv else 0
     if "--bus-name" in argv:
         bus_name = argv[argv.index("--bus-name") + 1]
+    elif "--slot" in argv:
+        try:
+            bus_name = read_bus_name(slot)
+        except OSError as e:
+            # Started by hand, not by the dispatcher
+            log.warning("no bus name for slot %d (%s); using %s", slot, e, BUS_NAME)
+            bus_name = BUS_NAME
+    else:
+        bus_name = BUS_NAME
     os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
     if os.environ.get("NM_SSHUTTLE_PARK_GAP") == "1":
         log.info("candidate: parking NM in ip-config-get during gaps (NM_SSHUTTLE_PARK_GAP)")
         Supervisor.PARK_GAP = True
-    log.info("starting (pid %d)", os.getpid())
+    log.info("starting (pid %d) in slot %d as %s", os.getpid(), slot, bus_name)
     loop = GLib.MainLoop()
-    service = Service(connect_bus(), loop)
+    # Under NM's fixed name, NM reuses a running plugin (R5c): keep v1's idle
+    # window. A per-activation name serves one activation.
+    service = Service(connect_bus(), loop, slot, one_activation=bus_name != BUS_NAME)
     service.run(bus_name)
     loop.run()
     log.info("exited")

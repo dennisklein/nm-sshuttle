@@ -34,7 +34,7 @@ JUMP_IP6=2001:db8:51::1
 HOST_IP6=2001:db8:51::2
 INTERNAL_IP6=2001:db8:99::10
 TUNNEL_LINK=nmss0     # stands in for the per-tunnel dummy link
-GUARD_TABLE=nm-sshuttle-guard
+GUARD_TABLE=nm-sshuttle-guard-0     # slot 0 (docs/later/multiple-tunnels.md)
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 # T11-T13 need IPv6 in the kernel.
 HAVE_IPV6=no
@@ -82,7 +82,7 @@ teardown() {
     nft delete table inet "$GUARD_TABLE" 2>/dev/null
     nft delete table inet nmss-lab-count 2>/dev/null
     plugin 'from nm_sshuttle import guard, tunnel
-tunnel.sweep(); guard.remove_policy_routing()' 2>/dev/null
+tunnel.sweep(); guard.remove_policy_routing(0)' 2>/dev/null
     ip route del 10.99.0.0/24 via $JUMP_IP 2>/dev/null
     pkill -f "$WORK/udp_echo.py" 2>/dev/null
     [ -f "$WORK/sshd.pid" ] && kill "$(cat "$WORK/sshd.pid")" 2>/dev/null
@@ -537,8 +537,8 @@ table inet nmss-lab-count {
 }
 EOF
     plugin "from nm_sshuttle import guard
-guard.install_guard(['10.99.0.0/24'], ['$JUMP_IP'], $TMARK)
-guard.install_policy_routing([4])"
+guard.install_guard('$GUARD_TABLE', ['10.99.0.0/24'], ['$JUMP_IP'], $TMARK)
+guard.install_policy_routing([4], 0)"
     : > "$WORK/dns.log"
 
     echo "== T15 DNS through method=tproxy, pinned to the tunnel link"
@@ -580,7 +580,7 @@ guard.install_policy_routing([4])"
     check "T18d the sweep removes them" test "$(mangle_chains)" = 0
     check "T18e the plugin's rule and route stay" \
         plugin 'import sys; from nm_sshuttle import guard
-sys.exit(not guard.policy_routing_present([4]))'
+sys.exit(not guard.policy_routing_present([4], 0))'
 
     echo "== T19 a UDP flow silent for 40 s"
     PID=$(start_tproxy "$WORK/t19.log")
@@ -593,7 +593,7 @@ ECHO quiet-again from 10.99.0.1"
     wait_exit "$PID" 10
     check "T19b the plugin removes the rule and route by their values" \
         plugin 'import sys; from nm_sshuttle import guard
-sys.exit(not guard.remove_policy_routing())'
+sys.exit(not guard.remove_policy_routing(0))'
     nft delete table inet $GUARD_TABLE
     nft delete table inet nmss-lab-count
     ip route del 10.99.0.0/24 via $JUMP_IP

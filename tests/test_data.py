@@ -14,23 +14,33 @@ def ini(name):
     return cp
 
 
-def test_conf_d_keeps_nmss0_unmanaged_without_replacing_the_list():
+def test_conf_d_keeps_every_link_unmanaged_without_replacing_the_list():
     cp = ini("90-nm-sshuttle.conf")
-    assert dict(cp["keyfile"]) == {"unmanaged-devices+": "interface-name:nmss0"}
+    assert dict(cp["keyfile"]) == {"unmanaged-devices+": "interface-name:nmss*"}
 
 
-def test_plugin_unit_cleans_up_after_any_exit():
-    svc = ini("nm-sshuttle.service.in")["Service"]
-    assert svc["Type"] == "dbus"
-    assert svc["ExecStopPost"].endswith("/nm-sshuttle cleanup")
+def test_plugin_unit_cleans_up_its_slot_after_any_exit():
+    svc = ini("nm-sshuttle@.service.in")["Service"]
+    assert svc["Type"] == "notify"
+    assert svc["ExecStart"].endswith("/nm-sshuttle-service --slot %i")
+    assert svc["ExecStopPost"].endswith("/nm-sshuttle cleanup --slot %i")
     assert svc["Restart"] == "no"
 
 
+def test_only_the_dispatcher_is_bus_activated():
+    act = ini("org.freedesktop.NetworkManager.sshuttle.Dispatcher.service.in")["D-BUS Service"]
+    unit = ini("nm-sshuttle-dispatcher.service.in")["Service"]
+    assert act["Name"] == unit["BusName"] == "org.freedesktop.NetworkManager.sshuttle.Dispatcher"
+    assert act["SystemdService"] == "nm-sshuttle-dispatcher.service"
+    assert unit["Type"] == "dbus"
+
+
 def test_tunnel_unit_is_not_bound_to_the_plugin_unit():
-    cp = ini("nm-sshuttle-tunnel.service.in")
+    cp = ini("nm-sshuttle-tunnel@.service.in")
     for key in ("BindsTo", "PartOf", "After", "Requires"):
         assert key not in cp["Unit"]
     assert cp["Service"]["Type"] == "notify" and cp["Service"]["Restart"] == "no"
+    assert cp["Service"]["ExecStart"].endswith("/nm-sshuttle exec-tunnel %i")
     assert cp["Service"]["ExecStopPost"].endswith("/nm-sshuttle sweep")
 
 
@@ -40,10 +50,11 @@ def test_name_file():
     assert vpn["service"] == "org.freedesktop.NetworkManager.sshuttle"
     assert vpn["program"].endswith("/nm-sshuttle-activate")
     assert vpn["supports-safe-private-file-access"] == "true"
+    assert vpn["supports-multiple-connections"] == "true"
     assert cp["GNOME"]["auth-dialog"].endswith("/nm-sshuttle-auth-dialog")
 
 
 def test_tunnel_unit_outlasts_the_plugins_longest_attempt():
     from nm_sshuttle.supervisor import Supervisor
-    timeout = int(ini("nm-sshuttle-tunnel.service.in")["Service"]["TimeoutStartSec"])
+    timeout = int(ini("nm-sshuttle-tunnel@.service.in")["Service"]["TimeoutStartSec"])
     assert timeout > Supervisor.UNLOCK_START_TIMEOUT > Supervisor.TUNNEL_START_TIMEOUT

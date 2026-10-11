@@ -29,6 +29,7 @@ python.install_sources(
   'nm_sshuttle/__main__.py',
   'nm_sshuttle/cli.py',
   'nm_sshuttle/const.py',
+  'nm_sshuttle/dispatcher.py',
   'nm_sshuttle/guard.py',
   'nm_sshuttle/profile.py',
   'nm_sshuttle/service.py',
@@ -38,7 +39,7 @@ python.install_sources(
   subdir: 'nm_sshuttle',
 )
 
-foreach script : ['nm-sshuttle', 'nm-sshuttle-service']
+foreach script : ['nm-sshuttle', 'nm-sshuttle-service', 'nm-sshuttle-dispatcher']
   configure_file(input: 'data' / script + '.in', output: script, configuration: subst,
                  install: true, install_dir: libexecdir, install_mode: 'rwxr-xr-x')
 endforeach
@@ -54,12 +55,15 @@ configure_file(input: 'data/nm-sshuttle-service.name.in', output: 'nm-sshuttle-s
 install_data('data/90-nm-sshuttle.conf', install_dir: nm_libdir / 'conf.d')
 
 install_data('data/nm-sshuttle.conf', install_dir: datadir / 'dbus-1' / 'system.d')
-configure_file(input: 'data/org.freedesktop.NetworkManager.sshuttle.service.in',
-               output: 'org.freedesktop.NetworkManager.sshuttle.service',
+# Only the dispatcher is D-Bus activated; it starts one plugin instance per
+# activation (docs/later/multiple-tunnels.md).
+configure_file(input: 'data/org.freedesktop.NetworkManager.sshuttle.Dispatcher.service.in',
+               output: 'org.freedesktop.NetworkManager.sshuttle.Dispatcher.service',
                configuration: subst, install: true,
                install_dir: datadir / 'dbus-1' / 'system-services')
 
-foreach unit : ['nm-sshuttle.service', 'nm-sshuttle-tunnel.service']
+foreach unit : ['nm-sshuttle-dispatcher.service', 'nm-sshuttle@.service',
+                'nm-sshuttle-tunnel@.service']
   configure_file(input: 'data' / unit + '.in', output: unit, configuration: subst,
                  install: true, install_dir: systemd_unitdir)
 endforeach

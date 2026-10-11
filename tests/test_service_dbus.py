@@ -36,7 +36,7 @@ IP6_PATH = "/org/freedesktop/NetworkManager/IP6Config/3"
 IP6_IFACE = "org.freedesktop.NetworkManager.IP6Config"
 SESSION_PATH = "/org/freedesktop/login1/session/_32"
 DEV_PATH = "/org/freedesktop/NetworkManager/Devices/5"
-UNIT_PATH = "/org/freedesktop/systemd1/unit/nm_2dsshuttle_2dtunnel_2eservice"
+UNIT_PATH = "/org/freedesktop/systemd1/unit/nm_2dsshuttle_2dtunnel_400_2eservice"
 
 NM_XML = """
 <node>
@@ -263,7 +263,7 @@ class FakeWorld:
         self.set_unit(self.unit_state)
         self.conn.emit_signal(None, "/org/freedesktop/systemd1",
                               "org.freedesktop.systemd1.Manager", "JobRemoved",
-                              GLib.Variant("(uoss)", (jid, job, "nm-sshuttle-tunnel.service",
+                              GLib.Variant("(uoss)", (jid, job, "nm-sshuttle-tunnel@0.service",
                                                       "done")))
         return False
 
@@ -326,24 +326,26 @@ def settings_variant(subnets="10.0.0.0/8"):
 def world(bus, monkeypatch, tmp_path):
     host = {"link": None, "ops": []}
 
-    def create_link(name="nmss0"):
+    def create_link(name):
         host["link"] = 17
         host["ops"].append("create_link")
         return 17
 
-    def remove_link(name="nmss0"):
+    def remove_link(name):
         host["link"] = None
         host["ops"].append("remove_link")
         return True
 
     monkeypatch.setattr(guard, "create_link", create_link)
     monkeypatch.setattr(guard, "remove_link", remove_link)
-    monkeypatch.setattr(guard, "link_ifindex", lambda name="nmss0": host["link"])
-    monkeypatch.setattr(guard, "install_guard", lambda n, e, mark=None: host["ops"].append("guard"))
-    monkeypatch.setattr(guard, "remove_guard", lambda: host["ops"].append("unguard"))
+    monkeypatch.setattr(guard, "link_ifindex", lambda name: host["link"])
+    monkeypatch.setattr(guard, "install_guard",
+                        lambda t, n, e, mark=None: host["ops"].append("guard"))
+    monkeypatch.setattr(guard, "remove_guard", lambda t: host["ops"].append("unguard"))
     monkeypatch.setattr(tunnel, "sweep", lambda: None)
     monkeypatch.setattr(tunnel, "nft_health",
-                        lambda method="nft": {"guard": True, "sshuttle": {4, 6}})
+                        lambda method, table, ports=None: {"guard": True, "sshuttle": {4, 6}})
+    monkeypatch.setattr(tunnel, "unit_ports", lambda unit: None)
     monkeypatch.setattr(tunnel, "ipv6_available", lambda: True)
     monkeypatch.setattr(service.pwd, "getpwnam", fake_getpwnam)
     monkeypatch.setattr(service.Service, "run_cleanup", lambda self, done: done())
