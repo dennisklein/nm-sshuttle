@@ -122,6 +122,12 @@ def nmcli_run(*args):
     return p.stdout
 
 
+def show_field(nmcli, field, uuid):
+    """One field of a connection. `-g` escapes ':' and '\\' as in terse mode, so
+    user:alice reads as user\\:alice; undo that."""
+    return re.sub(r"\\(.)", r"\1", nmcli("-g", field, "connection", "show", uuid).strip())
+
+
 def profile_connections(nmcli=nmcli_run):
     """(uuid, id) of every nm-sshuttle profile."""
     found = []
@@ -129,9 +135,8 @@ def profile_connections(nmcli=nmcli_run):
         uuid, _, kind = line.partition(":")
         if kind != "vpn":
             continue
-        if nmcli("-g", "vpn.service-type", "connection", "show", uuid).strip() == SERVICE_TYPE:
-            found.append((uuid, nmcli("-g", "connection.id", "connection", "show",
-                                      uuid).strip()))
+        if show_field(nmcli, "vpn.service-type", uuid) == SERVICE_TYPE:
+            found.append((uuid, show_field(nmcli, "connection.id", uuid)))
     return found
 
 
@@ -157,7 +162,7 @@ def parse_vpn_data(text):
 def read_settings(uuid, nmcli=nmcli_run):
     """The settings profile.parse reads, from nmcli."""
     def get(field):
-        return nmcli("-g", field, "connection", "show", uuid).strip()
+        return show_field(nmcli, field, uuid)
     perms = [p for p in get("connection.permissions").split(",") if p]
     return {"connection": {"id": get("connection.id"), "uuid": uuid, "permissions": perms},
             "vpn": {"data": parse_vpn_data(get("vpn.data")),
@@ -256,7 +261,7 @@ def check(args, nmcli=nmcli_run, ssh_g=ssh_g_as_self, run=subprocess.run):
 
 def list_profiles(nmcli=nmcli_run, out=print):
     for uuid, name in profile_connections(nmcli):
-        data = parse_vpn_data(nmcli("-g", "vpn.data", "connection", "show", uuid))
+        data = parse_vpn_data(show_field(nmcli, "vpn.data", uuid))
         out(f"{name}\t{data.get('remote', '?')}\t{data.get('subnets', '?')}")
     return 0
 

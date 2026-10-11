@@ -25,8 +25,14 @@ def test_active_sshuttle_vpns():
     assert cli.active_sshuttle_vpns(nmcli) == ["c"]
 
 
+def terse(value):
+    """How `nmcli -g` prints a value: ':' and '\\' escaped."""
+    return value.replace("\\", "\\\\").replace(":", "\\:")
+
+
 class Nmcli:
-    """Records `connection add`/`delete`; answers queries from a table."""
+    """Records `connection add`/`delete`; answers queries from a table, escaped
+    as `nmcli -g` escapes them."""
     def __init__(self, conns=None):
         self.conns, self.calls = conns or {}, []
 
@@ -34,7 +40,7 @@ class Nmcli:
         if args[:3] == ("-g", "UUID,TYPE", "connection"):
             return "".join(f"{u}:vpn\n" for u in self.conns)
         if args[0] == "-g" and args[2:4] == ("connection", "show"):
-            return self.conns[args[4]].get(args[1], "") + "\n"
+            return terse(self.conns[args[4]].get(args[1], "")) + "\n"
         self.calls.append(args)
         return ""
 
@@ -122,6 +128,17 @@ def test_check_passes(dennis, capsys):
     assert ran == [["ssh", "-o", "ConnectTimeout=15", "--", "corp", "true"]]
     out = capsys.readouterr().out
     assert "first hop 192.0.2.7" in out and "WARN" not in out
+
+
+def test_check_reads_escaped_fields(dennis, capsys):
+    data = "remote = corp, local-user = dennis, subnets = 10.0.0.0/8, probe = 10.1.0.22:22"
+    nm = Nmcli({"u1": conn(**{"vpn.data": data})})
+    assert terse("user:dennis") == "user\\:dennis"
+    assert cli.read_settings("u1", nm)["vpn"]["data"]["probe"] == "10.1.0.22:22"
+    def run(argv):
+        return SimpleNamespace(returncode=0)
+    assert cli.check(argparse.Namespace(name="corp"), nm, ssh_g_ok, run) == 0
+    assert "FAIL" not in capsys.readouterr().out
 
 
 def test_check_warns_about_a_profile_from_before_ipv6(dennis, capsys):
