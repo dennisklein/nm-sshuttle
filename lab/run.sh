@@ -13,12 +13,14 @@
 # Where the kernel has IPv6, the same links also carry 2001:db8:51::/64 and
 # 2001:db8:99::/64 (HTTP on ::10). The host has a route to 2001:db8:99::/64
 # through the jump host, so that a leak would actually arrive (T11-T13).
+# T15-T19 (method=tproxy) add the same route for 10.99.0.0/24, and a UDP echo
+# server on 10.99.0.10:7777.
 #
 # Run as root on a disposable VM or container. It creates network
 # namespaces, veth links, nft tables and a local user, and it changes the
 # address of its own veth link. Needs: iproute2 (ip, ss), nft, sshd, ssh,
 # ssh-agent, setpriv, curl, python3 and sshuttle (set SSHUTTLE=/path if it
-# is not on PATH). The kill tests match processes whose first argument is
+# is not on PATH); iptables and ip6tables for T15-T19. The kill tests match processes whose first argument is
 # the sshuttle path, so do not run other sshuttle instances meanwhile.
 set -uo pipefail
 
@@ -47,7 +49,8 @@ WORK=$(mktemp -d /tmp/nmss-lab.XXXXXX)
 # listens here, so with -v that shows in its log as "Error notifying systemd".
 export NOTIFY_SOCKET=$WORK/notify
 chmod 755 "$WORK"
-cp "$LAB_SRC/ssh-as-user" "$LAB_SRC/dns_query.py" "$LAB_SRC/dns_server.py" "$WORK/"
+cp "$LAB_SRC/ssh-as-user" "$LAB_SRC/dns_query.py" "$LAB_SRC/dns_server.py" \
+    "$LAB_SRC/udp_echo.py" "$WORK/"
 chmod 755 "$WORK"/*
 AGENT_SOCK=$WORK/agent/agent.sock
 
@@ -58,6 +61,8 @@ pass() { echo "PASS  $*"; PASS=$((PASS + 1)); }
 fail() { echo "FAIL  $*"; FAIL=$((FAIL + 1)); }
 skip() { echo "SKIP  $*"; SKIP=$((SKIP + 1)); }
 check() { local name=$1; shift; if "$@"; then pass "$name"; else fail "$name"; fi; }
+# Run Python against the plugin's own code in this checkout.
+plugin() { PYTHONPATH=$REPO python3 -c "$1"; }
 
 # PIDs of sshuttle clients and firewall helpers started from $SSHUTTLE
 # ("python3 $SSHUTTLE ..."). Exact match on argv[1], so the shell that runs
@@ -75,6 +80,11 @@ teardown() {
         nft delete table inet "$t"
     done
     nft delete table inet "$GUARD_TABLE" 2>/dev/null
+    nft delete table inet nmss-lab-count 2>/dev/null
+    plugin 'from nm_sshuttle import guard, tunnel
+tunnel.sweep(); guard.remove_policy_routing()' 2>/dev/null
+    ip route del 10.99.0.0/24 via $JUMP_IP 2>/dev/null
+    pkill -f "$WORK/udp_echo.py" 2>/dev/null
     [ -f "$WORK/sshd.pid" ] && kill "$(cat "$WORK/sshd.pid")" 2>/dev/null
     pkill -f "$WORK/dns_server.py" 2>/dev/null
     pkill -f "http.server --bind" 2>/dev/null
@@ -244,6 +254,15 @@ wait_exit() {  # wait_exit PID SECONDS
     local i
     for i in $(seq 1 "$2"); do
         kill -0 "$1" 2>/dev/null || return 0
+        sleep 1
+    done
+    return 1
+}
+
+wait_gone() {  # wait_gone SECONDS: until no client or firewall helper is left
+    local i
+    for i in $(seq 1 "$1"); do
+        [ -z "$(sshuttle_pids)" ] && return 0
         sleep 1
     done
     return 1
@@ -466,8 +485,7 @@ fi
 echo "== T14 IPv6 off on the host"
 [ "$HAVE_IPV6" = yes ] && sysctl -qw net.ipv6.conf.lo.disable_ipv6=1
 plugin_sees_ipv6() {
-    PYTHONPATH=$REPO python3 -c \
-        'import sys; from nm_sshuttle.tunnel import ipv6_available; sys.exit(not ipv6_available())'
+    plugin 'import sys; from nm_sshuttle.tunnel import ipv6_available; sys.exit(not ipv6_available())'
 }
 plugin_finds_ipv6_off() { ! plugin_sees_ipv6; }
 check "T14a the plugin's check finds IPv6 off" plugin_finds_ipv6_off
@@ -481,6 +499,107 @@ check "T14d ... and carries IPv4" test "$(http_code http://10.99.0.10:8080/)" = 
 kill -TERM "$PID"
 wait_exit "$PID" 10
 [ "$HAVE_IPV6" = yes ] && sysctl -qw net.ipv6.conf.lo.disable_ipv6="$LO_IPV6_OFF"
+
+# ------------------------------------------------- method=tproxy (T15-T19)
+# The plugin's own guard (with the mark rules), policy routing and sweep, from
+# this checkout (docs/later/tproxy.md). The host gets a route to the internal
+# network through the jump host, so that a leak would actually arrive, and a
+# counter on the uplink shows whether anything to it left the host.
+TMARK=0x4e530000
+
+start_tproxy() {  # start_tproxy LOG -> prints PID
+    "$SSHUTTLE" -v --disable-ipv6 --method tproxy --tmark $TMARK \
+        -e "$WORK/ssh-as-user $LAB_USER $AGENT_SOCK" -r corp -x $JUMP_IP \
+        --ns-hosts 10.99.0.53 --to-ns 10.99.0.53 10.99.0.0/24 > "$1" 2>&1 &
+    echo $!
+}
+
+udp_echo() {  # udp_echo TEXT [PAUSE] -> the client's output
+    python3 "$WORK/udp_echo.py" send 10.99.0.10 7777 "$@"
+}
+
+mangle_chains() { iptables -w -t mangle -S | grep -c '^-N sshuttle-'; }
+
+uplink_leaks() {  # packets to the internal network that left on the uplink
+    nft list chain inet nmss-lab-count postrouting | grep -o 'packets [0-9]*' | awk '{print $2}'
+}
+
+if command -v iptables > /dev/null && command -v ip6tables > /dev/null; then
+    ip netns exec internal python3 "$WORK/udp_echo.py" serve 10.99.0.10 7777 \
+        > "$WORK/udp.log" 2>&1 &
+    ip route add 10.99.0.0/24 via $JUMP_IP
+    nft -f - <<EOF
+table inet nmss-lab-count {
+    chain postrouting {
+        type filter hook postrouting priority 0; policy accept;
+        oifname "h-j" ip daddr 10.99.0.0/24 counter
+    }
+}
+EOF
+    plugin "from nm_sshuttle import guard
+guard.install_guard(['10.99.0.0/24'], ['$JUMP_IP'], $TMARK)
+guard.install_policy_routing([4])"
+    : > "$WORK/dns.log"
+
+    echo "== T15 DNS through method=tproxy, pinned to the tunnel link"
+    PID=$(start_tproxy "$WORK/t15.log")
+    check "T15a the tproxy tunnel comes up behind the plugin's guard" wait_connected "$WORK/t15.log"
+    check "T15b DNS pinned to the tunnel link (IP_UNICAST_IF) is answered" \
+        test "$(python3 "$WORK/dns_query.py" 10.99.0.53 git.corp.test $TUNNEL_LINK)" = \
+        "ANSWER 10.99.0.10"
+    check "T15c ... by the internal server, asked by the jump host" \
+        grep -q "query from 10.99.0.1: git.corp.test" "$WORK/dns.log"
+
+    echo "== T16 UDP and TCP through the tunnel"
+    check "T16a UDP echo answers, from the jump host" \
+        test "$(udp_echo hello)" = "ECHO hello from 10.99.0.1"
+    check "T16b TCP to the internal host" test "$(http_code http://10.99.0.10:8080/)" = 200
+    check "T16c nothing to the internal network left on the uplink" test "$(uplink_leaks)" = 0
+
+    echo "== T17 tunnel down: UDP and TCP fail locally"
+    kill -TERM "$PID"
+    wait_exit "$PID" 10
+    wait_gone 10  # the firewall helper removes the chains after the client exits
+    check "T17a sshuttle removed its mangle chains" test "$(mangle_chains)" = 0
+    check "T17b UDP refused locally" test "$(udp_echo down)" = "ERROR Operation not permitted"
+    START=$(date +%s%N)
+    CODE=$(http_code http://10.99.0.10:8080/ 4)
+    ELAPSED_MS=$(( ($(date +%s%N) - START) / 1000000 ))
+    check "T17c TCP refused at once (${ELAPSED_MS} ms)" test "$CODE" = 000 -a "$ELAPSED_MS" -lt 1000
+    check "T17d nothing left on the uplink" test "$(uplink_leaks)" = 0
+
+    echo "== T18 SIGKILL leaves the mangle chains; the plugin's sweep removes them"
+    PID=$(start_tproxy "$WORK/t18.log")
+    wait_connected "$WORK/t18.log"
+    sshuttle_pids | xargs -r kill -KILL
+    sleep 1
+    check "T18a stale mangle chains left behind" test "$(mangle_chains)" -gt 0
+    check "T18b UDP gets no answer through them" test "$(udp_echo stale)" != "ECHO stale from 10.99.0.1"
+    check "T18c ... and does not leak" test "$(uplink_leaks)" = 0
+    plugin 'from nm_sshuttle import tunnel; tunnel.sweep()'
+    check "T18d the sweep removes them" test "$(mangle_chains)" = 0
+    check "T18e the plugin's rule and route stay" \
+        plugin 'import sys; from nm_sshuttle import guard
+sys.exit(not guard.policy_routing_present([4]))'
+
+    echo "== T19 a UDP flow silent for 40 s"
+    PID=$(start_tproxy "$WORK/t19.log")
+    wait_connected "$WORK/t19.log"
+    OUT=$(udp_echo quiet 40)
+    check "T19 the flow answers before and after the pause" \
+        test "$OUT" = "ECHO quiet from 10.99.0.1
+ECHO quiet-again from 10.99.0.1"
+    kill -TERM "$PID"
+    wait_exit "$PID" 10
+    check "T19b the plugin removes the rule and route by their values" \
+        plugin 'import sys; from nm_sshuttle import guard
+sys.exit(not guard.remove_policy_routing())'
+    nft delete table inet $GUARD_TABLE
+    nft delete table inet nmss-lab-count
+    ip route del 10.99.0.0/24 via $JUMP_IP
+else
+    skip "T15-T19 need iptables and ip6tables"
+fi
 
 echo
 echo "== $PASS passed, $FAIL failed, $SKIP skipped"
