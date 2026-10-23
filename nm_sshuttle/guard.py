@@ -13,6 +13,7 @@ import subprocess
 from .profile import collapse
 
 from .const import TPROXY_MARK, TPROXY_PRIORITY, TPROXY_TABLE
+from .tunnel import inet_tables
 
 log = logging.getLogger("nm-sshuttle")
 
@@ -124,6 +125,16 @@ def install_guard(table, networks, exclude, mark=None):
 
 def guard_present(table):
     return run(["nft", "list", "table", "inet", table])[0]
+
+
+def guard_listed(table):
+    """Whether the guard table is there, from 'nft list tables'. Unlike
+    guard_present, None when nft cannot be asked, which is not "gone"."""
+    try:
+        p = subprocess.run(["nft", "list", "tables"], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return None if p.returncode else table in inet_tables(p.stdout)
 
 
 def remove_guard(table):

@@ -549,6 +549,9 @@ class Service:
     def remove_guard(self):
         guard.remove_guard(self.slot.guard_table)
 
+    def guard_listed(self):
+        return guard.guard_listed(self.slot.guard_table)
+
     def install_policy_routing(self, families):
         guard.install_policy_routing(families, self.slot.n)
 

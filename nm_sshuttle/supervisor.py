@@ -71,7 +71,8 @@ class Supervisor:
     QUIT_CAP = 5.0             # whatever happens, a stopping process exits by then
     STOP_CAP = 20.0            # tunnel stop not confirmed: carry on regardless
     IDLE_EXIT = 60.0
-    HEALTH_INTERVAL = 10.0     # health checks while up (design §4.4, "Health")
+    HEALTH_INTERVAL = 10.0     # health checks while up (design §4.4, "Health"),
+                               # and guard checks during a gap
     PROBE_TIMEOUT = 5.0        # connect and read the probe's first byte
     PROBE_FAILURES = 2         # in a row, before the tunnel is restarted
     PORTAL_INTERVAL = 60.0     # at most one attempt a minute behind a captive portal
@@ -747,6 +748,7 @@ class Supervisor:
         self.phase = "gap"
         self.escalated = False
         self._tick()
+        self._arm_guard_check()
         if at_once:
             self.attempts = 0
             self.next_at_once = True
@@ -814,6 +816,8 @@ class Supervisor:
 
     def _retry(self):
         if self.phase != "gap" or self._paused():
+            return
+        if not self._check_guard():
             return
         if self.retry_after_stop and self.stops:
             # An at-once attempt must not race the stop of the tunnel it replaces.
@@ -1032,7 +1036,7 @@ class Supervisor:
     def _end_gap(self):
         self.starting_pending = False
         self.starting_sent = False
-        self._cancel("escalate", "deadline", "burst-wait", "starting-wait")
+        self._cancel("escalate", "deadline", "burst-wait", "starting-wait", "guard-check")
         self.phase = "up"
         self.gap_started = None
         self.counting_since = None
@@ -1043,6 +1047,38 @@ class Supervisor:
         self.probe_answered = False     # the probe answers again before its failures count
         self.probe_failures = 0
         self._arm_health()
+
+    # --------------------------------------------------------------- guard
+    def _arm_guard_check(self):
+        self._timer("guard-check", self.HEALTH_INTERVAL, self._guard_tick)
+
+    def _guard_tick(self):
+        """Every 10 s of a gap, paused or not, and of the reconfiguration after
+        it: the health check, which puts the guard back, runs only while up."""
+        if self.phase not in ("gap", "reconfig"):
+            return
+        self._arm_guard_check()
+        self._check_guard()
+
+    def _check_guard(self):
+        """Install the guard again if it is gone (was the ruleset flushed?);
+        False when that failed and the plugin gave up."""
+        if not (self.profile.fail_closed and self.guard_installed):
+            return True
+        if self.fx.guard_listed() is not False:
+            return True         # there, or nft cannot be asked
+        return self._restore_guard("during a reconnect")
+
+    def _restore_guard(self, when):
+        """Install the guard again; False when that failed and the plugin gave up."""
+        log.warning("the guard table is gone %s (was the ruleset flushed?); installing it "
+                    "again", when)
+        try:
+            self._install_guard()
+        except (OSError, RuntimeError) as e:
+            self.give_up(FAIL_CONNECT, f"cannot restore the guard: {e}")
+            return False
+        return True
 
     # --------------------------------------------------------------- health
     def _arm_health(self):
@@ -1059,12 +1095,7 @@ class Supervisor:
         snap = self.fx.nft_health(method)
         if snap is not None:
             if self.profile.fail_closed and not snap["guard"]:
-                log.warning("the guard table is gone (was the ruleset flushed?); installing it "
-                            "again")
-                try:
-                    self._install_guard()
-                except (OSError, RuntimeError) as e:
-                    self.give_up(FAIL_CONNECT, f"cannot restore the guard: {e}")
+                if not self._restore_guard("while up"):
                     return
             missing = self._tunnelled_families() - snap["sshuttle"]
             if method in ("nft", "tproxy") and missing:

@@ -1292,7 +1292,9 @@ Events and what the supervisor does:
     port; with `method=tproxy`, its mark chain in iptables' `mangle` table
     does, for each tunnelled family, and the plugin's rule and route are
     there (put back if not);
-  - the guard table exists (re-install it if something flushed the ruleset);
+  - the guard table exists (re-install it if something flushed the ruleset).
+    A gap and the reconfiguration after it check that too, every 10 s,
+    paused or not, and before each attempt;
   - an `ssh` process runs in the tunnel unit: sshuttle 1.3 can outlive
     its ssh and keep listening with nothing behind it (VM MT-02, where the
     lab's ssh ran over corp's tunnel and corp's sshuttle was killed);

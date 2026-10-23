@@ -112,3 +112,14 @@ def test_install_guard_reports_only_the_error_line_of_nft(monkeypatch):
     monkeypatch.setattr(guard, "run", lambda argv, input=None: (False, ""))
     with pytest.raises(RuntimeError, match="nft failed"):
         guard.install_guard(T, ["10.0.0.0/8"], [])
+
+
+def test_guard_listed_tells_gone_from_unknown(monkeypatch):
+    out = "table inet nm-sshuttle-guard-1\ntable inet sshuttle-ipv4-227\n"
+    monkeypatch.setattr(guard.subprocess, "run",
+                        lambda *a, **k: subprocess.CompletedProcess(a, 0, out, ""))
+    assert guard.guard_listed("nm-sshuttle-guard-1") is True
+    assert guard.guard_listed("nm-sshuttle-guard-0") is False
+    monkeypatch.setattr(guard.subprocess, "run",
+                        lambda *a, **k: subprocess.CompletedProcess(a, 1, "", "denied"))
+    assert guard.guard_listed("nm-sshuttle-guard-1") is None
