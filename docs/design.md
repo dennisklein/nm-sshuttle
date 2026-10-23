@@ -1675,20 +1675,61 @@ tunnel unit's cgroup because `setpriv` changes only the user ID.
 sweep is therefore required, not a safety net. Whether `KillMode=mixed`
 lets the helper finish and still removes ssh is a lab question.
 
-**Sandboxing** such as `ProtectSystem=strict`, `PrivateTmp`,
-`RestrictAddressFamilies` and a capability bounding set (`CAP_NET_ADMIN`,
-`CAP_NET_BIND_SERVICE` for the redirect port of §4.8, `CAP_SETUID`,
-`CAP_SETGID`) is added and tested one directive at a time.
-The ssh child inherits the sandbox, and it must still read `~/.ssh` and
-write `known_hosts`. The tunnel unit has `ProtectSystem=full`, so that
-sshuttle's firewall helper cannot write `/etc/hosts` (§4.8).
+**Sandboxing.** Each unit gets only directives whose safety follows from
+what runs in it. All three have `ProtectKernelTunables` (nothing writes
+`/proc/sys` or `/sys`), `ProtectControlGroups` (cgroups are only read),
+`LockPersonality`, `RestrictRealtime` and `RestrictSUIDSGID`. None has
+`NoNewPrivileges`, which would stop setuid helpers and SELinux domain
+transitions. systemd implies it for seccomp-based directives only in a
+process without `CAP_SYS_ADMIN` in its effective set, and these units start
+as root with it; a bounding set takes effect only at exec **[src]**. None
+has `ProtectKernelModules`, and none drops `CAP_SYS_MODULE`:
+iptables-legacy, which Fedora's sshuttle package pulls in, runs `modprobe`
+itself when `ip_tables` is not loaded (sweep, `tproxy`).
 
-**The plugin unit's sandbox.** **[spike]** The shim-started plugin runs as
-`unconfined_service_t` with every capability (R1b). A plugin that NM
-spawns gets NetworkManager.service's eleven capabilities and, per its unit
-file, `ProtectSystem=true` and `ProtectHome=read-only` (R1e).
-`nm-sshuttle.service` starts from at least that set. R1e ran only a
-minimal path under it; `ip` and `nft` there are untested.
+- **The tunnel unit** also runs the user's ssh, and with it whatever the
+  user's ssh config runs (`ProxyCommand`, `Match exec`, `LocalCommand`)
+  and setuid helpers such as `ssh-keysign`. ssh must read `~/.ssh`, write
+  `known_hosts` and reach the agent in `/run/user/UID`. So it has no
+  `ProtectHome`, `PrivateTmp` (X11's socket is in `/tmp`), `PrivateDevices`
+  or `ProtectClock` (which restricts devices; ssh may open a FIDO key
+  itself), `RestrictAddressFamilies`, `RestrictNamespaces` or
+  `SystemCallFilter`. It adds:
+  - `ProtectSystem=full`: `/usr`, `/boot` and `/etc` are read-only, which
+    keeps sshuttle's firewall helper from writing `/etc/hosts` (§4.8).
+    sshuttle 1.3.1 and 2.0.0 write it only when a host list arrives and
+    restore it only if they wrote it, so a normal start and stop never
+    try. `/home`, `/var` and `/run` stay writable.
+  - `CapabilityBoundingSet=` with what the code uses: `CAP_NET_ADMIN` and
+    `CAP_NET_RAW` (nft, iptables, tproxy's `IP_TRANSPARENT`),
+    `CAP_NET_BIND_SERVICE` (the redirect port, §4.8), `CAP_SETUID` and
+    `CAP_SETGID` (setpriv), `CAP_KILL` (sshuttle stops the user's ssh),
+    `CAP_DAC_READ_SEARCH` and `CAP_SYS_PTRACE` (the sweep reads other
+    users' `/proc/PID/fd`; the bridge looks for the agent socket in
+    `/run/user/UID`), and `CAP_SYS_MODULE`. It takes away `CAP_SYS_ADMIN`
+    and with it mounts, the way back out of `ProtectSystem`. It does not
+    contain a root compromise: `CAP_SYS_PTRACE` and `CAP_SYS_MODULE` are
+    each enough to leave it. A setuid helper that the user's ssh config
+    runs gets only these capabilities.
+- **The plugin unit** runs the user's `ssh -G` for the first hop, with its
+  `Match exec`, so it has none of the tunnel unit's exclusions either. It
+  has `ProtectSystem=true` only (`/usr` and `/boot`): its cleanup edits
+  `/etc/hosts` (§4.8). It has no bounding set: systemd lets a caller with
+  `CAP_SYS_ADMIN` start units without asking polkit, and the OOM reset
+  below needs `CAP_SYS_RESOURCE`.
+- **The dispatcher** runs nothing as the user. It adds
+  `ProtectHome=read-only`, `PrivateTmp`, `RestrictNamespaces` and
+  `RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6` (D-Bus,
+  `ip`, `nft`, iptables). It has `ProtectSystem=true` and no bounding set,
+  for the same reasons as the plugin unit; it runs `cleanup --all` after a
+  single-tunnel version.
+
+**[spike]** The shim-started plugin runs as `unconfined_service_t` (R1b).
+A plugin that NM spawns (direct mode) gets NetworkManager.service's
+capabilities, `ProtectSystem=true` and `ProtectHome=read-only` (R1e). The
+VM tests (§4.10) run the three units on Fedora 44 with SELinux enforcing;
+any denial fails the run (M2-15), and M2-02n checks that the tunnel unit
+sees `/etc` read-only.
 
 **The OOM value and the user.** `OOMScoreAdjust=-500` is inherited by
 everything the plugin unit starts, the first hop's `ssh -G` and its
@@ -1703,7 +1744,8 @@ outside the user's slice, until the unit stops.
 
 - **The sshuttle client runs as root**, and it parses the multiplexed
   stream coming from the remote host. Mitigations:
-  - the sandboxing above;
+  - the tunnel unit's sandbox (§4.7), which takes away mounts and writes
+    to `/usr` and `/etc` but does not contain a root compromise;
   - `--auto-nets` off, so the remote cannot choose what gets captured;
   - `--auto-hosts` off, and `/etc` read-only in the tunnel unit (§4.7)
     as well, so that the root firewall helper cannot write `/etc/hosts`;
@@ -1851,6 +1893,8 @@ of C.
   root-capable container (§5).
 - **VM tests** on Fedora (SELinux enforcing) and Ubuntu with GNOME:
   - the toggle appears and works;
+  - the units' sandbox (§4.7): no SELinux denial over the whole run, and
+    `/etc` read-only in the tunnel unit;
   - `resolvectl status nmss0`;
   - `systemctl suspend`, or `rtcwake -m mem -s 20`;
   - roaming by switching between two NM connections;

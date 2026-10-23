@@ -70,6 +70,12 @@ uses [semantic versioning](https://semver.org/).
 - The tunnel unit has `/etc` read-only, so sshuttle's root firewall helper
   cannot write `/etc/hosts`; nm-sshuttle never passes `--auto-hosts`.
   `cleanup` removes the lines a stopped sshuttle left in `/etc/hosts`.
+- The systemd units have a sandbox (design §4.7). All three keep the kernel
+  tunables and cgroups read-only, lock the personality, and refuse realtime
+  scheduling and new setuid files. The tunnel unit adds a read-only
+  `/usr` and `/etc` and a capability bounding set; the plugin unit and the
+  dispatcher a read-only `/usr`, and the dispatcher also a read-only
+  `/home`, a private `/tmp` and fewer socket families and namespaces.
 - The user's `ssh -G` for the first hop, and anything their ssh config runs
   from it, no longer inherit the plugin unit's `OOMScoreAdjust=-500`: the
   bridge sets 0, which also resets the floor, before it drops to the user.

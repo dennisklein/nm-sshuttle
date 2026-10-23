@@ -73,6 +73,23 @@ def directives(name):
     return {k: set(v.split()) for k, v in ini(name)["Service"].items()}
 
 
+UNITS = ("nm-sshuttle-tunnel@.service.in", "nm-sshuttle@.service.in",
+         "nm-sshuttle-dispatcher.service.in")
+
+
+def test_every_unit_has_the_common_sandbox():
+    for name in UNITS:
+        svc = directives(name)
+        for key in ("ProtectKernelTunables", "ProtectControlGroups", "LockPersonality",
+                    "RestrictRealtime", "RestrictSUIDSGID"):
+            assert svc[key] == {"yes"}, (name, key)
+        # iptables-legacy runs modprobe itself; nothing may set NoNewPrivileges,
+        # which would stop setuid helpers and SELinux transitions (design §4.7)
+        for key in ("ProtectKernelModules", "NoNewPrivileges", "ProtectClock",
+                    "PrivateDevices", "SystemCallFilter", "MemoryDenyWriteExecute"):
+            assert key not in svc, (name, key)
+
+
 def test_the_tunnel_unit_keeps_etc_read_only_and_ssh_working():
     svc = directives("nm-sshuttle-tunnel@.service.in")
     # sshuttle's root firewall helper must not write /etc/hosts (design §4.8)
@@ -80,3 +97,16 @@ def test_the_tunnel_unit_keeps_etc_read_only_and_ssh_working():
     assert not any(k.startswith(("ReadWritePaths", "ProtectHome", "PrivateTmp",
                                  "RestrictAddressFamilies", "RestrictNamespaces"))
                    for k in svc)
+    assert svc["CapabilityBoundingSet"] == {
+        "CAP_NET_ADMIN", "CAP_NET_RAW", "CAP_NET_BIND_SERVICE", "CAP_SETUID", "CAP_SETGID",
+        "CAP_KILL", "CAP_DAC_READ_SEARCH", "CAP_SYS_PTRACE", "CAP_SYS_MODULE"}
+
+
+def test_the_units_that_clean_up_can_write_etc_hosts():
+    for name in ("nm-sshuttle@.service.in", "nm-sshuttle-dispatcher.service.in"):
+        svc = directives(name)
+        assert svc["ProtectSystem"] == {"true"}, name
+        # they start units through systemd's D-Bus API (CAP_SYS_ADMIN), and
+        # ssh-as-user resets the OOM floor (CAP_SYS_RESOURCE; design §4.7)
+        assert "CapabilityBoundingSet" not in svc and "ReadOnlyPaths" not in svc, name
+    assert "ProtectHome" not in directives("nm-sshuttle@.service.in")    # ssh -G as the user
