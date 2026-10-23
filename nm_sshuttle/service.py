@@ -40,6 +40,7 @@ log = logging.getLogger("nm-sshuttle")
 
 PROPS_IFACE = "org.freedesktop.DBus.Properties"
 VPN_ERROR_LAUNCH_FAILED = "org.freedesktop.NetworkManager.VPN.Error.LaunchFailed"
+ACCESS_DENIED = "org.freedesktop.DBus.Error.AccessDenied"
 FIRST_HOP_TIMEOUT_S = 25
 LINK_CHECK_MS = 500
 
@@ -239,8 +240,29 @@ class Service:
             return GLib.Variant("u", self.sup.state)
         return None
 
+    def from_nm(self, sender):
+        """Whether sender is NetworkManager. Its name watch may not have
+        reported NM yet, as for a Connect right after the start, or NM may
+        have just restarted: then ask the bus."""
+        if sender and sender == self.sup.nm_current_owner:
+            return True
+        try:
+            r = self.conn.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus",
+                                    "org.freedesktop.DBus", "GetNameOwner",
+                                    GLib.Variant("(s)", (NM_NAME,)), GLib.VariantType("(s)"),
+                                    Gio.DBusCallFlags.NONE, 1000, None)
+        except GLib.Error:
+            return False
+        return bool(sender) and r.unpack()[0] == sender
+
     def on_method_call(self, conn, sender, path, iface, method, params, inv):
         try:
+            if not self.from_nm(sender):
+                # Only NetworkManager drives the plugin (design §4.8); the bus
+                # policy alone would let any root process through.
+                log.warning("refused D-Bus call %s from %s: not NetworkManager", method, sender)
+                inv.return_dbus_error(ACCESS_DENIED, "only NetworkManager may call the plugin")
+                return
             log.info("D-Bus call %s from %s", method, sender)
             self.sup.touch()
             if method in ("Connect", "ConnectInteractive"):
