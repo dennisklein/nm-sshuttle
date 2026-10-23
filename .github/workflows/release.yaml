@@ -3,7 +3,9 @@ name: release
 # Puts a tagged release into the package repository. The repository is
 # published from main, the only branch that may use the signing key, so this
 # workflow starts the packages workflow there instead of publishing itself.
-# Pre-releases (a tag with a hyphen, such as v1.0.0-rc.1) are not packaged.
+# That workflow packages the tag only if it names a commit on main
+# (packaging/plan.sh). Pre-releases (a tag with a hyphen, such as
+# v1.0.0-rc.1) are not packaged.
 
 on:
   push:

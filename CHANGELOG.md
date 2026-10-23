@@ -8,6 +8,13 @@ uses [semantic versioning](https://semver.org/).
 
 ### Security
 
+- The packages workflow packages and signs a release tag only if it names
+  a commit on `main`, and the source RPM job refuses a tag moved after that
+  check. Before, any `vX.Y.Z` tag, pushed or given to a hand-started run,
+  was built from whatever commit it named and signed with the project's
+  key. `scripts/signing-key.sh` now restricts the `github-pages`
+  environment to `main` too, and `--restrict` restricts both environments
+  again (packaging/README.md).
 - A profile address or network with an IPv6 scope id (`fe80::%eth0/64`) is
   refused. The scope is free text that `ipaddress` keeps, and a crafted one in
   `subnets`, `exclude` or `gateway` reached the root `nft` script, where an

@@ -9,15 +9,18 @@
 #        signing-key.sh --next          add a new key beside the current one
 #        signing-key.sh --switch FILE   sign with the secret key in FILE
 #        signing-key.sh --retire FPR    stop trusting key FPR
+#        signing-key.sh --restrict      restrict the environments to main again
 #
 # Without options, it
 # - generates an RSA-4096 signing key without passphrase or expiry in a
 #   throwaway GnuPG home
-# - creates the GitHub environment rpm-signing if needed and restricts it to
-#   the main branch, so that only workflow runs on main can read its secrets;
-#   it removes any other deployment branch or tag policy of that environment
-# - stores the secret key as secret RPM_SIGNING_KEY of that environment via
-#   the gh CLI
+# - creates the GitHub environments rpm-signing and github-pages if needed
+#   and restricts them to the main branch, so that only workflow runs on
+#   main can read the key or deploy the site; it removes any other
+#   deployment branch or tag policy of those environments and keeps their
+#   other protection rules (--restrict does only this)
+# - stores the secret key as secret RPM_SIGNING_KEY of the rpm-signing
+#   environment via the gh CLI
 # - writes the public key to packaging/nm-sshuttle-release/RPM-GPG-KEY-nm-sshuttle, to be
 #   committed
 # - keeps a backup of the secret key and its revocation certificate in
@@ -43,25 +46,29 @@ uid=${NM_SSHUTTLE_SIGNING_UID:-nm-sshuttle package signing <d.klein@gsi.de>}
 repo=${NM_SSHUTTLE_REPO:-dennisklein/nm-sshuttle}
 environment=rpm-signing
 secret=RPM_SIGNING_KEY
+pages_environment=github-pages
 
 mode=${1:-create}
 case $mode in
   create) [ $# -eq 0 ] ;;
+  --restrict) [ $# -eq 1 ] ;;
   --next) [ $# -eq 1 ] ;;
   --switch | --retire) [ $# -eq 2 ] ;;
   *) false ;;
-esac || { echo "usage: $0 [--next | --switch SECRET-KEY-FILE | --retire FINGERPRINT]" >&2; exit 2; }
+esac || { echo "usage: $0 [--next | --switch SECRET-KEY-FILE | --retire FINGERPRINT | --restrict]" >&2; exit 2; }
 
-for cmd in gpg gh git; do
+for cmd in gpg gh git jq; do
   command -v "$cmd" > /dev/null || { echo "$cmd is required" >&2; exit 1; }
 done
 root=$(git rev-parse --show-toplevel)
 pubkey=$root/packaging/nm-sshuttle-release/RPM-GPG-KEY-nm-sshuttle
 backup=${XDG_DATA_HOME:-$HOME/.local/share}/nm-sshuttle/signing-key
 
-GNUPGHOME=$(mktemp -d)
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+GNUPGHOME=$tmp/gnupg
+mkdir -m 700 "$GNUPGHOME"
 export GNUPGHOME
-trap 'rm -rf "$GNUPGHOME"' EXIT
 
 # fingerprints prints the fingerprints of the primary keys in file $1.
 fingerprints() {
@@ -83,6 +90,53 @@ generate() {
     cp "$GNUPGHOME/openpgp-revocs.d/$fpr.rev" "$backup/$fpr.rev"
   )
 }
+
+# restrict lets only workflow runs on main use environment $1, creating it
+# if needed. It replaces the environment's deployment branch policy with
+# one for main and removes every other branch or tag policy. The PUT
+# repeats the environment's reviewers and wait timer, so that they stay.
+restrict() {
+  local env=$1 out body policies list id type name have_main= err=$tmp/gh-error
+  if out=$(gh api "repos/$repo/environments/$env" 2> "$err"); then
+    body=$(jq '{
+      wait_timer: ([.protection_rules[]? | select(.type == "wait_timer") | .wait_timer] | first // 0),
+      prevent_self_review: ([.protection_rules[]? | select(.type == "required_reviewers") | .prevent_self_review] | first // false),
+      reviewers: [.protection_rules[]? | select(.type == "required_reviewers") | .reviewers[] | {type, id: .reviewer.id}]
+    }' <<< "$out")
+  elif grep -q 'HTTP 404' "$err"; then
+    body='{}'
+  else
+    echo "cannot read the $env environment: $(cat "$err")" >&2
+    exit 1
+  fi
+  jq '. + {deployment_branch_policy: {protected_branches: false, custom_branch_policies: true}}' <<< "$body" |
+    gh api --silent --method PUT "repos/$repo/environments/$env" --input -
+  policies="repos/$repo/environments/$env/deployment-branch-policies"
+  # Read the listing into a variable first: a failed listing then aborts the
+  # script, where one read through process substitution would pass as "no
+  # policies".
+  list=$(gh api --paginate "$policies" --jq '.branch_policies[] | [.id, .type, .name] | @tsv')
+  while IFS=$'\t' read -r id type name; do
+    [ -n "$id" ] || continue
+    if [ "$type" = branch ] && [ "$name" = main ]; then
+      have_main=1
+    else
+      echo "removing $type policy $name from the $env environment" >&2
+      gh api --silent --method DELETE "$policies/$id"
+    fi
+  done <<< "$list"
+  if [ -z "$have_main" ]; then
+    gh api --silent --method POST "$policies" -f name=main -f type=branch
+  fi
+}
+
+if [ "$mode" = --restrict ]; then
+  gh auth status > /dev/null
+  restrict "$environment"
+  restrict "$pages_environment"
+  echo "Only workflow runs on main can use the $environment and $pages_environment environments of $repo."
+  exit 0
+fi
 
 if [ "$mode" != create ] && [ ! -e "$pubkey" ]; then
   echo "$pubkey does not exist; create the first key without options" >&2
@@ -165,31 +219,10 @@ elif ! grep -q 'HTTP 404' <<< "$out"; then
   exit 1
 fi
 
-# Restrict the environment before any key exists. This replaces the
-# environment's protection rules with a deployment branch policy and removes
-# every other branch or tag policy an existing environment may have, so that
-# main is the only ref that can read the key.
-gh api --silent --method PUT "repos/$repo/environments/$environment" \
-  -F 'deployment_branch_policy[protected_branches]=false' \
-  -F 'deployment_branch_policy[custom_branch_policies]=true'
-policies="repos/$repo/environments/$environment/deployment-branch-policies"
-# Read the listing into a variable first: a failed listing then aborts the
-# script, where one read through process substitution would pass as "no
-# policies".
-list=$(gh api --paginate "$policies" --jq '.branch_policies[] | [.id, .type, .name] | @tsv')
-have_main=
-while IFS=$'\t' read -r id type name; do
-  [ -n "$id" ] || continue
-  if [ "$type" = branch ] && [ "$name" = main ]; then
-    have_main=1
-  else
-    echo "removing $type policy $name from the $environment environment" >&2
-    gh api --silent --method DELETE "$policies/$id"
-  fi
-done <<< "$list"
-if [ -z "$have_main" ]; then
-  gh api --silent --method POST "$policies" -f name=main -f type=branch
-fi
+# Restrict the environments before any key exists, so that main is the only
+# ref that can read the key or deploy the site.
+restrict "$environment"
+restrict "$pages_environment"
 
 generate
 gh secret set "$secret" --repo "$repo" --env "$environment" < "$backup/$fpr.secret.asc"
@@ -201,6 +234,7 @@ Created signing key $fpr ($uid).
 
 - Secret key stored as $secret in the $environment environment of $repo,
   which only workflow runs on main can use.
+- The $pages_environment environment is restricted to main as well.
 - Public key written to ${pubkey#"$root"/}; commit and push it.
 - Backups of the secret key and revocation certificate are in $backup.
   Move them to offline storage and delete them from this machine.
