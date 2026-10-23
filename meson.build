@@ -7,7 +7,7 @@
 # Paths follow design §4.1. NetworkManager's directories are fixed under
 # /usr/lib, whatever the prefix: NM looks for VPN plugins and its packaged
 # conf.d nowhere else.
-project('nm-sshuttle', version: '0.1.0', license: 'MIT', meson_version: '>= 0.64')
+project('nm-sshuttle', version: '0.2.0', license: 'MIT', meson_version: '>= 0.64')
 
 python = import('python').find_installation('python3')
 prefix = get_option('prefix')

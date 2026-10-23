@@ -6,6 +6,14 @@ uses [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-24
+
+A security release: it fixes every issue of a security review of 0.1.0.
+
+**Upgrade note:** a jump host that is reached by name inside the tunnelled
+networks now needs `gateway` or `exclude` in the profile. This includes every
+profile that tunnels `0.0.0.0/0` or `::/0`. See the last entry below.
+
 ### Security
 
 - The packages workflow packages and signs a release tag only if it names
@@ -139,5 +147,6 @@ The first release.
 - There is no Debian or Ubuntu package repository; take the `.deb` files
   from a CI run.
 
-[Unreleased]: https://github.com/dennisklein/nm-sshuttle/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/dennisklein/nm-sshuttle/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/dennisklein/nm-sshuttle/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/dennisklein/nm-sshuttle/releases/tag/v0.1.0
