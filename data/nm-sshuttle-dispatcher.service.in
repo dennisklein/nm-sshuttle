@@ -9,3 +9,16 @@ Type=dbus
 BusName=org.freedesktop.NetworkManager.sshuttle.Dispatcher
 ExecStart=@LIBEXECDIR@/nm-sshuttle-dispatcher
 Restart=no
+# Sandbox (design §4.7). It runs nothing as the user. /etc stays writable for
+# the cleanup after a single-tunnel version; no capability bounding set, as
+# it starts units through systemd's D-Bus API.
+ProtectSystem=true
+ProtectHome=read-only
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes

@@ -211,6 +211,8 @@ TimeoutStopSec=20
 `nm-sshuttle-tunnel@.service` is today's tunnel unit with
 `exec-tunnel %i`. All of §4.7's reasons (no `BindsTo=`, `Restart=no`,
 `KillMode=control-group`, the `ExecStopPost` sweep) hold per instance.
+The blocks above leave out the sandbox that design §4.7 gives all three
+units.
 
 The dispatcher gets its own unit name rather than taking over
 `nm-sshuttle.service`. During an upgrade a v1 plugin may still be running

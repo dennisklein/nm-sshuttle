@@ -18,6 +18,20 @@ Restart=no
 # retry after an unlock waits up to 110 s for the agent's prompt (design §4.3).
 TimeoutStartSec=120
 TimeoutStopSec=15
+# Sandbox (design §4.7). The user's ssh runs here too, with whatever the
+# user's ssh config runs: it must still read ~/.ssh, write known_hosts, reach
+# the agent in /run/user and run setuid helpers such as ssh-keysign. So no
+# NoNewPrivileges, ProtectHome, PrivateTmp, PrivateDevices,
+# RestrictAddressFamilies or the others that design §4.7 lists.
 # /usr and /etc read-only, so that sshuttle's root firewall helper cannot
 # write /etc/hosts (design §4.8).
 ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+# nft, iptables and tproxy; the redirect ports below 1024; setpriv; signals
+# to the user's ssh; the sweep, which reads other users' /proc/PID/fd; and
+# modprobe, which iptables-legacy runs itself (design §4.7).
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID CAP_KILL CAP_DAC_READ_SEARCH CAP_SYS_PTRACE CAP_SYS_MODULE

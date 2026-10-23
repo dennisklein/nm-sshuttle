@@ -84,6 +84,12 @@ Host corp
 The host key must already be in your `known_hosts`: `nm-sshuttle check`
 below makes a test login that adds it.
 
+The tunnel's `ssh` runs as you, with your config, agent and `known_hosts`,
+but from a system service. Whatever your config runs (`ProxyCommand`,
+`Match exec`, `LocalCommand`) runs there too: `/usr` and `/etc` are
+read-only for it, and a setuid program it starts runs with a reduced set
+of capabilities ([design §4.7](design.md#47-systemd-units)).
+
 With `ProxyCommand` instead of `ProxyJump`, ssh cannot tell which address it
 connects to first. Give that address to `add` as `--gateway`, so that the
 tunnel does not swallow it.

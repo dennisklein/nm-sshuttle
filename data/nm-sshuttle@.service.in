@@ -20,3 +20,15 @@ OOMScoreAdjust=-500
 # On SIGTERM the plugin gives up first and waits up to 1 s for
 # NetworkManager's Disconnect; it exits within 5 s whatever happens.
 TimeoutStopSec=20
+# Sandbox (design §4.7). The first hop's ssh -G runs here as the user, and
+# with it the user's Match exec, so no NoNewPrivileges, ProtectHome or
+# PrivateTmp. /etc stays writable: cleanup removes what sshuttle left in
+# /etc/hosts. No capability bounding set: starting units through systemd's
+# D-Bus API takes CAP_SYS_ADMIN unless polkit is asked, and ssh-as-user needs
+# CAP_SYS_RESOURCE to take the user's processes off OOMScoreAdjust's floor.
+ProtectSystem=true
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
