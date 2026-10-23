@@ -91,8 +91,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    # Its output is signed as built, so it runs in publish's image.
     container:
-      image: registry.fedoraproject.org/fedora:44
+      image: quay.io/fedora/fedora:44@sha256:6ad1739ac6fb30f72ecc7b62a7ca94871d1cab215e4f5174113941047e0b4ed4
     steps:
       - name: Install tools
         run: dnf -y install git-core rpm-build
@@ -171,8 +172,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    # Its output is signed as built, so it runs in publish's image.
     container:
-      image: registry.fedoraproject.org/fedora:44
+      image: quay.io/fedora/fedora:44@sha256:6ad1739ac6fb30f72ecc7b62a7ca94871d1cab215e4f5174113941047e0b4ed4
     steps:
       - run: dnf -y install rpm-build
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -202,8 +204,10 @@ jobs:
     environment: rpm-signing
     permissions:
       contents: read
+    # This job holds the signing key, so its image is pinned by digest.
+    # Refresh it as "Container images" in packaging/README.md says.
     container:
-      image: registry.fedoraproject.org/fedora:44
+      image: quay.io/fedora/fedora:44@sha256:6ad1739ac6fb30f72ecc7b62a7ca94871d1cab215e4f5174113941047e0b4ed4
     steps:
       - run: dnf -y install createrepo_c findutils gnupg2 jq python3-rpm rpm-sign
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -260,8 +264,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    # publish's image, so that a pull request with a new digest tries it.
     container:
-      image: registry.fedoraproject.org/fedora:44
+      image: quay.io/fedora/fedora:44@sha256:6ad1739ac6fb30f72ecc7b62a7ca94871d1cab215e4f5174113941047e0b4ed4
     steps:
       - run: dnf -y install createrepo_c findutils gnupg2 jq python3-rpm rpm-build rpm-sign
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

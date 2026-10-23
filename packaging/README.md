@@ -98,3 +98,30 @@ pushes to `main`. Delete such a tag to unblock them:
 ```console
 $ git push origin :refs/tags/v0.1.1
 ```
+
+### Container images
+
+`publish` holds the signing key, so its image is pinned by digest, as
+`quay.io/fedora/fedora:44@sha256:...`: a new image under the tag cannot run
+next to the key. Fedora publishes its images on quay.io/fedora as well.
+`srpm` and `release-rpm` run in the same image, since their output is
+signed as built, and so does `dry-run`, so that a pull request with a new
+digest tries it without the key.
+The `rpm` and `smoke-test` matrix jobs keep
+`registry.fedoraproject.org/fedora:<release>`, so that they build and test
+against current Fedora releases; `rpm`'s packages are signed as built, so
+the pinned `publish` image does not cover them. Dependabot's
+`github-actions` updates cover the `uses:` lines only, not a job's
+`container:` image, and this repository has no Dependabot or Renovate
+configuration. Refresh the digest by hand, after a
+Fedora update you want in the signing job and at least once a month:
+
+```console
+$ curl -fsSI -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json' \
+    https://quay.io/v2/fedora/fedora/manifests/44 |
+    grep -i '^docker-content-digest:'
+```
+
+That is the digest of the multi-architecture index. Put it after the tag in
+the `image:` of `srpm`, `release-rpm`, `publish` and `dry-run`, and merge it
+to `main` through a pull request.

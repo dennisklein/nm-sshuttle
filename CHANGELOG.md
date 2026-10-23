@@ -23,6 +23,9 @@ uses [semantic versioning](https://semver.org/).
   from the same site, so the site alone proved nothing, and dnf did not
   check the repository package at all. The README and the site show
   fingerprints as gpg prints them.
+- The packages workflow's `publish` job, which holds the signing key, runs
+  in a Fedora image pinned by digest instead of the `fedora:44` tag, and so
+  do the `srpm` and `release-rpm` jobs, whose output it signs as built.
 - A profile address or network with an IPv6 scope id (`fe80::%eth0/64`) is
   refused. The scope is free text that `ipaddress` keeps, and a crafted one in
   `subnets`, `exclude` or `gateway` reached the root `nft` script, where an
