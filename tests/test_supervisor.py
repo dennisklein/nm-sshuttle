@@ -95,6 +95,89 @@ def test_gateway_from_the_profile_skips_the_lookup():
     assert fx.events[-1] == ("start_tunnel",)
 
 
+def test_first_hop_addresses_in_the_tunnelled_networks_are_left_out(caplog):
+    # A spoofed answer must not take internal addresses out of the guard (design §4.2).
+    fx, sup = make()
+    sup.connect(settings(exclude="10.0.5.0/24"), NM)
+    with caplog.at_level(logging.WARNING, logger="nm-sshuttle"):
+        fx.first_hop_cbs.pop(0)(["10.20.30.40", "203.0.113.7", "10.1.0.53", "10.0.5.9"], None)
+    guard = [e for e in fx.events if e[0] == "install_guard"][0]
+    assert guard[2] == ["203.0.113.7", "10.0.5.9", "10.0.5.0/24"]
+    assert [e[1] for e in fx.events if e[0] == "spec"][0]["first_hop"] == [
+        "203.0.113.7", "10.0.5.9"]
+    assert "ignoring the first hop's addresses 10.20.30.40, 10.1.0.53" in caplog.text
+
+
+def test_a_partly_refused_first_hop_pins_ssh_and_names_them_on_failure(caplog):
+    # ssh would look the name up itself and may take the refused address,
+    # which the guard rejects (design §4.2).
+    fx, sup = make()
+    sup.connect(settings(), NM)
+    fx.first_hop_cbs.pop(0)(["10.20.30.40", "2001:db8::7"], None)
+    spec = [e[1] for e in fx.events if e[0] == "spec"][0]
+    assert spec["first_hop"] == ["2001:db8::7"] and spec["pin"] is True
+    with caplog.at_level(logging.WARNING, logger="nm-sshuttle"):
+        fx.finish_start(False, "start job failed\nNetwork is unreachable")
+    assert ("failure", FAIL_CONNECT) in fx.events
+    assert ("Network is unreachable; the first hop's name also resolves to 10.20.30.40, "
+            "inside the profile's networks or DNS servers") in caplog.text
+
+
+def test_no_pin_and_no_hint_without_refused_addresses(caplog):
+    fx, sup = make()
+    sup.connect(settings(), NM)
+    fx.first_hop_cbs.pop(0)(["203.0.113.7"], None)
+    assert "pin" not in [e[1] for e in fx.events if e[0] == "spec"][0]
+    with caplog.at_level(logging.WARNING, logger="nm-sshuttle"):
+        fx.finish_start(False, "start job failed\nConnection timed out")
+    assert "also resolves" not in caplog.text
+
+
+def test_a_first_hop_only_in_the_tunnelled_networks_fails(caplog):
+    fx, sup = make()
+    sup.connect(settings(), NM)
+    with caplog.at_level(logging.WARNING, logger="nm-sshuttle"):
+        fx.first_hop_cbs.pop(0)(["10.20.30.40"], None)
+    assert ("failure", FAIL_CONNECT) in fx.events
+    assert "create_link" not in fx.names() and "install_guard" not in fx.names()
+    assert "resolves only into the profile's networks or DNS servers (10.20.30.40)" in caplog.text
+
+
+def test_a_first_hop_given_as_an_address_in_the_tunnelled_networks_is_taken():
+    # A HostName that is an address was never looked up (design §4.2).
+    fx, sup = make()
+    sup.connect(settings(), NM)
+    fx.first_hop_cbs.pop(0)(["10.20.30.40"], None, True)
+    assert [e for e in fx.events if e[0] == "install_guard"][0][2] == ["10.20.30.40"]
+    assert fx.events[-1] == ("start_tunnel",)
+
+
+def test_a_long_forged_answer_is_not_logged_in_full(caplog):
+    fx, sup = make()
+    sup.connect(settings(), NM)
+    with caplog.at_level(logging.WARNING, logger="nm-sshuttle"):
+        fx.first_hop_cbs.pop(0)([f"10.20.30.{i}" for i in range(1, 201)], None)
+    assert ("failure", FAIL_CONNECT) in fx.events
+    assert "10.20.30.8 and 192 more)" in caplog.text and "10.20.30.9," not in caplog.text
+
+
+def test_a_gateway_in_the_tunnelled_networks_is_taken():
+    fx, sup = make()
+    sup.connect(settings(gateway="10.20.30.40"), NM)
+    assert [e for e in fx.events if e[0] == "install_guard"][0][2] == ["10.20.30.40"]
+    assert fx.events[-1] == ("start_tunnel",)
+
+
+def test_at_most_eight_first_hop_addresses(caplog):
+    fx, sup = make()
+    sup.connect(settings(), NM)
+    hops = [f"198.51.100.{i}" for i in range(1, 21)]
+    with caplog.at_level(logging.WARNING, logger="nm-sshuttle"):
+        fx.first_hop_cbs.pop(0)(hops, None)
+    assert [e[1] for e in fx.events if e[0] == "spec"][0]["first_hop"] == hops[:8]
+    assert "more than 8 addresses; ignoring 198.51.100.9," in caplog.text
+
+
 def test_config_waits_for_nm_device():
     fx, sup = make()
     fx.device_answer = None

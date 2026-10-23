@@ -120,3 +120,13 @@ def test_a_refreshed_first_hop_list_updates_guard_spec_and_config():
     sup.on_ac_state(AC, AC_ACTIVATING, 6)
     fx.finish_start(True)
     assert [e[1] for e in fx.events if e[0] == "config"][-1]["gateway"] == "198.51.100.9"
+
+
+def test_an_ipv6_first_hop_in_a_tunnelled_ipv6_network_is_left_out():
+    # design §4.2: only 'gateway' or 'exclude' lets a first hop lie there
+    fx, sup = make()
+    connect(fx, sup, ["2001:db8:10::7", "203.0.113.7"], subnets=V6)
+    assert spec(fx)["first_hop"] == ["203.0.113.7"]
+    fx, sup = make()
+    connect(fx, sup, ["2001:db8:10::7"], subnets=V6, exclude="2001:db8:10::7/128")
+    assert spec(fx)["first_hop"] == ["2001:db8:10::7"]

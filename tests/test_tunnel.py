@@ -100,16 +100,16 @@ def test_first_hop_follows_a_jump_alias_from_the_users_config():
     def ssh_g(user, target):
         asked.append((user, target))
         return config[target]
-    assert tunnel.first_hop("alice", "corp", ssh_g=ssh_g) == ["127.0.0.2"]
+    assert tunnel.first_hop("alice", "corp", ssh_g=ssh_g) == (["127.0.0.2"], True)
     assert asked == [("alice", "corp"), ("alice", "bastion")]
 
 
 def test_first_hop_direct_and_nested_jumps():
     assert tunnel.first_hop("a", "h", ssh_g=lambda u, t: "hostname 127.0.0.3\nproxyjump none\n") \
-        == ["127.0.0.3"]
+        == (["127.0.0.3"], True)
     chain = {"a": "hostname x\nproxyjump b\n", "b": "hostname y\nproxyjump c\n",
              "c": "hostname 127.0.0.4\nproxyjump none\n"}
-    assert tunnel.first_hop("u", "a", ssh_g=lambda u, t: chain[t]) == ["127.0.0.4"]
+    assert tunnel.first_hop("u", "a", ssh_g=lambda u, t: chain[t]) == (["127.0.0.4"], True)
 
 
 def test_first_hop_returns_every_address_of_either_family():
@@ -122,11 +122,19 @@ def test_first_hop_returns_every_address_of_either_family():
 
     def ssh_g(u, t):
         return "hostname gw.example\nproxyjump none\n"
-    assert tunnel.first_hop("u", "h", ssh_g, gai(["198.51.100.1"])) == ["198.51.100.1"]
-    assert tunnel.first_hop("u", "h", ssh_g, gai(["2001:db8::1"])) == ["2001:db8::1"]
+    assert tunnel.first_hop("u", "h", ssh_g, gai(["198.51.100.1"])) == (["198.51.100.1"], False)
+    assert tunnel.first_hop("u", "h", ssh_g, gai(["2001:db8::1"])) == (["2001:db8::1"], False)
     assert tunnel.first_hop("u", "h", ssh_g, gai(["2001:db8::1", "198.51.100.1",
-                                                  "2001:db8::1", "fe80::1%eth0"])) == [
-        "2001:db8::1", "198.51.100.1", "fe80::1"]
+                                                  "2001:db8::1", "fe80::1%eth0"])) == ([
+        "2001:db8::1", "198.51.100.1", "fe80::1"], False)
+
+
+def test_a_first_hop_given_as_an_address_is_marked():
+    # Only a name is looked up, and only a lookup can be spoofed (design §4.2).
+    for hostname, addr in (("203.0.113.7", "203.0.113.7"), ("2001:db8::7", "2001:db8::7"),
+                           ("fe80::7%eth0", "fe80::7")):
+        out = f"hostname {hostname}\nproxyjump none\n"
+        assert tunnel.first_hop("u", "h", lambda u, t, out=out: out) == ([addr], True)
 
 
 def test_first_hop_gives_up_on_a_loop_and_on_option_like_hosts():
@@ -164,6 +172,18 @@ def test_no_pin_when_the_first_hop_resolves_or_cannot_be_shadowed():
         raise ValueError("ssh -G corp failed")
     assert tunnel.pinned_ssh_config(SPEC, ssh_g_fails, lambda name: False) is None
     assert pinned(config={"corp": "hostname a%h\nproxyjump none\n"}) is None
+
+
+def test_a_first_hop_that_also_resolved_into_the_tunnel_is_pinned_anyway():
+    # The guard rejects the refused addresses, so ssh must not follow its own
+    # lookup (design §4.2); dns does not matter, and nothing is looked up.
+    looked_up = []
+    text = pinned(dict(SPEC, dns="none", pin=True), resolves=lambda name: looked_up.append(name))
+    assert looked_up == []
+    assert "also resolved into the tunnelled" in text
+    assert "Host bastion\n    HostName 203.0.113.7\n    HostKeyAlias bastion.corp.example\n" in text
+    assert pinned(dict(SPEC, pin=True, first_hop=[]), resolves=lambda name: True) is None
+    assert pinned(dict(SPEC, pin=True), config={"corp": "hostname 192.0.2.9\n"}) is None
 
 
 def test_a_pin_prefers_an_ipv4_address():

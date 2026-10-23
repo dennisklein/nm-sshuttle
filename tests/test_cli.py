@@ -132,6 +132,48 @@ def test_check_passes(dennis, capsys):
     assert "first hop 192.0.2.7" in out and "WARN" not in out
 
 
+def test_check_refuses_a_first_hop_in_the_tunnelled_networks(dennis, capsys, monkeypatch):
+    # As the plugin does (design §4.2): the lookup may be spoofed.
+    def ssh_g(_user, target):
+        return "hostname gw.corp.example\nproxyjump none\n"
+    monkeypatch.setattr(cli.tunnel, "first_hop", lambda u, r, g: (["10.20.30.40"], False))
+    assert cli.check(argparse.Namespace(name="corp"), Nmcli({"u1": conn()}), ssh_g, None,
+                     port_start=lambda: 1024, cgroup=lambda unit: "/x") == 1
+    out = capsys.readouterr().out
+    assert "WARN first hop 10.20.30.40 lies in the profile's networks" in out
+    assert "FAIL the first hop has no usable address" in out
+    data = "remote = corp, local-user = dennis, subnets = 10.0.0.0/8, exclude = 10.20.30.0/24"
+    ran = []
+    assert cli.check(argparse.Namespace(name="corp"), Nmcli({"u1": conn(**{"vpn.data": data})}),
+                     ssh_g, lambda argv: ran.append(argv) or SimpleNamespace(returncode=0),
+                     port_start=lambda: 1024, cgroup=lambda unit: "/x") == 0
+    assert "ok   ssh -G; first hop 10.20.30.40" in capsys.readouterr().out
+
+
+def test_check_takes_a_first_hop_given_as_an_address(dennis, capsys):
+    # No lookup, so nothing to spoof: as 'gateway' (design §4.2).
+    def ssh_g(_user, target):
+        return "hostname 10.20.30.40\nproxyjump none\n"
+    ran = []
+    assert cli.check(argparse.Namespace(name="corp"), Nmcli({"u1": conn()}), ssh_g,
+                     lambda argv: ran.append(argv) or SimpleNamespace(returncode=0),
+                     port_start=lambda: 1024, cgroup=lambda unit: "/x") == 0
+    out = capsys.readouterr().out
+    assert "ok   ssh -G; first hop 10.20.30.40" in out and "WARN" not in out
+
+
+def test_first_hop_prints_its_kind_for_the_plugin(monkeypatch, capsys):
+    monkeypatch.setattr(cli.tunnel, "first_hop", lambda u, r: (["10.0.0.5"], True))
+    assert cli.main(["first-hop", "--kind", "alice", "corp"]) == 0
+    assert capsys.readouterr().out == "given\n10.0.0.5\n"
+    monkeypatch.setattr(cli.tunnel, "first_hop", lambda u, r: (["192.0.2.7", "2001:db8::7"], False))
+    assert cli.main(["first-hop", "--kind", "alice", "corp"]) == 0
+    assert capsys.readouterr().out == "lookup\n192.0.2.7\n2001:db8::7\n"
+    # a plugin started before an upgrade asks without --kind
+    assert cli.main(["first-hop", "alice", "corp"]) == 0
+    assert capsys.readouterr().out == "192.0.2.7\n2001:db8::7\n"
+
+
 SPLIT = "remote = corp, local-user = dennis, subnets = 10.0.0.0/8, dns = split, " \
         "dns-servers = 10.1.0.53, dns-domains = ~corp.example"
 

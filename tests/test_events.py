@@ -2,6 +2,8 @@
 """Sleep, network changes, health checks, the lock screen and the NM version
 mark (design §4.4), with fake events and a fake clock."""
 
+import logging
+
 import pytest
 
 from fakes import AC, NM, bring_up, drop_and_retry, make, settings
@@ -155,6 +157,65 @@ def test_network_change_while_up_restarts_at_once_with_a_new_first_hop(up):
     fx.finish_start(True)
     config = [e[1] for e in fx.events if e[0] == "config"]
     assert config and config[0]["gateway"] == "198.51.100.200"
+
+
+def test_a_new_first_hop_only_in_the_tunnelled_networks_keeps_the_old_one(up):
+    # The lookup ran on the new network, which may spoof it (design §4.2).
+    fx, sup = up
+    sup.on_network(ONLINE, CONN_FULL, HOTEL)
+    answer_starting(sup)
+    fx.finish_stops()
+    fx.advance(0)
+    fx.clear()
+    fx.first_hop_cbs.pop(0)(["10.20.30.40", "198.51.100.200"], None)
+    assert fx.events[0] == ("install_guard", ["10.0.0.0/8"], ["198.51.100.200"])
+    assert fx.events[1][1]["pin"] is True      # ssh must not take the refused one
+    reconnect(fx, sup)
+    sup.on_network(ONLINE, CONN_FULL, WIFI)
+    answer_starting(sup)
+    fx.finish_stops()
+    fx.advance(0)
+    fx.clear()
+    fx.first_hop_cbs.pop(0)(["10.20.30.40"], None)
+    assert "install_guard" not in fx.names() and "spec" not in fx.names()
+    assert sup.hops == ["198.51.100.200"] and fx.names() == ["start_tunnel"]
+    # a HostName that is an address was not looked up, so it is taken
+    reconnect(fx, sup)
+    sup.on_network(ONLINE, CONN_FULL, HOTEL)
+    answer_starting(sup)
+    fx.finish_stops()
+    fx.advance(0)
+    fx.clear()
+    fx.first_hop_cbs.pop(0)(["10.20.30.40"], None, True)
+    assert fx.events[0] == ("install_guard", ["10.0.0.0/8"], ["10.20.30.40"])
+    assert "pin" not in fx.events[1][1]
+
+
+def test_a_split_horizon_first_hop_pins_ssh_to_the_old_address(up, caplog):
+    # On the office network the name resolves inside the subnets; ssh would
+    # follow that answer into the guard's reset (design §4.2).
+    fx, sup = up
+    sup.on_network(ONLINE, CONN_FULL, HOTEL)
+    answer_starting(sup)
+    fx.finish_stops()
+    fx.advance(0)
+    fx.clear()
+    old = list(sup.hops)
+    fx.first_hop_cbs.pop(0)(["10.1.2.3"], None)
+    assert sup.hops == old and "install_guard" not in fx.names()
+    spec = [e[1] for e in fx.events if e[0] == "spec"][0]
+    assert spec["first_hop"] == old and spec["pin"] is True
+    with caplog.at_level(logging.WARNING, logger="nm-sshuttle"):
+        fx.finish_start(False, "start job failed\nConnection timed out")
+    assert "the first hop's name also resolves to 10.1.2.3" in caplog.text
+    # back on a network where it resolves outside them: no pin
+    sup.on_network(ONLINE, CONN_FULL, WIFI)
+    answer_starting(sup)
+    fx.finish_stops()
+    fx.advance(0)
+    fx.clear()
+    fx.first_hop_cbs.pop(0)(old, None)
+    assert "pin" not in [e[1] for e in fx.events if e[0] == "spec"][0]
 
 
 def test_give_up_before_the_new_first_hop_was_sent_repeats_the_old_config(up):

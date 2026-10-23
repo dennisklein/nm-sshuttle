@@ -51,6 +51,18 @@ uses [semantic versioning](https://semver.org/).
   not any process that has the PID and `nm-sshuttle-service` in its command
   line. A claim from the previous version needs that process to run with
   every user ID 0.
+- The first hop's addresses from a lookup on the local network no longer
+  decide alone what bypasses the tunnel and the guard. One that lies in the
+  profile's networks or DNS servers is ignored, with a warning, unless
+  `exclude` covers it, and at most 8 are used; with none left the
+  activation fails. A forged DNS answer could take any internal address
+  out of the tunnel while the VPN showed connected. A jump host reached by
+  name inside the tunnelled networks now needs `gateway` or `exclude`; this
+  includes every profile that tunnels `0.0.0.0/0` or `::/0`, where a jump
+  host with a changing address, such as a dynamic DNS name, no longer
+  works. A `HostName` or remote that is an address is not looked up and
+  works as before. While addresses are ignored, ssh is pinned to a kept
+  one, and a failed start names the ignored ones. `check` reports it.
 - sshuttle gets `127.0.0.1` as its remote, and the ssh bridge gives ssh
   the profile's remote. sshuttle 2.0.0 looked the remote up itself, as
   root and on the local network, also with `gateway` set, and excluded

@@ -18,6 +18,14 @@ DOMAIN_RE = re.compile(r"~?(\.|[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.?)")
 USER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*")   # also keeps it one word for sshuttle -e
 KNOWN_KEYS = {"remote", "local-user", "subnets", "exclude", "dns", "dns-servers",
               "dns-domains", "method", "gateway", "probe", "fail-closed"}
+MAX_HOPS = 8        # first-hop addresses taken from one lookup (design §4.2)
+
+
+def listed(addrs):
+    """addrs for a message: at most MAX_HOPS of them, since a forged answer
+    can hold hundreds."""
+    more = len(addrs) - MAX_HOPS
+    return ", ".join(addrs[:MAX_HOPS]) + (f" and {more} more" if more > 0 else "")
 
 
 class ProfileError(ValueError):
@@ -41,14 +49,17 @@ class Profile:
     fail_closed: bool = True
     ignored_keys: list = field(default_factory=list)
 
-    def tunnel_spec(self, first_hop, ipv6=False, slot=0):
+    def tunnel_spec(self, first_hop, ipv6=False, slot=0, pin=False):
         """What exec-tunnel needs, as JSON-friendly data. first_hop is the list
         of the first hop's addresses; ipv6 says whether sshuttle tunnels IPv6;
-        slot picks the activation's own tproxy mark."""
+        slot picks the activation's own tproxy mark; pin says that the lookup
+        also gave addresses the plugin refused, so ssh must not look the first
+        hop up itself (design §4.2)."""
         return {"remote": self.remote, "user": self.user, "subnets": self.subnets,
                 "exclude": self.exclude, "dns": self.dns, "dns_servers": self.dns_servers,
                 "method": self.method, "first_hop": list(first_hop), "ipv6": ipv6,
-                **({"tmark": TPROXY_MARK + slot} if self.method == "tproxy" else {})}
+                **({"tmark": TPROXY_MARK + slot} if self.method == "tproxy" else {}),
+                **({"pin": True} if pin else {})}
 
     def guarded_networks(self):
         """Networks the guard makes fail closed: the subnets plus the DNS servers."""
@@ -56,6 +67,31 @@ class Profile:
         if self.dns != "none":
             nets += [f"{s}/32" for s in self.dns_servers]
         return collapse(nets)
+
+    def first_hop_addresses(self, addrs, given=False):
+        """(usable, refused, dropped): the first hop's addresses as its lookup
+        returned them, split (design §4.2).
+
+        Each usable address is excluded from the tunnel and the guard. The
+        lookup is plain DNS on whatever network the host is on, so an address
+        in the guarded networks is refused unless 'exclude' covers it: a
+        spoofed answer would otherwise take any internal address out of the
+        tunnel. A first hop given as an address (given), like 'gateway', was
+        never looked up. Beyond MAX_HOPS usable addresses the rest are
+        dropped."""
+        guarded = [] if given else [_network(n) for n in self.guarded_networks()]
+        allowed = [_network(n) for n in self.exclude]
+        usable, refused = [], []
+        for addr in addrs:
+            try:
+                ip = ipaddress.ip_address(addr)
+            except ValueError:
+                continue        # first_hop gives only addresses; this one excludes nothing
+            if any(ip in n for n in guarded) and not any(ip in n for n in allowed):
+                refused.append(addr)
+            else:
+                usable.append(addr)
+        return usable[:MAX_HOPS], refused, usable[MAX_HOPS:]
 
     def has_ipv6(self):
         """Whether any subnet is IPv6, so that sshuttle has IPv6 to tunnel."""

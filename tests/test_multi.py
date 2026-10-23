@@ -396,7 +396,7 @@ def test_a_new_first_hop_is_claimed_again_and_a_loop_gives_up():
     fx.finish_stops()
     fx.conflict = "the first hops would run in a loop: corp -> lab -> corp"
     fx.clear()
-    fx.first_hop_cbs.pop(0)(["10.9.9.9"], None)
+    fx.first_hop_cbs.pop(0)(["198.51.100.9"], None)
     assert "install_guard" not in fx.names() and "start_tunnel" not in fx.names()
     assert ("failure", FAIL_CONNECT) in fx.events
 

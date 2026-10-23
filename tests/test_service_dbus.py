@@ -638,3 +638,19 @@ def test_health_counts_no_listener_without_systemds_cgroups(monkeypatch):
     assert seen == [{}]
     monkeypatch.setattr(tunnel, "unit_ports", lambda unit: {4: {229}, 6: set()})
     assert svc.nft_health("nft")["cgroup"] is True and seen[1] == {4: {229}, 6: set()}
+
+
+def test_resolve_first_hop_reads_the_kind():
+    # first-hop --kind (design §4.2); a call without the kind is no answer.
+    calls = []
+    fake = type("S", (), {"_spawn": lambda self, argv, t, done: calls.append((argv, done))})()
+    got = []
+    service.Service.resolve_first_hop(fake, "alice", "corp", lambda *a: got.append(a))
+    argv, done = calls[0]
+    assert argv[1:] == ["first-hop", "--kind", "alice", "corp"]
+    done(True, "given\n10.0.0.5\n", "")
+    done(True, "lookup\n192.0.2.7\n2001:db8::7\n", "")
+    done(True, "192.0.2.7\n", "")
+    done(False, "", "first-hop: no address\n")
+    assert got == [(["10.0.0.5"], None, True), (["192.0.2.7", "2001:db8::7"], None, False),
+                   (None, "no address"), (None, "first-hop: no address")]
