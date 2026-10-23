@@ -268,6 +268,7 @@ s_connect() {
     check M2-02k "NetworkManager gave the activation its own bus name (--bus-name)" per_activation_name
     check M2-02l "sshuttle listens on a port of the slot's own ($LISTEN_PORTS), with its table" slot_listens
     check M2-02m "sshuttle's remote is 127.0.0.1; ssh, as the user, gets the profile's from the bridge" bridge_remote
+    check M2-02n "the tunnel unit sees /etc read-only" tunnel_etc_read_only
     if fw_running; then
         check M2-02i "firewalld has $LINK bound to a zone" fw_bound
         result M2-02i-z INFO "zone of $LINK: $(fw_zone_of_link); default zone $(fw_default_zone)"

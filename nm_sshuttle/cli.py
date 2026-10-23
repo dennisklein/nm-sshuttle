@@ -8,7 +8,8 @@
                  plugin's startup cleanup)
   cleanup [--all]
                  the same for every slot whose plugin is not running, and
-                 what a single-tunnel version left behind
+                 what a single-tunnel version left behind; either also
+                 removes the lines a stopped sshuttle left in /etc/hosts
   sweep          remove stale sshuttle tables and chains (the tunnel unit's
                  ExecStartPre and ExecStopPost)
   exec-tunnel N  ExecStart of the tunnel unit nm-sshuttle-tunnel@N
@@ -114,6 +115,9 @@ def cleanup(slot=None):
         if not unit_running(V1_PLUGIN_UNIT):
             ok &= cleanup_v1()
     tunnel.sweep()
+    # Here, not in the sweep: the tunnel unit, which sweeps too, cannot
+    # write /etc (design §4.8).
+    ok &= tunnel.strip_etc_hosts()
     return 0 if ok else 1
 
 

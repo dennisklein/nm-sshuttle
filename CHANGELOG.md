@@ -67,6 +67,9 @@ uses [semantic versioning](https://semver.org/).
   the profile's remote. sshuttle 2.0.0 looked the remote up itself, as
   root and on the local network, also with `gateway` set, and excluded
   every address it got.
+- The tunnel unit has `/etc` read-only, so sshuttle's root firewall helper
+  cannot write `/etc/hosts`; nm-sshuttle never passes `--auto-hosts`.
+  `cleanup` removes the lines a stopped sshuttle left in `/etc/hosts`.
 - The user's `ssh -G` for the first hop, and anything their ssh config runs
   from it, no longer inherit the plugin unit's `OOMScoreAdjust=-500`: the
   bridge sets 0, which also resets the floor, before it drops to the user.

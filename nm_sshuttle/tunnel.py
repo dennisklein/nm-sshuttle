@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: MIT
-"""sshuttle side: the tunnel unit's ExecStart, the ssh bridge, the first hop
-and the sweep of stale sshuttle tables (design §2.2, §4.3, §4.7)."""
+"""sshuttle side: the tunnel unit's ExecStart, the ssh bridge, the first hop,
+the sweep of stale sshuttle tables and of sshuttle's lines in /etc/hosts
+(design §2.2, §4.3, §4.7, §4.8)."""
 
+import errno
 import ipaddress
 import json
 import logging
@@ -15,6 +17,7 @@ import stat
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 
 from .claims import runs_as_root
@@ -798,3 +801,91 @@ def sweep(proc="/proc"):
                             p.stderr.strip())
             elif args[0] == "-X":
                 deleted(f"chain {args[1]} (IPv{version})", version, chains[args[1]])
+
+
+# ------------------------------------------------------------- /etc/hosts
+ETC_HOSTS = "/etc/hosts"
+# A line that sshuttle's firewall helper adds, in 1.3.1 and 2.0.0 (its
+# rewrite_etc_hosts): "%-30s %s" % ("IP NAME", "# sshuttle-firewall-PORT
+# AUTOCREATED"), with its IPv6 redirect port if it has one, else its IPv4 one.
+HOSTS_LINE_RE = re.compile(r"^\S+ \S+ +# sshuttle-firewall-(\d+) AUTOCREATED$")
+
+
+def live_sshuttle_ports(ports, proc="/proc"):
+    """Those of ports on which an sshuttle listens, in either family, as the
+    sweep counts listeners: root's, or another user's with sshuttle's root
+    firewall helper below it (design §4.8)."""
+    listeners = [x for x in loopback_listeners(proc) if x[1] in ports]
+    live = {port for _, port, uid, _ in listeners if uid == 0}
+    held = [x for x in listeners if x[2] != 0 and x[1] not in live]
+    if held:
+        for kept in user_sshuttle_ports(held, proc).values():
+            live |= kept
+    return live
+
+
+def strip_etc_hosts(path=ETC_HOSTS, proc="/proc"):
+    """Remove the lines sshuttle's firewall helper added to path for a port on
+    which no sshuttle listens any more (design §4.8). The tunnel unit cannot
+    write /etc, but a helper killed before it restored the file may have
+    left some. False when it could not.
+
+    Only lines in the form the helper writes go. The file is replaced in one
+    rename, with its owner, mode and SELinux label, and only if it did not
+    change meanwhile; a symlink or anything else that is not a regular file
+    is left alone."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return True
+    except OSError as e:
+        if e.errno == errno.ELOOP:          # a symlink: not ours to follow
+            return True
+        log.warning("cannot read %s: %s", path, e)
+        return False
+    with os.fdopen(fd, "rb") as f:
+        st = os.fstat(f.fileno())
+        if not stat.S_ISREG(st.st_mode):
+            return True
+        lines = f.read().decode("utf-8", "surrogateescape").splitlines(keepends=True)
+        try:
+            label = os.getxattr(f.fileno(), "security.selinux")
+        except OSError:
+            label = None                    # no SELinux
+    tagged = {}
+    for i, line in enumerate(lines):
+        m = HOSTS_LINE_RE.match(line.rstrip("\n"))
+        if m:
+            tagged[i] = int(m.group(1))
+    live = live_sshuttle_ports(set(tagged.values()), proc) if tagged else set()
+    stale = {i for i, port in tagged.items() if port not in live}
+    if not stale:
+        return True
+    text = "".join(line for i, line in enumerate(lines) if i not in stale)
+    tmp = None
+    try:
+        fd, tmp = tempfile.mkstemp(prefix=".hosts.nm-sshuttle.", dir=os.path.dirname(path))
+        with os.fdopen(fd, "wb") as f:
+            os.fchown(f.fileno(), st.st_uid, st.st_gid)
+            os.fchmod(f.fileno(), stat.S_IMODE(st.st_mode))
+            if label:
+                os.setxattr(f.fileno(), "security.selinux", label)
+            f.write(text.encode("utf-8", "surrogateescape"))
+            f.flush()
+            os.fsync(f.fileno())
+        now = os.lstat(path)
+        if (now.st_ino, now.st_size, now.st_mtime_ns) != (st.st_ino, st.st_size,
+                                                           st.st_mtime_ns):
+            raise OSError(errno.EAGAIN, "it changed meanwhile")
+        os.replace(tmp, path)
+    except OSError as e:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+        log.warning("cannot remove sshuttle's lines from %s: %s", path, e.strerror or e)
+        return False
+    for i in sorted(stale):
+        log.warning("removed from %s what sshuttle left there: %s", path, lines[i].rstrip("\n"))
+    return True

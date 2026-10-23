@@ -487,6 +487,100 @@ def test_the_sweep_spares_an_sshuttle_a_user_runs(tmp_path, monkeypatch):
         [(4, 12300, 1000, "50"), (4, 12305, 1001, "60")], proc) == {4: {12300}, 6: set()}
 
 
+# -------------------------------------------------------------- /etc/hosts
+def sshuttle_hosts_line(ip, name, port):
+    """A line as sshuttle's firewall helper writes it (rewrite_etc_hosts)."""
+    return "%-30s %s\n" % (f"{ip} {name}", f"# sshuttle-firewall-{port} AUTOCREATED")
+
+
+def fake_hosts(tmp_path, text, mode=0o644):
+    (tmp_path / "etc").mkdir()
+    hosts = tmp_path / "etc" / "hosts"
+    hosts.write_text(text)
+    hosts.chmod(mode)
+    return hosts
+
+
+def test_strip_etc_hosts_removes_what_a_stopped_sshuttle_left(tmp_path, caplog):
+    caplog.set_level("INFO", "nm-sshuttle")
+    # root listens on 226, so that sshuttle still runs; 1000 on 12300, without
+    # sshuttle's helper below it, which does not count (design §4.8)
+    proc = fake_net(tmp_path, tcp_line("0100007F:00E2") + tcp_line("0100007F:300C", uid=1000))
+    localhost = "127.0.0.1   localhost\n"
+    not_sshuttles = ("# 203.0.113.6 x # sshuttle-firewall-225 AUTOCREATED\n"
+                     "192.0.2.1 by-hand  # sshuttle-firewall-225 AUTOCREATED, kept\n")
+    live = sshuttle_hosts_line("10.0.0.1", "kept.example", 226)
+    hosts = fake_hosts(tmp_path, localhost + sshuttle_hosts_line("203.0.113.6", "pypi.org", 225)
+                       + not_sshuttles + live
+                       + sshuttle_hosts_line("203.0.113.7", "git.corp.example", 12300), 0o640)
+    assert tunnel.strip_etc_hosts(str(hosts), proc)
+    assert hosts.read_text() == localhost + not_sshuttles + live
+    assert oct(hosts.stat().st_mode & 0o7777) == oct(0o640)
+    assert os.listdir(hosts.parent) == ["hosts"]          # no temporary file left
+    assert "removed from %s what sshuttle left there: 203.0.113.6 pypi.org" % hosts in caplog.text
+    assert "203.0.113.7 git.corp.example" in caplog.text
+
+
+def test_strip_etc_hosts_keeps_the_lines_of_an_sshuttle_a_user_runs(tmp_path):
+    proc = fake_net(tmp_path, tcp_line("0100007F:300C", uid=1000, inode=50))
+    fake_process(tmp_path, 100, 1, [b"/usr/bin/sshuttle", b"-r", b"h", b"0/0"], (1000,) * 4,
+                 [50])
+    fake_process(tmp_path, 101, 100, [b"sudo", b"/usr/bin/sshuttle", b"--firewall"])
+    assert tunnel.live_sshuttle_ports({12300, 225}, proc) == {12300}
+    text = sshuttle_hosts_line("10.0.0.1", "auto.example", 12300)
+    hosts = fake_hosts(tmp_path, text)
+    inode = hosts.stat().st_ino
+    assert tunnel.strip_etc_hosts(str(hosts), proc)
+    assert hosts.read_text() == text and hosts.stat().st_ino == inode    # not rewritten
+
+
+def test_strip_etc_hosts_follows_no_symlink(tmp_path):
+    proc = fake_net(tmp_path, "")
+    text = sshuttle_hosts_line("203.0.113.6", "pypi.org", 225)
+    (tmp_path / "real").write_text(text)
+    (tmp_path / "etc").mkdir()
+    (tmp_path / "etc" / "hosts").symlink_to(tmp_path / "real")
+    assert tunnel.strip_etc_hosts(str(tmp_path / "etc" / "hosts"), proc)
+    assert (tmp_path / "etc" / "hosts").is_symlink() and (tmp_path / "real").read_text() == text
+    assert tunnel.strip_etc_hosts(str(tmp_path / "etc" / "missing"), proc)
+
+
+def test_strip_etc_hosts_keeps_the_selinux_label(tmp_path, monkeypatch):
+    proc = fake_net(tmp_path, "")
+    text = sshuttle_hosts_line("203.0.113.6", "pypi.org", 225)
+    hosts = fake_hosts(tmp_path, text)
+    label = b"system_u:object_r:net_conf_t:s0\0"
+    labelled = []
+    monkeypatch.setattr(tunnel.os, "getxattr", lambda fd, name: label)
+    monkeypatch.setattr(tunnel.os, "setxattr",
+                        lambda fd, name, value: labelled.append((name, value)))
+    assert tunnel.strip_etc_hosts(str(hosts), proc)
+    assert labelled == [("security.selinux", label)] and hosts.read_text() == ""
+
+    def refused(fd, name, value):
+        raise PermissionError(13, "Permission denied")
+    hosts.write_text(text)
+    monkeypatch.setattr(tunnel.os, "setxattr", refused)
+    assert not tunnel.strip_etc_hosts(str(hosts), proc)      # never with another label
+    assert hosts.read_text() == text and os.listdir(hosts.parent) == ["hosts"]
+
+
+def test_strip_etc_hosts_leaves_a_file_that_changed_meanwhile(tmp_path, monkeypatch, caplog):
+    proc = fake_net(tmp_path, "")
+    hosts = fake_hosts(tmp_path, sshuttle_hosts_line("203.0.113.6", "pypi.org", 225))
+    mkstemp = tunnel.tempfile.mkstemp
+
+    def racing(**kw):
+        with open(hosts, "a") as f:
+            f.write("192.0.2.9 new\n")
+        return mkstemp(**kw)
+    monkeypatch.setattr(tunnel.tempfile, "mkstemp", racing)
+    assert not tunnel.strip_etc_hosts(str(hosts), proc)
+    assert hosts.read_text().endswith("192.0.2.9 new\n") and "pypi.org" in hosts.read_text()
+    assert os.listdir(hosts.parent) == ["hosts"]
+    assert "it changed meanwhile" in caplog.text
+
+
 def test_nft_health(monkeypatch):
     out = "table inet sshuttle-ipv4-12305\ntable inet nm-sshuttle-guard-0\n"
     monkeypatch.setattr(tunnel.subprocess, "run",
