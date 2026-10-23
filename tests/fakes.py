@@ -66,6 +66,8 @@ class FakeEffects:
         self.claims = []              # claims taken, in order
         self.conflict = None          # what take_claim answers
         self.released = 0
+        self.guard_there = True       # what guard_listed answers: True, False or None
+        self.guard_checks = 0
 
     # recording helpers
     def _rec(self, *event):
@@ -210,6 +212,10 @@ class FakeEffects:
 
     def remove_guard(self):
         self._rec("remove_guard")
+
+    def guard_listed(self):
+        self.guard_checks += 1
+        return self.guard_there
 
     def sweep(self):
         self._rec("sweep")

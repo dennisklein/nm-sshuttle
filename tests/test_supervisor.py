@@ -25,6 +25,12 @@ def up():
     return fx, sup
 
 
+def retry_at(fx, sup):
+    """When the next reconnect attempt is due; the gap's guard check also has
+    a timer."""
+    return next(w for w, h, _ in fx.timers if h == sup.timers["retry"])
+
+
 def gap(fx, sup):
     sup.on_tunnel_inactive()
     assert sup.phase == "gap"
@@ -283,7 +289,7 @@ def test_backoff_and_reconnect_timeout(up):
     sup.on_tunnel_inactive()
     delays = []
     for _ in range(8):
-        when = min(w for w, h, _ in fx.timers if h not in fx.cancelled)
+        when = retry_at(fx, sup)
         delays.append(round(when - fx.t))
         fx.advance(when - fx.t)
         fx.finish_start(False, "start job failed\nConnection timed out")
@@ -663,10 +669,10 @@ def test_deadline_restarts_with_a_drop_during_reconfig(up):
     sup.on_tunnel_inactive()                  # the tunnel dies in the middle of reconfig
     assert sup.phase == "gap"
     while fx.t < first_burst + 70:            # attempts keep failing past the old deadline
-        when = min(w for w, h, _ in fx.timers if h not in fx.cancelled)
+        when = retry_at(fx, sup)
         fx.advance(when - fx.t)
         fx.finish_start(False, "start job failed\nConnection timed out")
-    when = min(w for w, h, _ in fx.timers if h not in fx.cancelled)
+    when = retry_at(fx, sup)
     fx.advance(when - fx.t)
     fx.finish_start(True)
     assert sup.phase == "reconfig"
@@ -694,3 +700,4 @@ def test_touch_restarts_the_idle_timer():
     assert not fx.quit_called
     fx.advance(11)
     assert fx.quit_called
+

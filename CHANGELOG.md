@@ -19,6 +19,8 @@ uses [semantic versioning](https://semver.org/).
   with `-` (`@-gD1080`), a password (`user:password@host`, which ended up in
   sshuttle's command line and the journal) and a bad port are refused.
 - The plugin answers `VPN.Plugin` calls only from NetworkManager.
+- A guard removed during a reconnect is put back within 10 s, and before
+  each attempt; before, only the health check while up did.
 - A claim counts only for the process with the start time it recorded,
   not any process that has the PID and `nm-sshuttle-service` in its command
   line. A claim from the previous version needs that process to run with

@@ -322,6 +322,59 @@ def test_health_drops_when_sshuttle_outlives_its_ssh(up):
     assert sup.phase == "gap" and ("state", ST_STARTING) in fx.events
 
 
+def test_a_gap_puts_back_a_flushed_guard_while_paused(up):
+    fx, sup = up
+    sup.on_network(OFFLINE, CONN_NONE, None)       # a paused gap: no attempts at all
+    answer_starting(sup)
+    assert sup.phase == "gap" and "retry" not in sup.timers
+    fx.clear()
+    fx.guard_there = None                           # nft cannot be asked: nothing to do
+    fx.advance(10)
+    assert fx.names() == []
+    fx.guard_there = False
+    fx.advance(10)
+    assert fx.names() == ["install_guard"] and sup.phase == "gap"
+    fx.guard_there = True
+    fx.advance(30)
+    assert fx.names() == ["install_guard"] and fx.guard_checks == 5
+
+
+def test_each_reconnect_attempt_checks_the_guard_first(up):
+    fx, sup = up
+    sup.on_tunnel_inactive()
+    answer_starting(sup)
+    fx.clear()
+    fx.guard_there = False
+    fx.advance(1)
+    assert fx.names() == ["install_guard", "start_tunnel"]
+    reconnect(fx, sup)
+    fx.clear()
+    fx.advance(30)                                  # up again: the health check takes over
+    assert "install_guard" not in fx.names() and fx.guard_checks == 1
+
+
+def test_a_guard_that_cannot_be_put_back_in_a_gap_gives_up(up):
+    fx, sup = up
+    sup.on_tunnel_inactive()
+    answer_starting(sup)
+    fx.guard_there = False
+    fx.raise_on["install_guard"] = RuntimeError("nft says no")
+    fx.advance(1)
+    assert sup.phase == "stopping" and ("failure", FAIL_CONNECT) in fx.events
+    assert "start_tunnel" not in fx.names()
+
+
+def test_no_guard_check_without_fail_closed():
+    fx, sup = make()
+    sup.on_network(ONLINE, CONN_FULL, WIFI)
+    bring_up(fx, sup, **{"fail-closed": "no"})
+    sup.on_tunnel_inactive()
+    answer_starting(sup)
+    fx.guard_there = False
+    fx.advance(20)
+    assert fx.guard_checks == 0 and "install_guard" not in fx.names()
+
+
 def test_health_keeps_a_tunnel_whose_ssh_runs_or_cannot_be_read(up):
     fx, sup = up
     fx.health = {"guard": True, "sshuttle": {4}, "ssh": True}
