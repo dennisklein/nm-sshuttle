@@ -537,7 +537,8 @@ class Service:
         return guard.policy_routing_present(families, self.slot.n)
 
     def take_claim(self, claim):
-        return claims.take(self.slot.n, dict(claim, pid=os.getpid()))
+        pid = os.getpid()
+        return claims.take(self.slot.n, dict(claim, pid=pid, start=claims.process_start(pid)))
 
     def release_claim(self):
         claims.release(self.slot.n)
