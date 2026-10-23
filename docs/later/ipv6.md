@@ -174,10 +174,12 @@ reached over IPv6.
 ### Health
 
 `nft_health()` reports whether a sshuttle table with a live listener
-exists. With IPv6 tunnelled, sshuttle has two tables with the same port.
-The check asks for each family it expects: `sshuttle-ipv4-P` when there is
-an IPv4 network, `sshuttle-ipv6-P` when IPv6 is tunnelled. A missing one
-is a drop, as now.
+exists. With IPv6 tunnelled, sshuttle has two tables. The check asks for
+each family it expects: `sshuttle-ipv4-P` when there is an IPv4 network,
+`sshuttle-ipv6-Q` when IPv6 is tunnelled, each with root's listener of that
+family on its port. A missing one is a drop, as now. P and Q differ since
+the plugin passes the IPv4 port: `--listen 127.0.0.1:P,[::1]:0`, because
+sshuttle fails when both families get a port (design §2.2, §4.8).
 
 ### Why no IPv6 DNS servers
 

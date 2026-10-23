@@ -76,6 +76,7 @@ use_slot() {  # use_slot N
     LINK=nmss$1
     TPROXY_MARK=$(printf '0x%x' $(( 0x4e530000 + $1 )))
     TPROXY_TABLE=$(( 20051 + $1 ))
+    LISTEN_PORTS="$(( 225 + 2 * $1 )) $(( 226 + 2 * $1 ))"   # the slot's own IPv4 redirect ports
     BUS=$(cat "$STATE_DIR/$1/bus-name" 2> /dev/null)
     [ -n "$BUS" ] || BUS=$FIXED_BUS
 }
@@ -676,6 +677,26 @@ dns_checks() {
 guard_present() { nft list table inet "$GUARD_TABLE" > /dev/null 2>&1; }
 guard_gone() { ! guard_present; }
 sshuttle_tables() { nft list tables 2> /dev/null | awk '$3 ~ /^sshuttle-ipv[46]-[0-9]+$/ {print $3}'; }
+slot_listens() {  # sshuttle listens on one of the slot's own ports, as root, and has its table
+    local p line
+    for p in $LISTEN_PORTS; do
+        # ss -e prints uid: only for a user other than root
+        line=$(ss -ltnepH "src 127.0.0.1 and sport = :$p")
+        grep -q '"sshuttle\|"python' <<< "$line" && ! grep -q ' uid:' <<< "$line" &&
+            sshuttle_tables | grep -qx "sshuttle-ipv4-$p" && { echo "port $p"; return 0; }
+    done
+    echo "no root listener on $LISTEN_PORTS; tables: $(sshuttle_tables | xargs)"
+    return 1
+}
+# the redirect ports 225-240: those listened on, and those in TIME_WAIT (design §4.8)
+redirect_listens() { ss -ltnH 'src 127.0.0.1 and ( sport >= :225 and sport <= :240 )' | awk '{print $4}' | xargs; }
+redirect_waits() { ss -tanH state time-wait '( sport >= :225 and sport <= :240 )' | awk '{print $3}' | sort | uniq -c | xargs; }
+# hold_conn SECONDS : a TCP connection through the tunnel to the web server, held open in the background
+hold_conn() {
+    as_user python3 -c 'import socket, sys, time
+s = socket.create_connection((sys.argv[1], 8080), timeout=5)
+time.sleep(float(sys.argv[2]))' "$WEB_IP" "$1" > /dev/null 2>&1 &
+}
 tunnel_state() { sc is-active "$TUNNEL_UNIT" 2> /dev/null; }
 # method=tproxy: sshuttle's chains in iptables' mangle table, the plugin's rule and route
 mangle_chains() { iptables -w -t mangle -S 2> /dev/null | awk '$1 == "-N" && $2 ~ /^sshuttle-[mtd]-[0-9]+$/ {print $2}'; }

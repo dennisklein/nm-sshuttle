@@ -31,8 +31,9 @@ import subprocess
 import sys
 
 from . import claims, guard, profile, tunnel
-from .const import (NM_DNS_IFACE, NM_DNS_PATH, NM_NAME, SERVICE_TYPE, SLOTS, V1_GUARD_TABLE,
-                    V1_PLUGIN_UNIT, V1_TUNNEL_SPEC, V1_TUNNEL_UNIT, Slot, slot_number)
+from .const import (LISTEN_PORTS, NM_DNS_IFACE, NM_DNS_PATH, NM_NAME, SERVICE_TYPE, SLOTS,
+                    V1_GUARD_TABLE, V1_PLUGIN_UNIT, V1_TUNNEL_SPEC, V1_TUNNEL_UNIT, Slot,
+                    slot_number)
 
 log = logging.getLogger("nm-sshuttle")
 
@@ -292,7 +293,8 @@ def nm_dns_mode(run=subprocess.run):
 
 
 def check(args, nmcli=nmcli_run, ssh_g=ssh_g_as_self, run=subprocess.run,
-          iptables_available=None, dns_mode=None, resolv_conf=None, cgroup=None):
+          iptables_available=None, dns_mode=None, resolv_conf=None, port_start=None,
+          cgroup=None):
     """Check a profile as the user it belongs to (design §4.2, §4.3).
 
     Returns 0 when everything passes. The test login may prompt for a host key
@@ -325,6 +327,11 @@ def check(args, nmcli=nmcli_run, ssh_g=ssh_g_as_self, run=subprocess.run,
         if why:
             print(f"FAIL dns={prof.dns} needs every lookup to go to systemd-resolved; {why}")
             return 1
+    start = (port_start or tunnel.unprivileged_port_start)()
+    if start is not None and start <= max(LISTEN_PORTS):
+        print(f"WARN net.ipv4.ip_unprivileged_port_start is {start}: any user may bind "
+              f"sshuttle's redirect ports {min(LISTEN_PORTS)}-{max(LISTEN_PORTS)} and stop the "
+              "tunnel from starting")
     if (cgroup or tunnel.unit_cgroup)("nm-sshuttle.service") is None:
         print("WARN no cgroup hierarchy under /sys/fs/cgroup holds systemd's units: the health "
               "check cannot tell the tunnel's own listener, and the plugin gives up 10 s after "

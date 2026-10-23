@@ -22,7 +22,7 @@ slot.
 | id | scenario |
 |---|---|
 | M2-01 | install: files, SELinux labels, `/etc/resolv.conf` is resolved's stub, `90-nm-sshuttle.conf` takes effect after `nmcli general reload conf` |
-| M2-02 | connect: address, resolved per link, split and outside lookups, guard, units, firewalld zone, the link unmanaged, a bus name of its own from NM |
+| M2-02 | connect: address, resolved per link, split and outside lookups, guard, units, firewalld zone, the link unmanaged, a bus name of its own from NM, sshuttle on the slot's own redirect port |
 | M2-03 | reconnect (nbns) three times with firewalld: same ifindex, DNS, one VPN entry in NM, fail closed in the gap |
 | M2-04 | the same without firewalld |
 | M2-05 | a gap longer than 10 s |
@@ -31,7 +31,7 @@ slot.
 | M2-08 | `systemctl stop` and `restart` in a gap |
 | M2-09 | `kill -9` in a gap: `ExecStopPost` cleans up and no new instance starts |
 | M2-10 | switching off while a reconnect is pending; the instance then exits |
-| M2-11 | Connect right after Disconnect: a new instance serves it |
+| M2-11 | Connect right after Disconnect: a new instance serves it; three more activations within a minute, each stopped with a connection open, take another redirect port while TIME_WAIT holds the old ones |
 | M2-12 | a user override of the unmanaged setting: the plugin logs it |
 | M2-13 | NetworkManager restart under an active VPN |
 | M2-14 | `ExecStopPost` removes leftovers; the sweep removes a stale table whose port another user listens on |

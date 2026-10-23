@@ -31,6 +31,15 @@ uses [semantic versioning](https://semver.org/).
   tunnel unit's cgroup; it now also finds it on hybrid and legacy cgroup
   hosts, and gives up once, instead of reconnecting every 10 s, where
   there is none. `check` warns about that.
+- sshuttle listens on an IPv4 port from 225 to 240, which only root may
+  bind: its slot's own two first, then a free one of the others. Any user
+  could hold sshuttle's ports from 12300 down and stop every tunnel from
+  starting. The IPv6 and DNS ports are still sshuttle's choice, so a user
+  can still block those, or bind them in the moment between sshuttle's
+  exit and the sweep: this is only partly fixed for profiles with DNS or
+  IPv6. The plugin now says when sshuttle found no free DNS or IPv6 port.
+  `check` warns when `ip_unprivileged_port_start` lets users bind the new
+  ports.
 - The plugin answers `VPN.Plugin` calls only from NetworkManager.
 - A profile with `dns split` or `all` is refused unless NetworkManager uses
   systemd-resolved and `/etc/resolv.conf` sends every lookup to its stub;

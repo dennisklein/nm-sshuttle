@@ -43,6 +43,12 @@ NBNS_SENTINEL = "192.0.0.10"    # the reconnect sentinel (design §4.4)
 TPROXY_MARK = 0x4e530000
 TPROXY_TABLE = 0x4e53
 TPROXY_PRIORITY = 100
+# sshuttle's redirect ports (design §4.8). Below net.ipv4.ip_unprivileged_port_start
+# only root may bind them, and IANA has not assigned 225 to 241. Each slot tries
+# two of its own first, then the others: a port in TIME_WAIT cannot be bound for
+# 60 s (lab T8), and quick restarts can leave both of a slot's own in it.
+LISTEN_PORTS = range(225, 241)
+LISTEN_PORTS_PER_SLOT = 2
 
 # Overridable for development and tests; packages use the defaults.
 LIBEXEC = os.environ.get("NM_SSHUTTLE_LIBEXEC", "/usr/libexec/nm-sshuttle")
@@ -105,6 +111,14 @@ class Slot:
     @property
     def tproxy_mark(self):
         return TPROXY_MARK + self.n
+
+    @property
+    def listen_ports(self):
+        """The redirect ports in the order the slot tries them: its own two,
+        then the others from the top down, whose slots are used least."""
+        first = LISTEN_PORTS[0] + LISTEN_PORTS_PER_SLOT * self.n
+        own = list(range(first, first + LISTEN_PORTS_PER_SLOT))
+        return own + [p for p in reversed(LISTEN_PORTS) if p not in own]
 
 
 def slot_number(text):

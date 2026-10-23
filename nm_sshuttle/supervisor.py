@@ -33,7 +33,7 @@ from .const import (AC_ACTIVATED, AC_ACTIVATING, AC_DEACTIVATED, AC_DEACTIVATING
                     AC_NAMES, AC_UNKNOWN, CONN_PORTAL, DEVICE_UNMANAGED, FAIL_CONNECT,
                     FAIL_LOGIN, LINK_ADDRESS, NBNS_SENTINEL,
                     ST_INIT, ST_STARTED, ST_STARTING, ST_STOPPED, ST_STOPPING, STATE_NAMES)
-from .tunnel import classify_failure
+from .tunnel import classify_failure, port_failure
 
 log = logging.getLogger("nm-sshuttle")
 
@@ -558,7 +558,8 @@ class Supervisor:
             return
         if not ok:
             code = FAIL_LOGIN if classify_failure(detail) == "login" else FAIL_CONNECT
-            self.give_up(code, f"the tunnel did not start: {detail}")
+            hint = port_failure(detail, self.ipv6)
+            self.give_up(code, f"the tunnel did not start: {hint + ': ' if hint else ''}{detail}")
             return
         self._wait_device(self._first_device)
 
@@ -938,6 +939,9 @@ class Supervisor:
                     self.fx.session_locked(self.profile.user, self._callback(
                         self._lock_answer, self.attempt_id, detail))
                 return
+            hint = port_failure(detail, self.ipv6)
+            if hint:
+                log.warning("reconnect attempt %d failed: %s", self.attempts, hint)
             log.info("reconnect attempt %d failed: %s", self.attempts, detail.strip())
             self._schedule_retry()
             return

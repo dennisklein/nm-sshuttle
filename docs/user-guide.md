@@ -250,6 +250,15 @@ Common causes:
   Programs then ask those servers directly, and fall back to the local
   network's when the tunnel is down. Link it to the stub:
   `sudo ln -sf ../run/systemd/resolve/stub-resolv.conf /etc/resolv.conf`.
+- **`check` warns about `ip_unprivileged_port_start`:** the tunnels listen
+  on `127.0.0.1` ports 225 to 240, which only root may bind unless the
+  sysctl `net.ipv4.ip_unprivileged_port_start` was lowered to 240 or
+  below, as some container setups do. Then another user can hold the
+  ports and stop the tunnel from starting. Nothing leaks: the guard stays.
+- **"no free port for sshuttle's DNS redirector (9001-12300)"**, or for
+  its IPv6 redirector: sshuttle still picks those ports itself, and any
+  user can bind them. Find who holds them with `sudo ss -lunp` (DNS) or
+  `sudo ss -ltnp` (IPv6) and stop that program.
 - **`check` warns that no cgroup hierarchy holds systemd's units:** the
   plugin cannot find the tunnel unit's processes, so it gives up 10 s
   after connecting. This happens only with an unusual cgroup setup.

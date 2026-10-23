@@ -126,7 +126,7 @@ def test_check_passes(dennis, capsys):
         ran.append(argv)
         return SimpleNamespace(returncode=0)
     assert cli.check(argparse.Namespace(name="corp"), Nmcli({"u1": conn()}), ssh_g_ok, run,
-                     cgroup=lambda unit: "/sys/fs/cgroup/x") == 0
+                     port_start=lambda: 1024, cgroup=lambda unit: "/sys/fs/cgroup/x") == 0
     assert ran == [["ssh", "-o", "ConnectTimeout=15", "--", "corp", "true"]]
     out = capsys.readouterr().out
     assert "first hop 192.0.2.7" in out and "WARN" not in out
@@ -169,10 +169,18 @@ def test_check_warns_without_systemds_cgroups(dennis, capsys):
     def run(argv):
         return SimpleNamespace(returncode=0)
     assert cli.check(argparse.Namespace(name="corp"), Nmcli({"u1": conn()}), ssh_g_ok, run,
-                     cgroup=lambda unit: None) == 0
+                     port_start=lambda: 1024, cgroup=lambda unit: None) == 0
     assert "WARN no cgroup hierarchy under /sys/fs/cgroup holds systemd's units" in \
         capsys.readouterr().out
 
+
+def test_check_warns_when_users_may_bind_the_redirect_ports(dennis, capsys):
+    def run(argv):
+        return SimpleNamespace(returncode=0)
+    assert cli.check(argparse.Namespace(name="corp"), Nmcli({"u1": conn()}), ssh_g_ok, run,
+                     port_start=lambda: 0) == 0
+    assert "WARN net.ipv4.ip_unprivileged_port_start is 0: any user may bind sshuttle's " \
+        "redirect ports 225-240" in capsys.readouterr().out
 
 
 def test_check_reads_escaped_fields(dennis, capsys):
