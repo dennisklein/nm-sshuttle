@@ -31,8 +31,8 @@ import subprocess
 import sys
 
 from . import claims, guard, profile, tunnel
-from .const import (SERVICE_TYPE, SLOTS, V1_GUARD_TABLE, V1_PLUGIN_UNIT, V1_TUNNEL_SPEC,
-                    V1_TUNNEL_UNIT, Slot, slot_number)
+from .const import (NM_DNS_IFACE, NM_DNS_PATH, NM_NAME, SERVICE_TYPE, SLOTS, V1_GUARD_TABLE,
+                    V1_PLUGIN_UNIT, V1_TUNNEL_SPEC, V1_TUNNEL_UNIT, Slot, slot_number)
 
 log = logging.getLogger("nm-sshuttle")
 
@@ -280,8 +280,19 @@ def active_conflict(uuid, prof, hops, nmcli, ssh_g):
     return claims.conflict(claims.make_claim(prof, hops), others)
 
 
+def nm_dns_mode(run=subprocess.run):
+    """NetworkManager's DNS mode (systemd-resolved, default, dnsmasq, none), or None."""
+    try:
+        p = run(["busctl", "--system", "get-property", NM_NAME, NM_DNS_PATH, NM_DNS_IFACE,
+                 "Mode"], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    m = re.fullmatch(r's "(.*)"', p.stdout.strip()) if p.returncode == 0 else None
+    return m.group(1) if m else None
+
+
 def check(args, nmcli=nmcli_run, ssh_g=ssh_g_as_self, run=subprocess.run,
-          iptables_available=None):
+          iptables_available=None, dns_mode=None, resolv_conf=None):
     """Check a profile as the user it belongs to (design §4.2, §4.3).
 
     Returns 0 when everything passes. The test login may prompt for a host key
@@ -299,6 +310,21 @@ def check(args, nmcli=nmcli_run, ssh_g=ssh_g_as_self, run=subprocess.run,
     if prof.method == "tproxy" and not (iptables_available or tunnel.iptables_available)():
         print("FAIL method=tproxy needs iptables and ip6tables; install iptables")
         return 1
+    if prof.dns != "none":
+        # The plugin refuses it too (design §4.5): unless every lookup goes to
+        # resolved, they fall back to the LAN's resolver whenever the tunnel is down.
+        mode = (dns_mode or nm_dns_mode)()
+        if mode is None:
+            print("WARN cannot read NetworkManager's DNS mode; dns=split and dns=all need "
+                  "systemd-resolved")
+        elif mode != "systemd-resolved":
+            print(f"FAIL dns={prof.dns} needs NetworkManager to use systemd-resolved; its DNS "
+                  f"mode is {mode}")
+            return 1
+        why = (resolv_conf or tunnel.resolv_conf_problem)()
+        if why:
+            print(f"FAIL dns={prof.dns} needs every lookup to go to systemd-resolved; {why}")
+            return 1
     if settings["ipv6"]["auto-route-ext-gw"] != "no":
         # Profiles added before IPv6 support lack it; NM then adds a host route
         # towards an IPv6 first hop (docs/later/ipv6.md).

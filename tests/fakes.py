@@ -66,6 +66,8 @@ class FakeEffects:
         self.claims = []              # claims taken, in order
         self.conflict = None          # what take_claim answers
         self.released = 0
+        self.dns_backend = "systemd-resolved"   # NetworkManager's DnsManager Mode
+        self.resolv_conf = None       # why /etc/resolv.conf bypasses resolved, or None
         self.guard_there = True       # what guard_listed answers: True, False or None
         self.guard_checks = 0
 
@@ -109,6 +111,12 @@ class FakeEffects:
             done(ans)
         else:
             self.device_cbs.append(done)
+
+    def dns_mode(self, done):
+        done(self.dns_backend, None if self.dns_backend else "no answer")
+
+    def resolv_conf_problem(self):
+        return self.resolv_conf
 
     def device_state(self, path, done):
         self._rec("device_state", path)

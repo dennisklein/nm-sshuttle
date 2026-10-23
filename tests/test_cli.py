@@ -131,6 +131,40 @@ def test_check_passes(dennis, capsys):
     assert "first hop 192.0.2.7" in out and "WARN" not in out
 
 
+SPLIT = "remote = corp, local-user = dennis, subnets = 10.0.0.0/8, dns = split, " \
+        "dns-servers = 10.1.0.53, dns-domains = ~corp.example"
+
+
+def test_check_wants_resolved_for_split_dns(dennis, capsys):
+    nm = Nmcli({"u1": conn(**{"vpn.data": SPLIT})})
+    def run(argv):
+        return SimpleNamespace(returncode=0)
+    assert cli.check(argparse.Namespace(name="corp"), nm, ssh_g_ok, run,
+                     dns_mode=lambda: "default") == 1
+    assert "FAIL dns=split needs NetworkManager to use systemd-resolved; its DNS mode is " \
+        "default" in capsys.readouterr().out
+    assert cli.check(argparse.Namespace(name="corp"), nm, ssh_g_ok, run,
+                     dns_mode=lambda: "systemd-resolved", resolv_conf=lambda: None) == 0
+    assert cli.check(argparse.Namespace(name="corp"), nm, ssh_g_ok, run,
+                     dns_mode=lambda: None, resolv_conf=lambda: None) == 0
+    assert "WARN cannot read NetworkManager's DNS mode" in capsys.readouterr().out
+    # resolv.conf linked to resolved's list of the real servers
+    assert cli.check(argparse.Namespace(name="corp"), nm, ssh_g_ok, run,
+                     dns_mode=lambda: "systemd-resolved",
+                     resolv_conf=lambda: "/etc/resolv.conf lists 192.168.1.1") == 1
+    assert "FAIL dns=split needs every lookup to go to systemd-resolved; /etc/resolv.conf " \
+        "lists 192.168.1.1" in capsys.readouterr().out
+
+
+def test_nm_dns_mode_from_busctl():
+    def run(argv, **kw):
+        assert argv[:3] == ["busctl", "--system", "get-property"] and argv[-1] == "Mode"
+        return SimpleNamespace(returncode=0, stdout='s "systemd-resolved"\n')
+    assert cli.nm_dns_mode(run) == "systemd-resolved"
+    assert cli.nm_dns_mode(lambda argv, **kw: SimpleNamespace(returncode=1, stdout="")) is None
+
+
+
 def test_check_reads_escaped_fields(dennis, capsys):
     data = "remote = corp, local-user = dennis, subnets = 10.0.0.0/8, probe = 10.1.0.22:22"
     nm = Nmcli({"u1": conn(**{"vpn.data": data})})

@@ -230,3 +230,18 @@ def test_nft_health(monkeypatch):
     monkeypatch.setattr(tunnel.subprocess, "run",
                         lambda *a, **k: subprocess.CompletedProcess(a, 1, "", "denied"))
     assert tunnel.nft_health("nft", "nm-sshuttle-guard-0") is None
+
+
+def test_resolv_conf_must_point_at_resolveds_stub(tmp_path):
+    f = tmp_path / "resolv.conf"
+    f.write_text("# stub\nnameserver 127.0.0.53\noptions edns0 trust-ad\nsearch .\n")
+    assert tunnel.resolv_conf_problem(str(f)) is None
+    f.write_text("nameserver 127.0.0.54\n")
+    assert tunnel.resolv_conf_problem(str(f)) is None
+    # resolved's own list of the real servers (/run/systemd/resolve/resolv.conf)
+    f.write_text("nameserver 10.1.0.53\nnameserver 192.168.1.1\nsearch corp.example\n")
+    assert tunnel.resolv_conf_problem(str(f)) == \
+        f"{f} lists 10.1.0.53, 192.168.1.1, not only resolved's stub 127.0.0.53"
+    f.write_text("search corp.example\n")       # glibc then asks 127.0.0.1
+    assert tunnel.resolv_conf_problem(str(f)) == f"{f} lists no nameserver"
+    assert "cannot read" in tunnel.resolv_conf_problem(str(tmp_path / "missing"))

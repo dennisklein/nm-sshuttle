@@ -701,3 +701,37 @@ def test_touch_restarts_the_idle_timer():
     fx.advance(11)
     assert fx.quit_called
 
+
+# ------------------------------------------------------------ DNS backend
+def test_split_dns_without_resolved_is_refused(caplog):
+    # without resolved, lookups fall back to the LAN's resolver in a gap
+    for mode in ("default", "dnsmasq", None):
+        fx, sup = make()
+        fx.dns_backend = mode
+        sup.connect(settings(), NM)
+        assert fx.names() == ["state", "failure", "state", "stop_tunnel"]
+        assert fx.signals() == [("state", ST_STARTING), ("failure", FAIL_CONNECT),
+                                ("state", ST_STOPPED)]
+        assert sup.phase == "stopping"
+    assert "dns=split needs NetworkManager to use systemd-resolved, and its DNS mode is " \
+        "default" in caplog.text
+
+
+def test_split_dns_is_refused_when_resolv_conf_bypasses_resolved(caplog):
+    # NM reports systemd-resolved also with resolv.conf linked to resolved's
+    # list of the real servers: glibc asks them itself and falls back
+    fx, sup = make()
+    fx.resolv_conf = "/etc/resolv.conf lists 10.1.0.53, 192.168.1.1, not only resolved's stub"
+    sup.connect(settings(), NM)
+    assert fx.signals() == [("state", ST_STARTING), ("failure", FAIL_CONNECT),
+                            ("state", ST_STOPPED)]
+    assert "dns=split needs every lookup to go to systemd-resolved, and /etc/resolv.conf " \
+        "lists 10.1.0.53" in caplog.text
+
+
+def test_dns_none_does_not_ask_for_the_dns_backend():
+    fx, sup = make()
+    fx.dns_backend = "default"
+    fx.resolv_conf = "/etc/resolv.conf lists 192.168.1.1"
+    bring_up(fx, sup, dns="none", **{"dns-servers": "", "dns-domains": ""})
+    assert sup.phase == "up"

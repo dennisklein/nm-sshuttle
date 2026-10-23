@@ -21,7 +21,7 @@ slot.
 
 | id | scenario |
 |---|---|
-| M2-01 | install: files, SELinux labels, `90-nm-sshuttle.conf` takes effect after `nmcli general reload conf` |
+| M2-01 | install: files, SELinux labels, `/etc/resolv.conf` is resolved's stub, `90-nm-sshuttle.conf` takes effect after `nmcli general reload conf` |
 | M2-02 | connect: address, resolved per link, split and outside lookups, guard, units, firewalld zone, the link unmanaged, a bus name of its own from NM |
 | M2-03 | reconnect (nbns) three times with firewalld: same ifindex, DNS, one VPN entry in NM, fail closed in the gap |
 | M2-04 | the same without firewalld |
@@ -50,6 +50,7 @@ slot.
 | M2-27 | the probe: the sshuttle server on the jump host is stopped, the probe fails twice and the plugin reconnects |
 | M2-28 | suspend and resume (only with `--suspend`) |
 | M2-29 | a ProxyJump host named inside `~corp.test`: resolved from the local network at connect, pinned to that address on the reconnect |
+| M2-30 | `/etc/resolv.conf` linked to `/run/systemd/resolve/resolv.conf`: a `dns=split` profile is refused; the link is restored after |
 | V6-01 | an IPv6 subnet through the tunnel, arriving from the jump host; refused at once in a gap ([IPv6](../docs/later/ipv6.md)) |
 | V6-02 | the uplink's IPv6 addresses change: a second address in the prefix is no network change, a new prefix restarts a tunnel whose first hop is IPv6, and not an IPv4 one |
 | TP-01 | `method=tproxy` ([tproxy](../docs/later/tproxy.md)): sshuttle's mark chain and the plugin's rule and route; UDP echo, TCP and split DNS through the tunnel; UDP and TCP refused at once in a gap; nothing left after the disconnect |
@@ -134,7 +135,10 @@ run without a report:
 - M2-19's race between NM's "activated" and the link's removal is not
   controlled; the INFO line says which state the plugin gave up from.
 - NetworkManager writing `/etc/resolv.conf` itself (`dns=default`, as on
-  Debian) is not tested on Fedora; it belongs to a Debian or Ubuntu VM.
+  Debian) is not tested on Fedora; it belongs to a Debian or Ubuntu VM. The
+  plugin refuses `dns=split` and `dns=all` there, so that refusal is what
+  such a VM should check. M2-30 checks it for a `resolv.conf` that bypasses
+  resolved's stub on Fedora.
 
 ## Manual checks with GNOME
 
