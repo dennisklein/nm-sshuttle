@@ -2,7 +2,7 @@
 %global nm_libdir %{_prefix}/lib/NetworkManager
 
 Name:           nm-sshuttle
-Version:        0.1.0
+Version:        0.2.0
 Release:        1%{?dist}
 Summary:        NetworkManager VPN plugin that tunnels with sshuttle
 License:        MIT
@@ -82,5 +82,8 @@ fi
 %{_unitdir}/nm-sshuttle-tunnel@.service
 
 %changelog
+* Sat Oct 24 2026 Dennis Klein <d.klein@gsi.de> - 0.2.0-1
+- Update to 0.2.0
+
 * Sat Oct 10 2026 Dennis Klein <d.klein@gsi.de> - 0.1.0-1
 - Initial package
