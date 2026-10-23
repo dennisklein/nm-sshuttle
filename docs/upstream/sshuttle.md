@@ -1,4 +1,4 @@
-# sshuttle 2.0.0: three bug reports
+# sshuttle 2.0.0: four bug reports and a request
 
 We found these while building nm-sshuttle. It runs the sshuttle client as root from a systemd unit, and `ssh` runs as the desktop user through an `-e` wrapper. Each section below is a separate issue and can be filed on its own.
 
@@ -280,6 +280,30 @@ Lab T2 is our own case:
 **With the patch**, the reproducer lists `(<AddressFamily.AF_INET: 2>, '192.0.2.1', 32, 0, 0)` under "Subnets to exclude from forwarding" and no longer prints "Failed to exclude remote IP".
 
 **Side effect.** The `-e` command now also runs once as `<cmd> -G host`. A wrapper that does not pass its arguments on to `ssh` may fail at that point. *(from source)* `parse_hostname()` already runs this with a 2 s timeout inside `except Exception`, so such a failure costs at most 2 s and the exclusion. Our `ssh-as-user` wrapper passes `"$@"` to `ssh`, but we have not run lab T2 with the patch.
+
+---
+
+## 4. `--listen` with a port for both families stops with `UnboundLocalError`
+
+**Versions:** 2.0.0, and 1.3.1 *(from source)*, where the same code sits at `client.py`:1011-1060.
+
+**Reproduce** *(from source)*:
+
+```sh
+sshuttle -v --method nft --listen 127.0.0.1:12345,[::1]:12345 -r user@remote 192.0.2.0/24
+```
+
+**Actual.** The client stops before it starts the firewall helper, with `UnboundLocalError: cannot access local variable 'used_ports'` (Python 3.11 and later; older versions word it differently).
+
+**Expected.** sshuttle listens on the two given ports.
+
+**Root cause** (`sshuttle/client.py`, 2.0.0): when both families have a port (line 1037), `ports = [0, ]` and the `else` branch that sets `used_ports = []` (line 1045) is skipped. The first successful bind then runs `used_ports.append(port)` (line 1086). With one port given and the other `0`, the search runs and nothing fails, which is how nm-sshuttle calls it (`--listen 127.0.0.1:P,[::1]:0`).
+
+**Proposed fix:** set `used_ports = []` before the `if`.
+
+## 5. Request: an option for the DNS redirector's port
+
+The DNS redirector always takes the first free UDP port from 12300 down (`client.py`:1105-1143), even when `--listen` fixes the TCP port. On a machine with other users, any of them can bind those ports first: holding all 3300 stops sshuttle from starting, and binding the port while sshuttle restarts receives the lookups that a leftover rule still redirects. nm-sshuttle runs sshuttle as root and passes a TCP port below 1024 for that reason, but cannot do the same for DNS. The same holds for the IPv6 TCP port while section 4 stands. A `--dns-listen` option, or a DNS port in `--listen`, would close both. Together with section 2 (`SO_REUSEADDR`), it would also let a fixed port be reused right after a restart; nm-sshuttle now gives each tunnel two ports and spares to work around TIME_WAIT.
 
 ---
 

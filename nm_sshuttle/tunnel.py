@@ -17,7 +17,7 @@ import sys
 import threading
 
 from .claims import runs_as_root
-from .const import LIBEXEC, SSH_CONFIG, V1_TUNNEL_SPEC, Slot
+from .const import LIBEXEC, LISTEN_PORTS, SSH_CONFIG, V1_TUNNEL_SPEC, Slot
 from .profile import collapse, family
 
 log = logging.getLogger("nm-sshuttle")
@@ -49,13 +49,17 @@ def first_hops(spec):
     return [hops] if isinstance(hops, str) else list(hops)
 
 
-def sshuttle_argv(spec, sshuttle, ssh_config=None):
+def sshuttle_argv(spec, sshuttle, ssh_config=None, port=None):
     """sshuttle's command line for a tunnel spec written by the plugin; ssh
     reads ssh_config instead of the usual files when it is given.
 
     Without spec["ipv6"] sshuttle runs with --disable-ipv6 and gets no IPv6
     network at all, which it would only drop with a warning; the guard still
-    covers them."""
+    covers them.
+
+    port is the IPv4 redirect port (design §4.8). sshuttle 1.3.1 and 2.0.0
+    stop with an UnboundLocalError when --listen gives a port for both
+    families, so ::1 gets port 0: sshuttle picks its IPv6 port as before."""
     ipv6 = bool(spec.get("ipv6"))
 
     def wanted(nets):
@@ -64,6 +68,8 @@ def sshuttle_argv(spec, sshuttle, ssh_config=None):
     argv = [sshuttle, "-v", "--method", spec.get("method", "nft")]
     if not ipv6:
         argv.append("--disable-ipv6")
+    if port:
+        argv += ["--listen", f"127.0.0.1:{port}" + (",[::1]:0" if ipv6 else "")]
     if spec.get("tmark"):
         argv += ["--tmark", f"{spec['tmark']:#x}"]
     argv += ["-r", spec["remote"]]
@@ -107,9 +113,49 @@ def exec_tunnel(slot=None):
         ssh_config = write_ssh_config(text, SSH_CONFIG if slot is None else Slot(slot).ssh_config)
         print(f"exec-tunnel: the first hop's name does not resolve; ssh gets its address "
               f"from connect through {ssh_config}", file=sys.stderr, flush=True)
-    argv = sshuttle_argv(spec, sshuttle, ssh_config)
+    port = None if slot is None else listen_port(Slot(slot).listen_ports,
+                                                  udp=spec.get("method") == "tproxy")
+    argv = sshuttle_argv(spec, sshuttle, ssh_config, port)
     print("exec-tunnel: exec " + " ".join(argv), file=sys.stderr, flush=True)
     os.execv(sshuttle, argv)
+
+
+def unprivileged_port_start(path="/proc/sys/net/ipv4/ip_unprivileged_port_start"):
+    """The lowest port any user may bind (it covers IPv6 too), or None."""
+    try:
+        with open(path) as f:
+            return int(f.read())
+    except (OSError, ValueError):
+        return None
+
+
+def bindable(port, kind=socket.SOCK_STREAM):
+    """Whether sshuttle could bind 127.0.0.1:port now. Like sshuttle, without
+    SO_REUSEADDR, so that a port in TIME_WAIT counts as taken (lab T8)."""
+    try:
+        with socket.socket(socket.AF_INET, kind) as s:
+            s.bind(("127.0.0.1", port))
+    except OSError:
+        return False
+    return True
+
+
+def listen_port(ports, udp=False, bindable=bindable, port_start=unprivileged_port_start):
+    """The redirect port: the first of ports, in the slot's order, that is free
+    (design §4.8). method=tproxy also binds UDP on it. When none is free, the
+    first: sshuttle then stops with EADDRINUSE, a failed start like any other
+    (the plugin gives up at Connect, and tries again in a gap)."""
+    start = port_start()
+    if start is not None and start <= max(ports):
+        print(f"exec-tunnel: net.ipv4.ip_unprivileged_port_start is {start}, so any user "
+              f"may bind the redirect ports {min(ports)}-{max(ports)} and stop the tunnel from "
+              f"starting", file=sys.stderr, flush=True)
+    for port in ports:
+        if bindable(port) and (not udp or bindable(port, socket.SOCK_DGRAM)):
+            return port
+    print(f"exec-tunnel: no free redirect port among {min(ports)}-{max(ports)}; trying "
+          f"{ports[0]}", file=sys.stderr, flush=True)
+    return ports[0]
 
 
 # systemd-resolved's stub listeners: the full one and the proxy-only one
@@ -138,6 +184,23 @@ def resolv_conf_problem(path="/etc/resolv.conf"):
 def classify_failure(journal):
     """'login' when the tunnel failed on authentication, else 'connect'."""
     return "login" if any(m in journal for m in AUTH_MARKERS) else "connect"
+
+
+def port_failure(journal, ipv6):
+    """What sshuttle found no free port for, from its journal, or None (design
+    §4.8). sshuttle -v logs its TCP redirector once it is bound and then
+    searches the DNS port; the IPv4 TCP port is exec-tunnel's choice, which
+    logs when none of its ports was free."""
+    if "Address already in use" not in journal:
+        return None
+    if "TCP redirector listening" in journal:
+        return ("no free port for sshuttle's DNS redirector (9001-12300); another user may be "
+                "holding them")
+    if ipv6 and "no free redirect port" not in journal:
+        return ("no free port for sshuttle's IPv6 redirector on ::1 (9001-12300); another user "
+                "may be holding them")
+    return (f"sshuttle's redirect port ({LISTEN_PORTS[0]}-{LISTEN_PORTS[-1]}) was taken, by "
+            f"another tunnel or by root")
 
 
 # ------------------------------------------------------------- ssh bridge

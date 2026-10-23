@@ -505,7 +505,13 @@ dns-rc`). Each item is marked:
 
   Cleanup therefore cannot assume a port. A table is stale exactly when
   nothing listens on its port, and the lab's sweeper uses that test
-  **[lab T7c]**.
+  **[lab T7c]**. The plugin now passes a privileged IPv4 port and counts
+  only root's listeners (§4.8).
+- **[src] `--listen` with a port for each family fails.** Given
+  `127.0.0.1:P,[::1]:P`, sshuttle 1.3.1 and 2.0.0 stop with an
+  `UnboundLocalError` (`used_ports` is only set while searching). With
+  `[::1]:0` it searches the IPv6 port as before. The DNS port is always
+  searched, from 12300 down, and has no option.
 - **[src] `--dns` already covers systemd-resolved, but only once.** Since
   1.0.5 it reads `/etc/resolv.conf` and `/run/systemd/resolve/resolv.conf`,
   only at start. After a network change the capture points at the old
@@ -1608,7 +1614,8 @@ lets the helper finish and still removes ssh is a lab question.
 
 **Sandboxing** such as `ProtectSystem=strict`, `PrivateTmp`,
 `RestrictAddressFamilies` and a capability bounding set (`CAP_NET_ADMIN`,
-`CAP_SETUID`, `CAP_SETGID`) is added and tested one directive at a time.
+`CAP_NET_BIND_SERVICE` for the redirect port of §4.8, `CAP_SETUID`,
+`CAP_SETGID`) is added and tested one directive at a time.
 The ssh child inherits the sandbox, and it must still read `~/.ssh` and
 write `known_hosts`.
 
@@ -1642,6 +1649,37 @@ minimal path under it; `ip` and `nft` there are untested.
   deny by interface: one without a destination also refuses every message
   that has no interface field, to any service on the bus (dbus-daemon(1)).
 - **Other local users** must not be able to take sshuttle's traffic:
+  - **The redirect port.** Without `--listen`, sshuttle takes the first free
+    port from 12300 down, which any user may bind first, all 3300 of them.
+    The plugin's tunnels therefore listen on ports 225 to 240, below
+    `net.ipv4.ip_unprivileged_port_start` (1024 by default), so only root
+    may bind them. IANA has not assigned 225 to 241, so no standard service
+    listens there. `exec-tunnel` passes `--listen 127.0.0.1:PORT` with the
+    first port it can bind, in the slot's order: its own two, 225 + 2N and
+    226 + 2N, then the others from 240 down, which belong to the slots used
+    least. A connection that sshuttle closes first, as when the far end
+    closes it or sshuttle stops with it open, leaves its port in TIME_WAIT
+    for 60 s, and sshuttle binds without `SO_REUSEADDR` (lab T8). So two
+    quick stops of a slot can take both its own ports for a minute.
+    Two slots that start at the same moment can pick the same spare port;
+    one sshuttle then fails with `EADDRINUSE`, as it does when all 16 are
+    taken: a failed start, which fails a `Connect` and is retried in a
+    gap. A lower `ip_unprivileged_port_start` gets a warning in the
+    tunnel's journal and from `check`, and the tunnel still starts.
+  - **Still searched:** the IPv6 redirect port (`[::1]:0`, §2.2) and the
+    DNS port. A user who holds all 3300 ports on `::1`, or all UDP ones,
+    can still stop such a tunnel from starting. It fails closed. A user can
+    also bind either port once sshuttle's socket is gone. If sshuttle's
+    helper then failed to delete its tables, that user receives the
+    redirected IPv6 TCP, or the DNS lookups (and can answer them), until
+    the tunnel unit's `ExecStopPost` sweep removes the tables: up to its
+    15 s `TimeoutStopSec` after a hung helper. The DNS port has no
+    TIME_WAIT, so a user who waits for it always wins that race. Both
+    ports need upstream changes, which are worth proposing with the
+    `--listen` fix (§6). When sshuttle stops with `EADDRINUSE`, the plugin
+    says which port it found none for, from sshuttle's journal: "no free
+    port for sshuttle's DNS redirector (9001-12300); another user may be
+    holding them", or the same for IPv6.
   - **What counts as a listener.** The sweep and the health check count
     only TCP listeners of uid 0 on `127.0.0.1` or `::1` (or the wildcard
     address, as an admin's `--listen` gives), each for its own family; the
@@ -1845,8 +1883,9 @@ to 2026-10-10).
 - GNOME Shell: a VPN plugin without `auth-dialog` leaves secrets requests
   unanswered;
 - sshuttle: the `connect()` crash in server-side DNS forwarding (lab T9),
-  `SO_REUSEADDR` on the listener (lab T6, T8), and automatic exclusion
-  ignoring `-e` (lab T2).
+  `SO_REUSEADDR` on the listener (lab T6, T8), automatic exclusion
+  ignoring `-e` (lab T2), the `UnboundLocalError` when `--listen` gives
+  both families a port (§2.2), and no option for the DNS port (§4.8).
 
 Later, also propose a hook for an externally provided firewall helper
 (§4.8).

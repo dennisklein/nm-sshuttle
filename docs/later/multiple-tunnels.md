@@ -382,6 +382,11 @@ The design as above, with these results and details:
   hierarchy or systemd's v1 hierarchy. Where none holds systemd's units,
   the plugin gives up at the first health check; it never falls back to
   every listener (design §4.8).
+- **Each slot has its own redirect ports,** 225 + 2N and 226 + 2N for
+  IPv4, and takes a free one of the other slots' ports, from 240 down,
+  when TIME_WAIT holds both of its own (design §4.8). A table's port
+  therefore does not name its slot; the health check goes by the cgroup.
+  The IPv6 port is still sshuttle's own choice.
 - **`list` marks active profiles without their slot:** the claims under
   `/run/nm-sshuttle/` are readable by root only.
 - **An error while reading or writing the claims fails the activation**,

@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: MIT
+import json
 import os
 import socket
 import subprocess
 import time
 from types import SimpleNamespace
 
-from nm_sshuttle import tunnel
+from nm_sshuttle import const, tunnel
+from nm_sshuttle.const import LISTEN_PORTS, SLOTS, Slot
 
 SPEC = {"remote": "corp", "user": "alice", "subnets": ["10.0.0.0/8"], "exclude": ["10.0.5.0/24"],
         "dns": "split", "dns_servers": ["10.1.0.53", "10.1.0.54"], "method": "nft",
@@ -202,6 +204,17 @@ def test_classify_failure():
     assert tunnel.classify_failure("ssh: connect to host corp port 22: timed out") == "connect"
 
 
+def test_port_failure_names_the_port_sshuttle_found_none_for():
+    in_use = "OSError: [Errno 98] Address already in use\n"
+    tcp = "c : TCP redirector listening on ('127.0.0.1', 225).\n"
+    none_free = "exec-tunnel: no free redirect port among 225-240; trying 225\n"
+    assert tunnel.port_failure("ssh: connect to host corp port 22: timed out", True) is None
+    assert "DNS redirector" in tunnel.port_failure(tcp + in_use, False)
+    assert "IPv6 redirector" in tunnel.port_failure(in_use, True)
+    assert "redirect port (225-240) was taken" in tunnel.port_failure(in_use, False)
+    assert "redirect port (225-240) was taken" in tunnel.port_failure(none_free + in_use, True)
+
+
 HEAD = ("  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  "
         "timeout inode\n")
 
@@ -329,6 +342,79 @@ def test_nft_health(monkeypatch):
     assert tunnel.nft_health("nft", "nm-sshuttle-guard-0", {4: {12305}}) is None
 
 
+# -------------------------------------------------------------- redirect port
+def test_each_slot_tries_its_own_privileged_ports_first():
+    assert Slot(0).listen_ports[:2] == [225, 226] and Slot(7).listen_ports[:2] == [239, 240]
+    own = [p for n in range(SLOTS) for p in Slot(n).listen_ports[:2]]
+    assert sorted(own) == list(LISTEN_PORTS) and max(own) < 1024
+    # then the others, from those of the slots used least
+    assert Slot(0).listen_ports[2:4] == [240, 239] and Slot(7).listen_ports[2] == 238
+    assert all(sorted(Slot(n).listen_ports) == list(LISTEN_PORTS) for n in range(SLOTS))
+
+
+def test_quick_restarts_take_another_slots_port():
+    # two stops of slot 0 within a minute left both its own ports in TIME_WAIT
+    taken = {225, 226}
+    port = tunnel.listen_port(Slot(0).listen_ports, bindable=lambda p, k=0: p not in taken,
+                              port_start=lambda: 1024)
+    assert port == 240
+
+
+def test_exec_tunnel_passes_the_slots_port(tmp_path, monkeypatch):
+    monkeypatch.setattr(const, "STATE_DIR", str(tmp_path))
+    os.makedirs(Slot(2).dir)
+    with open(Slot(2).spec, "w") as f:
+        json.dump(SPEC, f)
+    asked, ran = [], []
+    monkeypatch.setattr(tunnel.shutil, "which", lambda *a, **k: "/usr/bin/sshuttle")
+    monkeypatch.setattr(tunnel, "pinned_ssh_config", lambda spec: None)
+    monkeypatch.setattr(tunnel, "listen_port",
+                        lambda ports, udp=False: asked.append((ports, udp)) or ports[1])
+    monkeypatch.setattr(tunnel.os, "execv", lambda path, argv: ran.append(argv))
+    tunnel.exec_tunnel(2)
+    assert asked == [(Slot(2).listen_ports, False)]
+    assert ran[0][ran[0].index("--listen") + 1] == "127.0.0.1:230"
+
+
+def test_sshuttle_argv_listens_on_the_slots_port():
+    argv = tunnel.sshuttle_argv(SPEC, "sshuttle", port=227)
+    assert argv[argv.index("--listen") + 1] == "127.0.0.1:227"
+    # sshuttle fails when both families get a port: IPv6 keeps its own search
+    argv = tunnel.sshuttle_argv(dict(SPEC, ipv6=True), "sshuttle", port=227)
+    assert argv[argv.index("--listen") + 1] == "127.0.0.1:227,[::1]:0"
+    assert "--listen" not in tunnel.sshuttle_argv(SPEC, "sshuttle")
+
+
+def test_listen_port_skips_a_port_in_use(capsys):
+    taken = {(225, socket.SOCK_STREAM)}
+
+    def bindable(port, kind=socket.SOCK_STREAM):
+        return (port, kind) not in taken
+    assert tunnel.listen_port([225, 226], bindable=bindable, port_start=lambda: 1024) == 226
+    taken.add((226, socket.SOCK_DGRAM))
+    # tproxy binds UDP on it too; with neither free, sshuttle gets the first and fails
+    assert tunnel.listen_port([225, 226], True, bindable, lambda: 1024) == 225
+    assert "no free redirect port among 225-226" in capsys.readouterr().err
+    assert tunnel.listen_port([225, 226], bindable=lambda p, k=0: True,
+                              port_start=lambda: 0) == 225
+    assert "ip_unprivileged_port_start is 0" in capsys.readouterr().err
+
+
+def test_bindable_sees_a_port_in_time_wait():
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    port = listener.getsockname()[1]
+    listener.listen(1)
+    assert not tunnel.bindable(port)
+    client = socket.create_connection(("127.0.0.1", port))
+    conn, _ = listener.accept()
+    conn.close()                  # the listener's side closes first: TIME_WAIT
+    listener.close()
+    time.sleep(0.05)
+    client.close()
+    assert not tunnel.bindable(port)
+
+
 def test_resolv_conf_must_point_at_resolveds_stub(tmp_path):
     f = tmp_path / "resolv.conf"
     f.write_text("# stub\nnameserver 127.0.0.53\noptions edns0 trust-ad\nsearch .\n")
@@ -342,3 +428,10 @@ def test_resolv_conf_must_point_at_resolveds_stub(tmp_path):
     f.write_text("search corp.example\n")       # glibc then asks 127.0.0.1
     assert tunnel.resolv_conf_problem(str(f)) == f"{f} lists no nameserver"
     assert "cannot read" in tunnel.resolv_conf_problem(str(tmp_path / "missing"))
+
+
+def test_unprivileged_port_start(tmp_path):
+    f = tmp_path / "start"
+    f.write_text("1024\n")
+    assert tunnel.unprivileged_port_start(str(f)) == 1024
+    assert tunnel.unprivileged_port_start(str(tmp_path / "missing")) is None

@@ -331,6 +331,17 @@ def test_health_gives_up_once_without_systemds_cgroups(up, caplog):
     assert "no listener counts as the tunnel's own" in caplog.text
 
 
+def test_a_reconnect_without_a_free_dns_port_says_why(up, caplog):
+    fx, sup = up
+    sup.on_tunnel_inactive()
+    sup.on_ac_state(AC, AC_ACTIVATING, 6)
+    fx.advance(1.0)
+    fx.finish_start(False, "c : TCP redirector listening on ('127.0.0.1', 225).\n"
+                    "OSError: [Errno 98] Address already in use")
+    assert sup.phase == "gap"
+    assert "no free port for sshuttle's DNS redirector (9001-12300)" in caplog.text
+
+
 def test_a_gap_puts_back_a_flushed_guard_while_paused(up):
     fx, sup = up
     sup.on_network(OFFLINE, CONN_NONE, None)       # a paused gap: no attempts at all

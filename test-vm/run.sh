@@ -266,6 +266,7 @@ s_connect() {
     check M2-02g "the tunnel unit is active" tunnel_active
     check M2-02h "the plugin is alive and owns $BUS" plugin_owns_bus
     check M2-02k "NetworkManager gave the activation its own bus name (--bus-name)" per_activation_name
+    check M2-02l "sshuttle listens on a port of the slot's own ($LISTEN_PORTS), with its table" slot_listens
     if fw_running; then
         check M2-02i "firewalld has $LINK bound to a zone" fw_bound
         result M2-02i-z INFO "zone of $LINK: $(fw_zone_of_link); default zone $(fw_default_zone)"
@@ -546,6 +547,21 @@ s_reconnect_connect() {
     fi
     check M2-11g "plugin log: no Connect was ignored" plog_has_not "Connect ignored"
     result M2-11h INFO "Connect arrived during teardown (queued): $(plog | grep -c 'Connect arrived during')"
+    # i: three more activations within a minute, each tunnel stopped with a
+    # connection open, which leaves its redirect port in TIME_WAIT for 60 s:
+    # the next tunnel takes another port (design §4.8)
+    local i
+    for i in 1 2 3; do
+        [ "$(con_state)" = activated ] || break
+        hold_conn 4
+        sleep 1
+        result "M2-11i$i-p" INFO "slot $SLOT listens on $(redirect_listens); in TIME_WAIT: '$(redirect_waits)'"
+        nmcli connection down "$CON" > /dev/null 2>&1
+        wait_for 20 con_gone
+        sleep 10            # the dispatcher hands a slot out again only after 10 s
+        connect_ok "M2-11i$i" "activation $i of 3 within a minute, after a stop with a connection open"
+    done
+    result M2-11j INFO "slot $SLOT listens on $(redirect_listens); in TIME_WAIT: '$(redirect_waits)'"
     end_checks M2-11
 }
 
