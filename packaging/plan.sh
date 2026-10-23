@@ -13,12 +13,13 @@
 #                      building, so that changes to it go live
 #       KEEP_VERSIONS  versions kept per package (default 2); a release that
 #                      publish.sh would prune is not built
-# Writes tag, build (true|false), fedora (JSON list) and publish
-# (real|dry-run|none) to $GITHUB_OUTPUT (stdout when unset).
+# Writes tag, commit (the tag's), build (true|false), fedora (JSON list) and
+# publish (real|dry-run|none) to $GITHUB_OUTPUT (stdout when unset).
 #
 # A real publish packages a release tag. A dry run assembles the repository
 # with a throwaway key from the checkout's HEAD instead (tag is empty then),
 # for pull requests and for as long as there is no tag or no signing key.
+# Either way the tag must name a commit on origin/main.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -35,9 +36,24 @@ if [ -n "$tag" ] && [[ ! $tag =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "::error::invalid release tag: $tag"
   exit 1
 fi
-if [ -n "$tag" ] && ! git -C "$root" rev-parse --verify --quiet "refs/tags/$tag^{commit}" > /dev/null; then
-  echo "::error::no tag $tag in this repository"
-  exit 1
+commit=
+if [ -n "$tag" ]; then
+  commit=$(git -C "$root" rev-parse --verify --quiet "refs/tags/$tag^{commit}") || {
+    echo "::error::no tag $tag in this repository"
+    exit 1
+  }
+  # Only source on main gets signed: the key is limited to runs on main,
+  # but a tag can name any commit. The checkout needs main's whole history
+  # (fetch-depth: 0).
+  if [ "$(git -C "$root" rev-parse --is-shallow-repository)" = true ] ||
+    ! git -C "$root" rev-parse --verify --quiet refs/remotes/origin/main > /dev/null; then
+    echo "::error::origin/main is missing; fetch main's history to check tag $tag"
+    exit 1
+  fi
+  if ! git -C "$root" merge-base --is-ancestor "$commit" refs/remotes/origin/main; then
+    echo "::error::tag $tag names commit $commit, which is not on main; only tags on main are packaged"
+    exit 1
+  fi
 fi
 version=${tag#v}
 
@@ -136,10 +152,12 @@ else
   publish=dry-run
   build=true
   tag=
+  commit=
 fi
 
 {
   echo "tag=$tag"
+  echo "commit=$commit"
   echo "fedora=$(printf '%s\n' "${releases[@]}" | jq -R . | jq -cs .)"
   echo "build=$build"
   echo "publish=$publish"

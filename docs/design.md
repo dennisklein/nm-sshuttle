@@ -2165,4 +2165,5 @@ Later, also propose a hook for an externally provided firewall helper
    behind the IPv4 method); that is fixed, and the re-check of 7.3 to 7.7
    is still open.
    **Packages:** a signed dnf repository for Fedora 43 and 44 on GitHub
-   Pages, published from release tags ([`packaging/`](../packaging/README.md)).
+   Pages, published from release tags on `main`
+   ([`packaging/`](../packaging/README.md)).

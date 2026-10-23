@@ -59,10 +59,12 @@ jobs:
       contents: read
     outputs:
       tag: ${{ steps.plan.outputs.tag }}
+      commit: ${{ steps.plan.outputs.commit }}
       fedora: ${{ steps.plan.outputs.fedora }}
       build: ${{ steps.plan.outputs.build }}
       publish: ${{ steps.plan.outputs.publish }}
     steps:
+      # All history: plan.sh checks that the tag is on origin/main.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -102,9 +104,12 @@ jobs:
       - name: Build source RPMs
         env:
           TAG: ${{ needs.plan.outputs.tag }}
+          COMMIT: ${{ needs.plan.outputs.commit }}
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          packaging/make-srpm.sh out ${TAG:+"$TAG"}
+          # The plan job checked that COMMIT is on main; make-srpm.sh
+          # refuses a tag moved since then.
+          packaging/make-srpm.sh out ${TAG:+"$TAG" "$COMMIT"}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: srpm-nm-sshuttle
