@@ -30,20 +30,28 @@ hosts where WireGuard is not an option.
 ## Install
 
 Fedora 43 and 44 can install from the signed package repository, which also
-brings updates:
+brings updates. Packages and repository metadata are signed with a key from
+[`RPM-GPG-KEY-nm-sshuttle`](packaging/nm-sshuttle-release/RPM-GPG-KEY-nm-sshuttle),
+which holds the keys with these fingerprints:
+
+```
+62D450232396EDB49BFF8E71109A2C1BD34D4A1C
+```
+
+Download the key file, and import it only if `gpg --show-keys` shows each
+fingerprint listed here and no other key, and reports no error (install
+`gnupg2` if `gpg` is missing). The site serves the key file and the
+repository package together, so compare with this page on GitHub, not with
+the site. Then install the repository package with its
+signature checked, which dnf skips for a package named on the command line
+unless told otherwise:
 
 ```console
-$ sudo rpm --import https://dennisklein.github.io/nm-sshuttle/RPM-GPG-KEY-nm-sshuttle
-$ sudo dnf install https://dennisklein.github.io/nm-sshuttle/nm-sshuttle-release.noarch.rpm
+$ curl -fsSLO https://dennisklein.github.io/nm-sshuttle/RPM-GPG-KEY-nm-sshuttle
+$ gpg --show-keys RPM-GPG-KEY-nm-sshuttle
+$ sudo rpm --import RPM-GPG-KEY-nm-sshuttle
+$ sudo dnf install --setopt=localpkg_gpgcheck=1 https://dennisklein.github.io/nm-sshuttle/nm-sshuttle-release.noarch.rpm
 $ sudo dnf install nm-sshuttle nm-sshuttle-gnome
-```
-
-Packages and repository metadata are signed with this key
-([`RPM-GPG-KEY-nm-sshuttle`](packaging/nm-sshuttle-release/RPM-GPG-KEY-nm-sshuttle)),
-fingerprint:
-
-```
-62D4 5023 2396 EDB4 9BFF 8E71 109A 2C1B D34D 4A1C
 ```
 
 `nm-sshuttle-gnome` adds sshuttle to GNOME Settings' VPN list; leave it out

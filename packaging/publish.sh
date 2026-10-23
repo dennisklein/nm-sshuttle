@@ -171,8 +171,8 @@ for dir in "$site"/rpm/fedora/*/x86_64 "$site"/rpm/fedora/source; do
 done
 
 cp "$pubkey" "$site/RPM-GPG-KEY-nm-sshuttle"
-grouped=$(sed -E 's/(.{4})/\1 /g; s/ $//' <<<"$fpr")
-sed -e "s/@FINGERPRINT@/$grouped/g" "$here/site/index.html" > "$site/index.html"
+# As gpg --show-keys prints it, which the install steps compare.
+sed -e "s/@FINGERPRINT@/$fpr/g" "$here/site/index.html" > "$site/index.html"
 (cd "$site" && find rpm -name '*.rpm' | LC_ALL=C sort | xargs -r sha256sum) > "$site/packages.sha256"
 (cd "$site" && find rpm -name '*.rpm' | LC_ALL=C sort | xargs -r stat -c '%Y %n') > "$site/packages.mtime"
 python3 "$here/site-index.py" "$PAGES_URL" "$site"

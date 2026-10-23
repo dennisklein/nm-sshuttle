@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: MIT
-"""The release pipeline signs only tags on main."""
+"""The release pipeline signs only tags on main, and the install steps check the key."""
 
 import http.server
 import json
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -192,6 +193,64 @@ def test_srpm_job_passes_the_checked_commit():
     assert "commit: ${{ steps.plan.outputs.commit }}" in wf
     assert "COMMIT: ${{ needs.plan.outputs.commit }}" in wf
     assert 'packaging/make-srpm.sh out ${TAG:+"$TAG" "$COMMIT"}' in wf
+
+
+def key_fingerprints(home):
+    if not shutil.which("gpg"):
+        pytest.skip("needs gpg")
+    home.mkdir(mode=0o700)
+    out = subprocess.run(
+        ["gpg", "--batch", "--with-colons", "--show-keys", str(PUBKEY)],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "GNUPGHOME": str(home)},
+    ).stdout
+    fprs, primary = [], False
+    for line in out.splitlines():
+        fields = line.split(":")
+        if fields[0] == "pub":
+            primary = True
+        elif fields[0] == "fpr" and primary:
+            fprs.append(fields[9])
+            primary = False
+    return fprs
+
+
+def test_readme_shows_the_fingerprint_of_the_committed_key(tmp_path):
+    # The README on GitHub is the copy users compare against; gpg --show-keys
+    # prints the fingerprint the same way.
+    readme = (ROOT / "README.md").read_text()
+    shown = re.findall(r"^([0-9A-F]{40})$", readme, re.M)
+    assert shown == key_fingerprints(tmp_path / "gnupg")
+
+
+INSTALL_DOCS = ["README.md", "docs/user-guide.md", "packaging/site/index.html"]
+
+
+@pytest.mark.parametrize("doc", INSTALL_DOCS)
+def test_install_steps_check_the_key_before_importing_it(doc):
+    text = (ROOT / doc).read_text()
+    # The key is imported from a downloaded file, after gpg shows its keys,
+    # and never straight from the site. gpg must show the listed keys, no
+    # other key and no error: a key file gpg cannot parse shows no key at all.
+    assert "rpm --import https://" not in text
+    assert re.search(r"each\s+fingerprint listed", text)
+    assert re.search(r"no\s+other\s+key,\s+and\s+reports\s+no\s+error", text)
+    site = "https://dennisklein.github.io/nm-sshuttle"
+    show = text.index("gpg --show-keys RPM-GPG-KEY-nm-sshuttle")
+    imp = text.index("sudo rpm --import RPM-GPG-KEY-nm-sshuttle")
+    assert text.index(f"curl -fsSLO {site}/RPM-GPG-KEY-nm-sshuttle") < show < imp
+    assert "github.com/dennisklein/nm-sshuttle" in text or doc == "README.md"
+    # dnf checks the repository package against that key only when told to.
+    release = f"{site}/nm-sshuttle-release.noarch.rpm"
+    assert text.count(release) == 1
+    assert imp < text.index(f"sudo dnf install --setopt=localpkg_gpgcheck=1 {release}")
+
+
+def test_smoke_test_installs_the_release_package_as_users_do():
+    text = (PACKAGING / "smoke-test.sh").read_text()
+    assert 'dnf -y install --setopt=localpkg_gpgcheck=1 "$base/nm-sshuttle-release' in text
 
 
 FAKE_GH = r"""#!/usr/bin/env python3

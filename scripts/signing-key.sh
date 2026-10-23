@@ -33,10 +33,13 @@
 # with a new nm-sshuttle-release Version, so that clients get the new key from a
 # package signed by one they trust:
 # 1. --next generates a key, adds it to RPM-GPG-KEY-nm-sshuttle and backs it up as
-#    above, without signing with it yet.
+#    above, without signing with it yet. Add its fingerprint to README.md.
 # 2. Once clients have updated nm-sshuttle-release, --switch with that backup makes
 #    the next publish sign everything with the new key.
-# 3. After that publish, --retire removes the old key.
+# 3. After that publish, --retire removes the old key. Remove its fingerprint
+#    from README.md.
+# README.md lists the fingerprint of every key in RPM-GPG-KEY-nm-sshuttle, for
+# new users to check the key file against (tests/test_packaging.py).
 #
 # Env: NM_SSHUTTLE_SIGNING_UID  key user ID (default: nm-sshuttle package signing <d.klein@gsi.de>)
 #      NM_SSHUTTLE_REPO         GitHub repository (default: dennisklein/nm-sshuttle)
@@ -155,7 +158,8 @@ case $mode in
 Added key $fpr ($uid) to ${pubkey#"$root"/}; packages are still signed
 with the current key.
 
-- Bump nm-sshuttle-release's Version, then commit and push.
+- Add its fingerprint to the list in README.md, bump nm-sshuttle-release's
+  Version, then commit and push.
 - Once clients have updated nm-sshuttle-release, run
   $0 --switch $backup/$fpr.secret.asc
 - Backups of the secret key and revocation certificate are in $backup.
@@ -194,9 +198,10 @@ MSG
     mv "$pubkey.new" "$pubkey"
     cat <<MSG
 
-Removed key $2 from ${pubkey#"$root"/}. Bump nm-sshuttle-release's Version,
-then commit and push. publish.sh refuses to publish while $secret still
-holds that key. Clients keep trusting it until they delete it with
+Removed key $2 from ${pubkey#"$root"/}. Remove its fingerprint from
+README.md, bump nm-sshuttle-release's Version, then commit and push.
+publish.sh refuses to publish while $secret still holds that key.
+Clients keep trusting it until they delete it with
 sudo rpmkeys --delete ${id,,}
 MSG
     exit 0 ;;
@@ -235,7 +240,8 @@ Created signing key $fpr ($uid).
 - Secret key stored as $secret in the $environment environment of $repo,
   which only workflow runs on main can use.
 - The $pages_environment environment is restricted to main as well.
-- Public key written to ${pubkey#"$root"/}; commit and push it.
+- Public key written to ${pubkey#"$root"/}; put its fingerprint in
+  README.md, then commit and push both.
 - Backups of the secret key and revocation certificate are in $backup.
   Move them to offline storage and delete them from this machine.
 MSG

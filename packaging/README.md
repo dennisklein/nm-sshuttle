@@ -34,7 +34,8 @@ with a throwaway key and deploy nothing.
    stores the new secret key as the secret `RPM_SIGNING_KEY` of
    `rpm-signing` and writes the public key to
    `packaging/nm-sshuttle-release/RPM-GPG-KEY-nm-sshuttle`. Commit and push
-   that file to `main`. Move the backup the script prints out of the machine.
+   that file to `main`, with its fingerprint in the install section of
+   `../README.md`. Move the backup the script prints out of the machine.
    `scripts/signing-key.sh --restrict` restricts the two environments again;
    run it once on a repository set up before it restricted `github-pages`,
    and after any change to the Pages settings.
