@@ -5,7 +5,7 @@ between active profiles").
 
 Each plugin instance writes its claim to its slot's claim.json while it holds
 the claims lock, after reading the others' claims; a claim counts while the
-PID in it is a running plugin.
+process it names, by PID and start time, is a running plugin.
 """
 
 import fcntl
@@ -40,7 +40,8 @@ def effective_networks(networks, exclude):
 
 
 def make_claim(profile, hops, pid=None):
-    """The claim of an activation: what the conflict rules compare."""
+    """The claim of an activation: what the conflict rules compare. The
+    instance adds its PID and start time when it takes it."""
     return {"id": profile.id, "uuid": profile.uuid, "pid": pid,
             "networks": effective_networks(profile.guarded_networks(), profile.exclude),
             "dns": profile.dns,
@@ -110,13 +111,47 @@ def first_hop_loop(mine, others):
     return [nodes[i].get("id") or nodes[i].get("uuid") or "?" for i in loop] if loop else None
 
 
-def _alive(pid):
-    """pid is a running plugin instance."""
+def process_start(pid, proc="/proc"):
+    """When the process started, in clock ticks since boot (field 22 of
+    /proc/PID/stat), or None. With the PID it names one process for good."""
     try:
-        with open(f"/proc/{int(pid)}/cmdline", "rb") as f:
-            return b"nm-sshuttle-service" in f.read()
+        with open(f"{proc}/{int(pid)}/stat") as f:
+            text = f.read()
+        # the command name in field 2 may hold spaces and parentheses
+        return int(text[text.rindex(")") + 2:].split()[19])
+    except (OSError, ValueError, TypeError, IndexError):
+        return None
+
+
+def runs_as_root(pid, proc="/proc"):
+    """Whether every user ID of the process is 0 (/proc/PID/status). A
+    setuid-root program such as sudo has euid 0 at once, but keeps its
+    caller's real user ID until it has checked a password."""
+    try:
+        with open(f"{proc}/{int(pid)}/status") as f:
+            for line in f:
+                if line.startswith("Uid:"):
+                    return line.split()[1:] == ["0"] * 4
+    except (OSError, ValueError, TypeError):
+        pass
+    return False
+
+
+def _alive(pid, start=None, proc="/proc"):
+    """pid is a running plugin instance: with the start time the claim
+    recorded, so that another process that got the PID later never counts.
+    A claim from before start times (an upgrade) needs a process that runs as
+    root, not only one with euid 0, with nm-sshuttle-service in its command
+    line."""
+    try:
+        with open(f"{proc}/{int(pid)}/cmdline", "rb") as f:
+            if b"nm-sshuttle-service" not in f.read():
+                return False
     except (OSError, ValueError, TypeError):
         return False
+    if not runs_as_root(pid, proc):
+        return False
+    return start is None or process_start(pid, proc) == start
 
 
 def read_claims(skip, alive=_alive, slots=range(SLOTS)):
@@ -130,7 +165,7 @@ def read_claims(skip, alive=_alive, slots=range(SLOTS)):
                 claim = json.load(f)
         except (OSError, ValueError):
             continue
-        if alive(claim.get("pid")):
+        if alive(claim.get("pid"), claim.get("start")):
             out.append(claim)
     return out
 

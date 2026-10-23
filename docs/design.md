@@ -1620,6 +1620,12 @@ minimal path under it; `ip` and `nft` there are untested.
 - **The bridge never runs anything as root except `setpriv`**, and ssh
   never runs as root.
 - **D-Bus access:** only root may own or call the plugin's name.
+- **Claims** count while the process they name has the start time
+  recorded in the claim (`/proc/PID/stat`), so a process that reuses the
+  PID never counts. A claim written before start times, during an upgrade,
+  needs a process with `nm-sshuttle-service` in its command line and every
+  user ID 0 (`/proc/PID/status`): euid 0 alone would admit sudo waiting
+  for a password, with that string among its arguments.
 
 ### 4.9 Code layout and size
 

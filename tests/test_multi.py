@@ -121,7 +121,8 @@ def state_dir(tmp_path, monkeypatch):
 
 
 def test_take_writes_the_claim_and_refuses_a_conflicting_one(state_dir):
-    alive = {1, 2}.__contains__
+    def alive(pid, start):
+        return pid in {1, 2}
     assert claims.take(0, dict(claim("corp", ["10.0.0.0/8"]), pid=1), alive) is None
     path = state_dir / "0" / "claim.json"
     assert json.loads(path.read_text())["id"] == "corp"
@@ -132,13 +133,13 @@ def test_take_writes_the_claim_and_refuses_a_conflicting_one(state_dir):
 
 
 def test_a_dead_instances_claim_does_not_count(state_dir):
-    claims.take(0, dict(claim("corp", ["10.0.0.0/8"]), pid=1), lambda pid: True)
+    claims.take(0, dict(claim("corp", ["10.0.0.0/8"]), pid=1), lambda pid, start: True)
     assert claims.take(1, dict(claim("lab", ["10.1.0.0/16"]), pid=2),
-                       lambda pid: pid != 1) is None
+                       lambda pid, start: pid != 1) is None
 
 
 def test_an_instance_may_retake_its_own_slot(state_dir):
-    alive = lambda pid: True          # noqa: E731
+    alive = lambda pid, start: True   # noqa: E731
     claims.take(2, dict(claim("corp", ["10.0.0.0/8"]), pid=1), alive)
     assert claims.take(2, dict(claim("corp", ["10.0.0.0/8"], hops=["1.2.3.4"]), pid=1),
                        alive) is None
@@ -146,21 +147,48 @@ def test_an_instance_may_retake_its_own_slot(state_dir):
 
 
 def test_release_removes_the_claim(state_dir):
-    claims.take(0, claim("corp"), lambda pid: True)
+    claims.take(0, claim("corp"), lambda pid, start: True)
     claims.release(0)
     claims.release(0)                 # twice is fine
-    assert claims.read_claims(skip=None, alive=lambda pid: True) == []
+    assert claims.read_claims(skip=None, alive=lambda pid, start: True) == []
 
 
 def test_a_broken_claim_file_is_ignored(state_dir):
     (state_dir / "3").mkdir()
     (state_dir / "3" / "claim.json").write_text("{")
-    assert claims.read_claims(skip=None, alive=lambda pid: True) == []
+    assert claims.read_claims(skip=None, alive=lambda pid, start: True) == []
 
 
 def test_alive_needs_a_plugin_process():
     assert not claims._alive(None)
     assert not claims._alive(os.getpid())     # pytest, not nm-sshuttle-service
+
+
+def fake_proc(tmp_path, pid, cmdline, start, uids):
+    """/proc/PID with a cmdline, user IDs and a stat whose command name has spaces."""
+    d = tmp_path / "proc" / str(pid)
+    d.mkdir(parents=True)
+    (d / "cmdline").write_bytes(cmdline)
+    fields = ["S"] + ["0"] * 18 + [str(start)] + ["0"] * 10
+    (d / "stat").write_text(f"{pid} (python3 (x) y) " + " ".join(fields) + "\n")
+    (d / "status").write_text("Name:\tx\nUid:\t" + "\t".join(map(str, uids)) + "\nGid:\t0\n")
+    return str(tmp_path / "proc")
+
+
+def test_alive_wants_roots_plugin_with_the_claimed_start_time(tmp_path):
+    plugin = b"/usr/bin/python3\0/usr/libexec/nm-sshuttle-service\0--slot\0001\0"
+    proc = fake_proc(tmp_path, 42, plugin, 777, (0, 0, 0, 0))
+    assert claims.process_start(42, proc) == 777
+    assert claims._alive(42, 777, proc)
+    assert claims._alive(42, None, proc)          # a claim from before start times
+    assert not claims._alive(42, 778, proc)       # the PID went to a later process
+    # any user can name a process so: only root's counts
+    other = fake_proc(tmp_path / "u", 43, b"sleep\0001d\0nm-sshuttle-service\0", 5, (1000,) * 4)
+    assert not claims._alive(43, None, other) and not claims._alive(43, 5, other)
+    # nor one with euid 0: sudo waiting for a password keeps the caller's real ID
+    sudo = fake_proc(tmp_path / "s", 44, b"sudo\0-S\0nm-sshuttle-service\0", 5, (1000, 0, 0, 0))
+    assert not claims._alive(44, None, sudo)
+    assert claims.process_start(44, proc) is None
 
 
 # --------------------------------------------------------------- dispatcher

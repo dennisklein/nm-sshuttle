@@ -224,7 +224,8 @@ Two active profiles must not claim the same traffic or the same DNS. At
 exist, the instance takes `/run/nm-sshuttle/claims.lock` (`flock`), reads
 the other slots' `claim.json` files, checks, writes its own and releases
 the lock. A claim counts while the PID in it is a running
-`nm-sshuttle-service`. The instance removes its claim when it sends
+`nm-sshuttle-service` with the start time the claim recorded
+(design §4.8). The instance removes its claim when it sends
 STOPPED, and `cleanup --slot N` removes it after a kill.
 
 A claim holds the profile's id and UUID, its *effective networks* (the
