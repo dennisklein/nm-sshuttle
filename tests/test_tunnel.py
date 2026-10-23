@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: MIT
 import json
 import os
+import shlex
 import socket
 import subprocess
 import time
 from types import SimpleNamespace
 
-from nm_sshuttle import const, tunnel
+import pytest
+
+from nm_sshuttle import const, profile, tunnel
 from nm_sshuttle.const import LISTEN_PORTS, SLOTS, Slot
 
 SPEC = {"remote": "corp", "user": "alice", "subnets": ["10.0.0.0/8"], "exclude": ["10.0.5.0/24"],
@@ -17,9 +20,9 @@ SPEC = {"remote": "corp", "user": "alice", "subnets": ["10.0.0.0/8"], "exclude":
 def test_sshuttle_argv():
     argv = tunnel.sshuttle_argv(SPEC, "/usr/bin/sshuttle")
     assert argv[:5] == ["/usr/bin/sshuttle", "-v", "--method", "nft", "--disable-ipv6"]
-    assert argv[argv.index("-r") + 1] == "corp"
+    assert argv[argv.index("-r") + 1] == "127.0.0.1"    # the stand-in: never looked up
     assert ["-x", "203.0.113.7", "-x", "10.0.5.0/24"] == argv[7:11]
-    assert argv[argv.index("-e") + 1].endswith("/nm-sshuttle ssh-as-user alice")
+    assert argv[argv.index("-e") + 1].endswith("/nm-sshuttle ssh-as-user alice --remote corp")
     assert argv[argv.index("--to-ns") + 1] == "10.1.0.53"
     assert argv[argv.index("--ns-hosts") + 1] == "10.1.0.53,10.1.0.54"
     assert argv[-1] == "10.0.0.0/8"      # the DNS /32s lie inside it and are merged
@@ -180,7 +183,75 @@ def test_the_pinned_config_goes_to_ssh(tmp_path):
     assert open(path).read() == "Host x\n"
     assert (tmp_path / "ssh" / "ssh_config").stat().st_mode & 0o777 == 0o644
     argv = tunnel.sshuttle_argv(SPEC, "sshuttle", path)
-    assert argv[argv.index("-e") + 1].endswith(f"/nm-sshuttle ssh-as-user alice -F {path}")
+    assert argv[argv.index("-e") + 1].endswith(
+        f"/nm-sshuttle ssh-as-user alice --remote corp -F {path}")
+
+
+def sshuttle_runs(argv):
+    """What sshuttle 1.3.1 and 2.0.0 run for -e and the stand-in -r, which has
+    no user and no port (their ssh.connect)."""
+    return shlex.split(argv[argv.index("-e") + 1]) + [argv[argv.index("-r") + 1], "--",
+                                                      "/bin/sh -c 'exec python3'"]
+
+
+# ssh's arguments as sshuttle 1.3.1 and 2.0.0 split these remotes (parse_hostport):
+# the same user, host and port. The host goes on as written, as `check` gives it to
+# ssh; sshuttle wrote an IPv6 address in short form and, with a port, in lower case.
+@pytest.mark.parametrize("remote,ssh", [
+    ("Corp:2222", ["-p", "2222", "Corp"]),
+    ("2001:DB8:0::7", ["2001:DB8:0::7"]),
+    ("corp", ["corp"]),
+    ("alice@corp", ["alice@corp"]),
+    ("corp:2222", ["-p", "2222", "corp"]),
+    ("alice@gw.corp.example:022", ["-p", "22", "alice@gw.corp.example"]),
+    ("2001:db8::7", ["2001:db8::7"]),
+    ("alice@[2001:db8::7]:2222", ["-p", "2222", "alice@2001:db8::7"]),
+    ("alice@[2001:db8::7]", ["alice@2001:db8::7"]),
+    ("fe80::7%eth0", ["fe80::7%eth0"]),
+])
+def test_the_bridge_gives_ssh_the_remote_split_as_sshuttle_splits_it(remote, ssh):
+    for config in (None, "/run/nm-sshuttle-ssh/ssh_config-0"):
+        argv = tunnel.sshuttle_argv(dict(SPEC, remote=remote), "sshuttle", config)
+        bridge = sshuttle_runs(argv)
+        assert bridge[1:4] == ["ssh-as-user", "alice", "--remote"] and bridge[4] == remote
+        assert tunnel.bridged_args(bridge[4], bridge[5:]) == (
+            (["-F", config] if config else []) + ssh + ["--", "/bin/sh -c 'exec python3'"])
+
+
+@pytest.mark.parametrize("args", [
+    ["127.0.0.1"],
+    ["-G", "127.0.0.1"],                          # a patched sshuttle's lookup (upstream §3)
+    ["-p", "22", "127.0.0.1", "--", "x"],
+    ["alice@127.0.0.1", "--", "x"],
+    ["corp", "--", "x"],
+    ["127.0.0.1", "x", "y"],
+    ["127.0.0.1", "--", "x", "y"],
+    ["-F", "/c", "-o", "ProxyCommand=x", "127.0.0.1", "--", "x"],
+])
+def test_the_bridge_refuses_other_arguments(args):
+    with pytest.raises(ValueError, match="unexpected arguments"):
+        tunnel.bridged_args("corp", args)
+
+
+def test_the_bridge_checks_the_remote_again():
+    with pytest.raises(profile.ProfileError):
+        tunnel.bridged_args("-oProxyCommand=x", ["127.0.0.1", "--", "x"])
+
+
+def test_ssh_as_user_execs_ssh_with_the_remote(monkeypatch):
+    pw = SimpleNamespace(pw_uid=1000, pw_gid=1000, pw_dir="/home/alice")
+    monkeypatch.setattr(tunnel.pwd, "getpwnam", lambda n: pw)
+    monkeypatch.setattr(tunnel, "user_environment", lambda u, p: {"SSH_AUTH_SOCK": "/a"})
+    ran = []
+    monkeypatch.setattr(tunnel.os, "execvp", lambda f, argv: ran.append(argv))
+    tunnel.ssh_as_user("alice", ["--remote", "corp:2222", "127.0.0.1", "--", "cmd"])
+    assert ran[0][-5:] == ["-p", "2222", "corp", "--", "cmd"]
+    assert ran[0][ran[0].index("ssh") + 1:][:len(tunnel.SSH_OPTIONS)] == tunnel.SSH_OPTIONS
+    tunnel.ssh_as_user("alice", ["-G", "--", "corp"])      # ssh_g: passed on as before
+    assert ran[1][-3:] == ["-G", "--", "corp"]
+    with pytest.raises(ValueError):
+        tunnel.ssh_as_user("alice", ["--remote", "corp", "corp", "--", "cmd"])
+    assert len(ran) == 2
 
 
 def test_resolves():

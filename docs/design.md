@@ -524,6 +524,11 @@ dns-rc`). Each item is marked:
     for the user's aliases.
   - nm-sshuttle must therefore work out the first hop as the user and pass
     `-x` itself.
+  - **[src]** It also looks the name up as root, on whatever network the
+    host is on, and excludes every address it gets: a spoofed answer
+    takes internal addresses out of the tunnel, outside the plugin's
+    checks (§4.8). The plugin therefore gives sshuttle an address as its
+    remote, which needs no lookup (§4.3).
 - **[lab T9] A bad remote nameserver kills the tunnel.** If the remote
   host's resolver list contains an unreachable server, one forwarded DNS
   query kills the whole tunnel. In `server.py` `try_send()`, `connect()` sits
@@ -632,9 +637,9 @@ DNS behaviour.
                   │ StartUnit / StopUnit
   ┌─ nm-sshuttle-tunnel.service ──── root, Type=notify, Restart=no ─────────┐
   │  ExecStartPre / ExecStopPost: nm-sshuttle sweep                         │
-  │  ExecStart: sshuttle --method nft -r REMOTE -x FIRST_HOP                │
+  │  ExecStart: sshuttle --method nft -r 127.0.0.1 -x FIRST_HOP             │
   │                 --ns-hosts DNS --to-ns DNS SUBNETS                      │
-  │                 -e "nm-sshuttle ssh-as-user USER"                       │
+  │                 -e "nm-sshuttle ssh-as-user USER --remote REMOTE"       │
   │    ├─ sshuttle --firewall        (root; nft table sshuttle-ipv4-PORT)  │
   │    └─ ssh, as USER via setpriv   (~/.ssh/config, ProxyJump, agent)     │
   └─────────────────────────────────────────────────────────────────────────┘
@@ -933,6 +938,26 @@ The bridge, `nm-sshuttle ssh-as-user USER`, is sshuttle's `-e` command:
    -o ControlMaster=no -o ControlPath=none -o ConnectTimeout=15
    -o ServerAliveInterval=10 -o ServerAliveCountMax=3 REMOTE -- <sshuttle
    bootstrap>`.
+
+**sshuttle never sees the remote.** sshuttle 2.0.0 runs `ssh -G` and a
+lookup as root on its `-r` value, and excludes every address it gets
+(§2.2). So `exec-tunnel` passes `-r 127.0.0.1`, an address that needs no
+lookup and that sshuttle already excludes as its IPv4 listen address, and
+the profile's remote goes to the bridge: `ssh-as-user USER --remote
+REMOTE`. sshuttle 1.3.1 and 2.0.0 run the `-e` command with
+`[-p PORT] [USER@]HOST -- COMMAND` appended, split from `-r` by their
+`parse_hostport`; for `127.0.0.1` that is `127.0.0.1 -- COMMAND`. The
+bridge refuses anything else, checks the remote as the profile check
+does (§4.2), and gives ssh `[-p PORT] [USER@]HOST -- COMMAND` split the
+same way from the remote. ssh thus gets the same user, host and port as
+before, and the user's config, `ProxyJump`, an IPv6 first hop and the pin
+below work as they did. The host goes on as written in the profile, as
+`check`'s test login gives it; sshuttle wrote an IPv6 address in its
+short form and, when a port followed, a name in lower case. Only root's
+own ssh config can still make 2.0.0 look something up: a `ProxyJump` (or
+`HostName`) that `/etc/ssh/ssh_config` gives every host, `127.0.0.1`
+included, is looked up as root and excluded. An admin who sets one for
+`Host *` should leave `127.0.0.1` out.
 
 **[lab T1]** In the lab, a root sshuttle 2.0.0 tunnelled traffic with ssh
 running as the user, a user-only alias, and a passphrase-protected key held

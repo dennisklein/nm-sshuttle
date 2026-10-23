@@ -51,6 +51,10 @@ uses [semantic versioning](https://semver.org/).
   not any process that has the PID and `nm-sshuttle-service` in its command
   line. A claim from the previous version needs that process to run with
   every user ID 0.
+- sshuttle gets `127.0.0.1` as its remote, and the ssh bridge gives ssh
+  the profile's remote. sshuttle 2.0.0 looked the remote up itself, as
+  root and on the local network, also with `gateway` set, and excluded
+  every address it got.
 
 ## [0.1.0] - 2026-10-11
 

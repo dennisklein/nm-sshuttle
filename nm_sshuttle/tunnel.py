@@ -8,6 +8,7 @@ import logging
 import os
 import pwd
 import re
+import shlex
 import shutil
 import socket
 import stat
@@ -18,7 +19,7 @@ import threading
 
 from .claims import runs_as_root
 from .const import LIBEXEC, LISTEN_PORTS, SSH_CONFIG, V1_TUNNEL_SPEC, Slot
-from .profile import collapse, family
+from .profile import collapse, family, split_remote
 
 log = logging.getLogger("nm-sshuttle")
 
@@ -37,9 +38,34 @@ SSHUTTLE_CHAIN_RE = re.compile(r"^sshuttle-([mtd])-(\d+)$")
 IPTABLES = {4: "iptables", 6: "ip6tables"}
 
 
-def bridge_command(user, ssh_config=None):
+# sshuttle's -r. sshuttle 2.0.0 excludes its remote by itself, through ssh -G
+# and a lookup as root, on the network the host is on. An address needs no
+# lookup, and sshuttle already excludes this one, its IPv4 listen address. The
+# bridge gives ssh the profile's remote in its place (design §4.3).
+STAND_IN = "127.0.0.1"
+
+
+def bridge_command(user, remote=None, ssh_config=None):
+    """sshuttle's -e: the bridge, which gives ssh remote for the stand-in."""
     cmd = f"{os.path.join(LIBEXEC, 'nm-sshuttle')} ssh-as-user {user}"
+    if remote:
+        cmd += f" --remote {shlex.quote(remote)}"
     return f"{cmd} -F {ssh_config}" if ssh_config else cmd
+
+
+def bridged_args(remote, args):
+    """ssh's arguments for sshuttle's: the profile's remote in place of the
+    stand-in. sshuttle 1.3.1 and 2.0.0 append [-p PORT] [USER@]HOST -- COMMAND
+    to the -e command, as their parse_hostport splits -r; the stand-in has no
+    user and no port. Anything else is refused, so that only the remote the
+    plugin checked reaches ssh, split the same way."""
+    opts = args[:2] if args[:1] == ["-F"] else []
+    rest = args[len(opts):]
+    if len(rest) != 3 or rest[0] != STAND_IN or rest[1] != "--":
+        raise ValueError(f"unexpected arguments from sshuttle: {' '.join(rest[:2])}")
+    user, host, port = split_remote(remote)
+    port_opts = ["-p", str(port)] if port is not None else []
+    return [*opts, *port_opts, f"{user}@{host}" if user else host, "--", rest[2]]
 
 
 def first_hops(spec):
@@ -72,10 +98,10 @@ def sshuttle_argv(spec, sshuttle, ssh_config=None, port=None):
         argv += ["--listen", f"127.0.0.1:{port}" + (",[::1]:0" if ipv6 else "")]
     if spec.get("tmark"):
         argv += ["--tmark", f"{spec['tmark']:#x}"]
-    argv += ["-r", spec["remote"]]
+    argv += ["-r", STAND_IN]
     for net in wanted(first_hops(spec) + list(spec.get("exclude", []))):
         argv += ["-x", net]
-    argv += ["-e", bridge_command(spec["user"], ssh_config)]
+    argv += ["-e", bridge_command(spec["user"], spec["remote"], ssh_config)]
     servers = spec.get("dns_servers") or []
     if spec.get("dns", "none") != "none" and servers:
         # --to-ns pins the remote resolver and avoids the crash of lab T9.
@@ -227,7 +253,12 @@ def user_environment(user, pw):
 def ssh_as_user(user, args):
     """sshuttle's -e command: run ssh as USER with the user's agent and display,
     so ~/.ssh/config, known_hosts and agent prompts work as usual. Only ssh runs
-    as the user; it never runs as root."""
+    as the user; it never runs as root. With --remote first, ssh gets that
+    remote in place of sshuttle's stand-in."""
+    if args[:1] == ["--remote"]:
+        if len(args) < 2:
+            raise ValueError("--remote needs a value")
+        args = bridged_args(args[1], args[2:])
     pw = pwd.getpwnam(user)
     rt = f"/run/user/{pw.pw_uid}"
     menv = user_environment(user, pw)

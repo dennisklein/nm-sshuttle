@@ -160,12 +160,13 @@ def _is_ipv6(text):
     return True
 
 
-def _remote(value):
-    """Check an ssh destination as sshuttle's parse_hostport splits it:
-    [USER@]HOST[:PORT], where HOST may be an IPv6 address, in brackets when a
-    port follows. sshuttle starts its server locally, as root and without ssh,
-    when HOST is empty, passes a HOST that starts with "-" to ssh as an option,
-    and reads USER:PASSWORD@HOST as a password.
+def split_remote(value):
+    """(user, host, port) of an ssh destination as sshuttle's parse_hostport
+    splits it: [USER@]HOST[:PORT], where HOST may be an IPv6 address, in
+    brackets when a port follows; user is "" and port None when not given.
+    sshuttle starts its server locally, as root and without ssh, when HOST is
+    empty, passes a HOST that starts with "-" to ssh as an option, and reads
+    USER:PASSWORD@HOST as a password.
 
     A scope id is fine here, unlike in the address keys: ssh takes it, and the
     destination never reaches nft."""
@@ -187,11 +188,13 @@ def _remote(value):
         host, _, port = host.partition(":")
     elif ":" in host and not _is_ipv6(host):
         raise bad
-    if port is not None and _port(port) is None:
-        raise bad
+    if port is not None:
+        port = _port(port)
+        if port is None:
+            raise bad
     if not host or host.startswith("-") or "[" in host or "]" in host:
         raise bad
-    return value
+    return user, host, port
 
 
 def _bool(key, value, default):
@@ -211,7 +214,8 @@ def parse(settings, getpwnam=pwd.getpwnam):
     s_ip4 = settings.get("ipv4", {})
     data = s_vpn.get("data", {})
 
-    remote = _remote(data.get("remote", ""))
+    remote = data.get("remote", "")
+    split_remote(remote)
 
     user = data.get("local-user", "")
     if not USER_RE.fullmatch(user):

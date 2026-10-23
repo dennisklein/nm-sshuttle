@@ -279,7 +279,15 @@ Lab T2 is our own case:
 
 **With the patch**, the reproducer lists `(<AddressFamily.AF_INET: 2>, '192.0.2.1', 32, 0, 0)` under "Subnets to exclude from forwarding" and no longer prints "Failed to exclude remote IP".
 
-**Side effect.** The `-e` command now also runs once as `<cmd> -G host`. A wrapper that does not pass its arguments on to `ssh` may fail at that point. *(from source)* `parse_hostname()` already runs this with a 2 s timeout inside `except Exception`, so such a failure costs at most 2 s and the exclusion. Our `ssh-as-user` wrapper passes `"$@"` to `ssh`, but we have not run lab T2 with the patch.
+**Not wanted by nm-sshuttle any more.** The lookup also runs on whatever
+network the host is on, so a spoofed answer chooses what gets excluded.
+nm-sshuttle now passes `-r 127.0.0.1` and lets its `-e` command give ssh
+the real remote (design §4.3), so neither the lookup nor this fix applies
+to it. With the patch, its `-e` command would refuse the `-G` call, and
+`parse_hostname()` would fall back to `127.0.0.1`, which needs no lookup
+either.
+
+**Side effect.** The `-e` command now also runs once as `<cmd> -G host`. A wrapper that does not pass its arguments on to `ssh` may fail at that point. *(from source)* `parse_hostname()` already runs this with a 2 s timeout inside `except Exception`, so such a failure costs at most 2 s and the exclusion. The lab's `ssh-as-user` wrapper passes `"$@"` to `ssh`, but we have not run lab T2 with the patch. nm-sshuttle's own bridge refuses the `-G` call (above), so with the patch `parse_hostname()` falls back to `127.0.0.1`.
 
 ---
 

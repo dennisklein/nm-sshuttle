@@ -4,7 +4,7 @@
 import pytest
 
 from fakes import fake_getpwnam, settings
-from nm_sshuttle.profile import ProfileError, collapse, parse
+from nm_sshuttle.profile import ProfileError, collapse, parse, split_remote
 
 
 def p(s):
@@ -141,3 +141,12 @@ def test_a_password_in_remote_is_refused_and_not_logged(remote):
     with pytest.raises(ProfileError, match="^remote: the user part must not contain ':'") as e:
         p(settings(remote=remote))
     assert "hunter2" not in str(e.value) and remote not in str(e.value)
+
+
+def test_split_remote_splits_as_sshuttle_does():
+    assert split_remote("corp") == ("", "corp", None)
+    assert split_remote("alice@corp:022") == ("alice", "corp", 22)
+    assert split_remote("alice@[2001:db8::7]:2222") == ("alice", "2001:db8::7", 2222)
+    assert split_remote("2001:db8::7") == ("", "2001:db8::7", None)
+    with pytest.raises(ProfileError):
+        split_remote("corp:2222:1")

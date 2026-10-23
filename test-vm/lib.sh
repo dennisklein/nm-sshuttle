@@ -698,6 +698,19 @@ s = socket.create_connection((sys.argv[1], 8080), timeout=5)
 time.sleep(float(sys.argv[2]))' "$WEB_IP" "$1" > /dev/null 2>&1 &
 }
 tunnel_state() { sc is-active "$TUNNEL_UNIT" 2> /dev/null; }
+# design §4.3: sshuttle has 127.0.0.1 as its remote, which it never looks up,
+# and the user's ssh the profile's remote, from the bridge
+bridge_remote() {
+    local pid args ssh
+    pid=$(sc show -p MainPID --value "$TUNNEL_UNIT" 2> /dev/null)
+    args=" $(tr '\0' ' ' < "/proc/$pid/cmdline" 2> /dev/null)"
+    ssh=$(pgrep -a -u "$USER_NAME" -x ssh)
+    echo "sshuttle:$args"
+    echo "ssh: $ssh"
+    grep -q -F -- " -r 127.0.0.1 " <<< "$args" &&
+        grep -q -F -- " --remote ${REMOTE:-$USER_NAME@$JUMP_IP} " <<< "$args" &&
+        grep -q -F -- " ${REMOTE:-$USER_NAME@$JUMP_IP} -- " <<< "$ssh"
+}
 # method=tproxy: sshuttle's chains in iptables' mangle table, the plugin's rule and route
 mangle_chains() { iptables -w -t mangle -S 2> /dev/null | awk '$1 == "-N" && $2 ~ /^sshuttle-[mtd]-[0-9]+$/ {print $2}'; }
 tproxy_rule() { ip rule list 2> /dev/null | grep "fwmark $TPROXY_MARK lookup $TPROXY_TABLE"; }
