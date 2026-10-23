@@ -876,8 +876,16 @@ $ nm-sshuttle check corp     # as the user: ssh -G, host key, test login
 
 **The profile is untrusted input to a root process.** The plugin enforces:
 
-- `remote` must match `^[A-Za-z0-9._@:%\[\]-]+$` and must not start with
-  `-`;
+- `remote` must match `^[A-Za-z0-9._@:%\[\]-]+$`, must not start with
+  `-`, and must split as sshuttle's `parse_hostport` splits it,
+  `[USER@]HOST[:PORT]`. The user part is not empty and has no `:`, which
+  sshuttle reads as the start of a password. The host is not empty, since
+  sshuttle then runs its server locally, as root, without ssh; it does not
+  start with `-`, since sshuttle passes it to ssh with no `--` before it. An
+  IPv6 host is in brackets when a port follows, and a port is 1 to 65535.
+  ssh itself has no `:PORT` in a destination, so the first-hop lookup
+  (`ssh -G`) and `nm-sshuttle check` work only without one; a port belongs
+  in `~/.ssh/config`;
 - every address and network must parse with `ipaddress` and have no IPv6
   scope id (`fe80::1%eth0`): `ipaddress` keeps any text after the `%`,
   spaces, quotes and braces included, and that text would reach the guard's

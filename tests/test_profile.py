@@ -119,3 +119,25 @@ def test_collapse_drops_a_scope_that_got_through():
         "10.0.0.0/8", "fe80::/64"]
     assert collapse(["fe80::%a b/10"]) == ["fe80::/10"]
 
+
+@pytest.mark.parametrize("key,value", [
+    ("remote", "corp:" + "1" * 4400), ("probe", "10.1.0.10:" + "1" * 4400),
+    ("probe", "10.1.0.10:\u00b2"), ("probe", "10.1.0.10:\u0661")],
+    ids=["remote-long", "probe-long", "probe-superscript", "probe-arabic-indic"])
+def test_a_port_beyond_int_or_ascii_is_a_profile_error(key, value):
+    # int() refuses over 4300 digits with a ValueError of its own, and
+    # str.isdigit() takes "²", which int() refuses, and "١", which it reads.
+    with pytest.raises(ProfileError, match=f"^{key}: "):
+        p(settings(**{key: value}))
+
+
+def test_a_port_may_have_leading_zeros():
+    assert p(settings(remote="corp:000022")).remote == "corp:000022"
+    assert p(settings(probe="10.1.0.10:000022")).probe == "10.1.0.10:22"
+
+
+@pytest.mark.parametrize("remote", ["alice:hunter2@corp", ":@", "a:b@c@corp"])
+def test_a_password_in_remote_is_refused_and_not_logged(remote):
+    with pytest.raises(ProfileError, match="^remote: the user part must not contain ':'") as e:
+        p(settings(remote=remote))
+    assert "hunter2" not in str(e.value) and remote not in str(e.value)

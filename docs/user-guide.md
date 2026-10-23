@@ -108,7 +108,7 @@ The options of `add`:
 
 | Option | Meaning |
 |---|---|
-| `--remote` | The ssh destination, as you would type it after `ssh`; usually a `Host` alias. Required. |
+| `--remote` | The ssh destination, as you would type it after `ssh`; usually a `Host` alias. `user@host` works too; put a port in the alias (`Port` in `~/.ssh/config`). A password (`user:password@host`) is refused: use a key. Required. |
 | `--subnets` | The networks to send through the tunnel, IPv4 or IPv6, separated by commas. Required. A scope id (`fe80::%eth0/64`) is refused, here and in the other address options. |
 | `--exclude` | Networks inside those to leave out. |
 | `--dns` | `none` (the default) leaves DNS alone. `split` sends lookups for `--dns-domains` to `--dns-servers` through the tunnel, and everything else as before. `all` sends every lookup through the tunnel. |

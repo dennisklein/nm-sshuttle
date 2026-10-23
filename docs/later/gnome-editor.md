@@ -272,6 +272,11 @@ NetworkManager or the plugin.
 - **Shared cases found a gap in the plugin:** `$` in a Python regex also
   matches before a trailing newline, so `profile.parse` accepted
   `remote="corp\n"`. It now matches the whole value.
+- **The SSH destination is split as sshuttle splits it,** on both sides:
+  `user@`, `@host`, `@-x` and `user:password@host` are refused, as design
+  §4.2 lists. The editor's `inet_pton` already refused IPv6 scope ids in
+  address fields, which the plugin had accepted; the plugin now refuses them
+  too, and a shared case covers each field.
 - **IPv6 networks** (subnets, exclude, first hop, probe) are accepted, as in
   the plugin; DNS servers stay IPv4. The IPv6 tab has the same "Use this
   connection only for resources on its network" switch, so the note names
