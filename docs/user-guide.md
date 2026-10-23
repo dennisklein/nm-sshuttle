@@ -14,7 +14,9 @@ it.
 
 - Fedora 43 or 44, Debian 13 or Ubuntu 26.04, with NetworkManager 1.42 or
   later, nftables and sshuttle 1.3.1 or later. systemd-resolved is needed
-  for the tunnel's DNS (`dns split` or `all`).
+  for the tunnel's DNS (`dns split` or `all`), with `/etc/resolv.conf`
+  linked to its stub: otherwise lookups would go to the local network's
+  resolver whenever the tunnel is down, and such a profile is refused.
 - SSH access to a host on the far side that has Python 3. sshuttle needs
   nothing else there and no root.
 - A key that logs you in without a password prompt from ssh itself: a key
@@ -237,6 +239,17 @@ Common causes:
 - **The journal says `nmss0` is managed:** the setting in
   `/usr/lib/NetworkManager/conf.d/90-nm-sshuttle.conf` is overridden or
   not loaded. Switch the VPN off and run `sudo nm-sshuttle post-install`.
+- **"dns=split needs NetworkManager to use systemd-resolved":** install
+  and enable systemd-resolved, and let NetworkManager use it (its `dns`
+  setting, or `/etc/resolv.conf` linked to resolved's stub). `check`
+  reports it too.
+- **"dns=split needs every lookup to go to systemd-resolved":**
+  `/etc/resolv.conf` lists other servers than resolved's stub
+  `127.0.0.53`, for example because it links to
+  `/run/systemd/resolve/resolv.conf`, resolved's list of the real servers.
+  Programs then ask those servers directly, and fall back to the local
+  network's when the tunnel is down. Link it to the stub:
+  `sudo ln -sf ../run/systemd/resolve/stub-resolv.conf /etc/resolv.conf`.
 - **`check` warns about `ipv6.auto-route-ext-gw`:** the profile was made
   before IPv6 support. Run the `nmcli connection modify` command it
   prints.

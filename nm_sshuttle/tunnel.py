@@ -110,6 +110,29 @@ def exec_tunnel(slot=None):
     os.execv(sshuttle, argv)
 
 
+# systemd-resolved's stub listeners: the full one and the proxy-only one
+RESOLVED_STUBS = ("127.0.0.53", "127.0.0.54")
+
+
+def resolv_conf_problem(path="/etc/resolv.conf"):
+    """None when path sends every lookup to systemd-resolved's stub, else why
+    not (design §4.5). NM's DNS mode is systemd-resolved also when the file
+    links to resolved's list of the real servers, or when NM leaves it alone:
+    glibc then asks the listed servers itself, the LAN's among them."""
+    try:
+        with open(path) as f:
+            servers = [w[1] for w in (line.split() for line in f)
+                       if len(w) > 1 and w[0] == "nameserver"]
+    except OSError as e:
+        return f"cannot read {path}: {e.strerror}"
+    others = [s for s in servers if s not in RESOLVED_STUBS]
+    if others:
+        return f"{path} lists {', '.join(others)}, not only resolved's stub {RESOLVED_STUBS[0]}"
+    if not servers:
+        return f"{path} lists no nameserver"
+    return None
+
+
 def classify_failure(journal):
     """'login' when the tunnel failed on authentication, else 'connect'."""
     return "login" if any(m in journal for m in AUTH_MARKERS) else "connect"

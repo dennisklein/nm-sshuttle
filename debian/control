@@ -41,8 +41,8 @@ Description: NetworkManager VPN plugin that tunnels with sshuttle
  brought up, supervised and torn down by a small root service. ssh runs as the
  logged-in user, so the user's keys, agent and ~/.ssh/config apply.
  .
- The design needs systemd-resolved for per-link DNS; without it the DNS
- settings of a profile degrade to "every lookup goes to the VPN's servers".
+ The design needs systemd-resolved for per-link DNS; without it a profile
+ that sets DNS (dns=split or dns=all) is refused at connect.
 
 Package: nm-sshuttle-gnome
 Architecture: any

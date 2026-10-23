@@ -27,6 +27,7 @@
 #   M2-26 park candidate           M2-27 probe with forwarding dead
 #   M2-28 suspend and resume (only with --suspend: the VM must wake by RTC)
 #   M2-29 a ProxyJump host named inside the tunnelled DNS domain
+#   M2-30 dns=split refused with /etc/resolv.conf not resolved's stub
 #   V6-01 IPv6 subnet through the tunnel, fail closed in a gap
 #   V6-02 roams that change only the uplink's IPv6 addresses
 #   TP-01 method=tproxy: UDP and TCP through the tunnel, fail closed in a gap
@@ -227,6 +228,10 @@ s_install() {
     check M2-01b "SELinux labels are what policy expects (restorecon -n finds nothing to change)" labels_ok
     result M2-01b-i INFO "label of nm-sshuttle@.service: $(stat -c %C /usr/lib/systemd/system/nm-sshuttle@.service 2> /dev/null); of the service script: $(stat -c %C "$LIBEXEC/nm-sshuttle-service" 2> /dev/null)"
     check M2-01c "SELinux is enforcing" test "$(getenforce 2> /dev/null)" = Enforcing
+    # The plugin refuses dns=split unless every lookup goes to resolved's stub
+    # (design §4.5), so a differently set image would fail every DNS scenario.
+    check M2-01g "/etc/resolv.conf lists only resolved's stub ($(readlink /etc/resolv.conf || echo 'a file'))" \
+        sh -c "cd / && python3 -c 'import sys; from nm_sshuttle import tunnel; sys.exit(bool(tunnel.resolv_conf_problem()))'"
     # conf.d 90-nm-sshuttle.conf: take it away and a new nmss0 is managed; put it
     # back, 'nmcli general reload conf', and a new nmss0 is unmanaged (state 10)
     local without with
@@ -542,6 +547,23 @@ s_reconnect_connect() {
     check M2-11g "plugin log: no Connect was ignored" plog_has_not "Connect ignored"
     result M2-11h INFO "Connect arrived during teardown (queued): $(plog | grep -c 'Connect arrived during')"
     end_checks M2-11
+}
+
+s_resolv_conf() {
+    begin M2-30 "dns=split with /etc/resolv.conf linked to resolved's list of the real servers"
+    rm -f "$VARDIR/resolv.conf.saved"
+    cp -a /etc/resolv.conf "$VARDIR/resolv.conf.saved" || { result M2-30 SKIP "cannot save /etc/resolv.conf"; return; }
+    ln -sf ../run/systemd/resolve/resolv.conf /etc/resolv.conf
+    activate
+    wait_for 20 con_gone
+    check M2-30a "the activation is refused" con_gone
+    check M2-30b "plugin log: dns=split needs systemd-resolved (resolv.conf or NM's DNS mode)" plog_show "dns=split needs"
+    rm -f /etc/resolv.conf
+    cp -a "$VARDIR/resolv.conf.saved" /etc/resolv.conf
+    restorecon /etc/resolv.conf 2> /dev/null
+    result M2-30c INFO "/etc/resolv.conf restored: $(readlink /etc/resolv.conf || echo 'a file')"
+    check M2-30d "nothing left: no link, guard, tunnel unit" all_clean
+    end_checks M2-30
 }
 
 s_override() {
@@ -1608,6 +1630,7 @@ want M2-26 && s_park
 want M2-27 && s_probe
 want M2-28 && s_suspend
 want M2-29 && s_jump_name
+want M2-30 && s_resolv_conf
 want V6-01 && s_ipv6
 want V6-02 && s_ipv6_roam
 want TP-01 && s_tproxy

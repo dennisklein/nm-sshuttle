@@ -19,6 +19,10 @@ uses [semantic versioning](https://semver.org/).
   with `-` (`@-gD1080`), a password (`user:password@host`, which ended up in
   sshuttle's command line and the journal) and a bad port are refused.
 - The plugin answers `VPN.Plugin` calls only from NetworkManager.
+- A profile with `dns split` or `all` is refused unless NetworkManager uses
+  systemd-resolved and `/etc/resolv.conf` sends every lookup to its stub;
+  otherwise lookups fell back to the local network's resolver during
+  reconnects. `check` reports it.
 - A guard removed during a reconnect is put back within 10 s, and before
   each attempt; before, only the health check while up did.
 - A claim counts only for the process with the start time it recorded,

@@ -15,6 +15,8 @@ NM_AC_IFACE = "org.freedesktop.NetworkManager.Connection.Active"
 NM_DEVICE_IFACE = "org.freedesktop.NetworkManager.Device"
 NM_IP4_IFACE = "org.freedesktop.NetworkManager.IP4Config"
 NM_IP6_IFACE = "org.freedesktop.NetworkManager.IP6Config"
+NM_DNS_PATH = "/org/freedesktop/NetworkManager/DnsManager"
+NM_DNS_IFACE = "org.freedesktop.NetworkManager.DnsManager"
 
 SYSTEMD_NAME = "org.freedesktop.systemd1"
 SYSTEMD_PATH = "/org/freedesktop/systemd1"

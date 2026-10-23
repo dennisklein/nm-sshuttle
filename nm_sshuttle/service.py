@@ -27,7 +27,8 @@ from gi.repository import Gio, GLib  # noqa: E402
 
 from . import claims, guard, tunnel, watch  # noqa: E402
 from .const import (BUS_NAME, INVISIBLE_MARK, LIBEXEC, LOGIN_MANAGER_IFACE,  # noqa: E402
-                    LOGIN_NAME, LOGIN_PATH, NM_AC_IFACE, NM_DEVICE_IFACE, NM_NAME, NM_PATH,
+                    LOGIN_NAME, LOGIN_PATH, NM_AC_IFACE, NM_DEVICE_IFACE, NM_DNS_IFACE,
+                    NM_DNS_PATH, NM_NAME, NM_PATH,
                     PLUGIN_IFACE, PLUGIN_PATH, STATE_DIR, SYSTEMD_MANAGER_IFACE, SYSTEMD_NAME,
                     SYSTEMD_PATH, SYSTEMD_UNIT_IFACE, Slot, slot_number)
 from .supervisor import Supervisor  # noqa: E402
@@ -353,6 +354,13 @@ class Service:
     def find_device(self, iface, done):
         self._call(NM_NAME, NM_PATH, NM_NAME, "GetDeviceByIpIface", GLib.Variant("(s)", (iface,)),
                    "(o)", lambda r, e: done(r[0] if r else None), timeout_ms=1000)
+
+    def dns_mode(self, done):
+        """NetworkManager's DNS mode, such as systemd-resolved; done(mode, error)."""
+        self._get_property(NM_NAME, NM_DNS_PATH, NM_DNS_IFACE, "Mode", done)
+
+    def resolv_conf_problem(self):
+        return tunnel.resolv_conf_problem()
 
     def device_state(self, path, done):
         self._get_property(NM_NAME, path, NM_DEVICE_IFACE, "State", lambda v, e: done(v))

@@ -1205,9 +1205,10 @@ Events and what the supervisor does:
   `nm-sshuttle.service` (§4.7) remove the link, and the new instance then
   exits. With resolved
   and `split`, removing the link ends the leak's effect on lookups (R4k).
-  With `all`, or without resolved, the leak lasts until NM restarts
-  (§4.5). Make kills rare: no `Restart=`, an `OOMScoreAdjust`, and
-  packaging that never restarts the plugin under an active VPN.
+  With `all`, the leak lasts until NM restarts (§4.5); without resolved, a
+  profile with DNS is refused (§4.5). Make kills rare: no `Restart=`, an
+  `OOMScoreAdjust`, and packaging that never restarts the plugin under an
+  active VPN.
 - **Fallback, the invisible reconnect:** the plugin stays STARTED and sends
   nothing during a gap, so NM and GNOME show "connected" while the guard
   keeps traffic failing closed (R4d). It is used when the plugin cannot
@@ -1463,19 +1464,31 @@ A user override that makes `nmss0` managed brings the risk back, and the
 plugin logs it (§4.1). A profile `dns-priority` above 100 would not
 cover the reapply entry and does not suit `all`.
 
-**Without resolved** (NM writing `/etc/resolv.conf` itself, common on
-Debian), `split` degrades to "every lookup goes to `dns-servers`". Document
-it rather than special-case it. **[src]** A VPN DNS entry that NM fails to
-remove, after a give-up from "connecting", a plugin kill in a gap (R4m, R8m)
-or a relink (§4.4), would then stay in `/etc/resolv.conf` until NM restarts.
-**[src]** NM merges every entry into the file by priority without checking
-that its link exists. A leaked server therefore comes first, and its domain
-becomes a search domain. With the tunnel and guard gone, each lookup would
-first wait out the resolver timeout (5 s in glibc), and query names would
-leave over the uplink. Untested. With resolved and `all`, a leaked entry
-keeps claiming `~.`, so the uplink stays without DNS servers until NM
-restarts **[src]**, untested. The give-up order in §4.4 is therefore
-required, not cosmetic.
+**Without resolved** (NM writing `/etc/resolv.conf` itself), the VPN's
+servers come first in the file, and glibc moves on to the next server, the
+LAN's, as soon as the guard refuses a lookup during a gap, or after its
+timeout. Every lookup, intranet names included, would then go to the LAN's
+resolver. The same happens with resolved when `/etc/resolv.conf` is not its
+stub: NM reports `DnsManager.Mode` `systemd-resolved` also when the file
+links to `/run/systemd/resolve/resolv.conf`, resolved's list of every
+link's real servers, or when NM leaves the file alone **[src]**, and glibc
+then asks the listed servers itself. The plugin therefore refuses `split`
+and `all` at `Connect` unless the mode is `systemd-resolved` and every
+`nameserver` in `/etc/resolv.conf` is resolved's stub (`127.0.0.53` or
+`127.0.0.54`). `nm-sshuttle check` reports both. The packages require
+resolved (RPM) or recommend it (deb).
+
+**[src]** Before the refusal, a VPN DNS entry that NM failed to remove,
+after a give-up from "connecting", a plugin kill in a gap (R4m, R8m) or a
+relink (§4.4), stayed in `/etc/resolv.conf` until NM restarted. NM merges
+every entry into the file by priority without checking that its link
+exists, so a leaked server came first and its domain became a search
+domain; each lookup would first wait out the resolver timeout (5 s in
+glibc), and query names would leave over the uplink (untested). A refused
+profile sends NM no DNS, so this no longer happens. With resolved and
+`all`, a leaked entry keeps claiming `~.`, so the uplink stays without DNS
+servers until NM restarts **[src]**, untested. The give-up order in §4.4
+is therefore required, not cosmetic.
 
 ### 4.6 Fail-closed guard
 
@@ -1904,8 +1917,9 @@ Later, also propose a hook for an externally provided firewall helper
    all worked. Two bugs found there are fixed: `nm-sshuttle check` read
    `nmcli -g`'s escaped output and rejected every profile, and reconnects
    failed when the jump host's name lay in the tunnelled domain (M2-29).
-   Still to do: resolv.conf without resolved, which needs a Debian or
-   Ubuntu VM. M2-28 (suspend in the VM) remains opt-in.
+   resolv.conf without resolved is settled by refusing DNS there (§4.5);
+   that refusal still needs a run on a Debian or Ubuntu VM. M2-28
+   (suspend in the VM) remains opt-in.
    The full scope: persistence, reconnect and backoff, sleep, roaming,
    guard, sweeper, startup and `ExecStopPost` cleanup, the unmanaged
    `nmss0` setting and its check, health checks and unit tests. The park
@@ -1919,7 +1933,7 @@ Later, also propose a hook for an externally provided firewall helper
    and install-checked in CI; the [user guide](user-guide.md) and the
    README; and the VM tests in CI, on demand and weekly, on hosted runners
    with KVM (about 12 min). Suspend and the GNOME checks passed by hand
-   on a notebook; DNS without resolved stays open under M2.
+   on a notebook. DNS without resolved is refused at `Connect` (§4.5).
 5. **Later (all four implemented):** GTK4 editor plugin for GNOME Settings,
    several tunnels at once (template units), UDP through `tproxy`, IPv6
    guard sets. Each has a design in [`later/`](later/README.md). **IPv6 is in:** IPv6 subnets

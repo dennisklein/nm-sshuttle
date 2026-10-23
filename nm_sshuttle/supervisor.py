@@ -454,6 +454,32 @@ class Supervisor:
             log.info("NetworkManager %s never completed an nbns reconnect here; reconnects "
                      "will not show in NetworkManager (invisible reconnect)", self.nm_version)
             self.invisible = True
+        if p.dns != "none":
+            self.fx.dns_mode(self._callback(self._dns_mode_known, self.activation_id))
+        else:
+            self._find_first_hop()
+
+    def _dns_mode_known(self, aid, mode, error):
+        """dns=split and dns=all need systemd-resolved behind NetworkManager,
+        and every lookup going to resolved's stub: when glibc asks the servers
+        itself, it falls back to the LAN's whenever the guard refuses the VPN's
+        (design §4.5)."""
+        if aid != self.activation_id or self.phase != "connecting":
+            return
+        if mode != "systemd-resolved":
+            why = f"its DNS mode is {mode}" if mode else f"its DNS mode is unknown ({error})"
+            self.give_up(FAIL_CONNECT, f"dns={self.profile.dns} needs NetworkManager to use "
+                         f"systemd-resolved, and {why}")
+            return
+        why = self.fx.resolv_conf_problem()
+        if why:
+            self.give_up(FAIL_CONNECT, f"dns={self.profile.dns} needs every lookup to go to "
+                         f"systemd-resolved, and {why}")
+            return
+        self._find_first_hop()
+
+    def _find_first_hop(self):
+        p = self.profile
         self.fx.find_active_connection(p.uuid,
                                        self._callback(self._on_ac_found, self.activation_id))
         if p.gateway:

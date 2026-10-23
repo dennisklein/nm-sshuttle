@@ -71,6 +71,9 @@ NM_XML = """
     <property name="AddressData" type="aa{sv}" access="read"/>
     <property name="Gateway" type="s" access="read"/>
   </interface>
+  <interface name="org.freedesktop.NetworkManager.DnsManager">
+    <property name="Mode" type="s" access="read"/>
+  </interface>
 </node>"""
 
 LOGIN_XML = """
@@ -172,6 +175,7 @@ class FakeWorld:
         self.address = "192.168.1.20"
         self.addresses6 = ["2001:db8:1::20", "fe80::20"]
         self.locked = False
+        self.dns_mode = "systemd-resolved"
         self.inhibit_fds = []
         self.signals = []
         self.jobs = 0
@@ -188,6 +192,8 @@ class FakeWorld:
         self.conn.register_object(PRIMARY_PATH, nm.interfaces[1], self.on_call, self.on_prop, None)
         self.conn.register_object(IP4_PATH, nm.interfaces[3], self.on_call, self.on_prop, None)
         self.conn.register_object(IP6_PATH, nm.interfaces[4], self.on_call, self.on_prop, None)
+        self.conn.register_object("/org/freedesktop/NetworkManager/DnsManager", nm.interfaces[5],
+                                  self.on_call, self.on_prop, None)
         lg = Gio.DBusNodeInfo.new_for_xml(LOGIN_XML)
         self.conn.register_object("/org/freedesktop/login1", lg.interfaces[0], self.on_call,
                                   self.on_prop, None)
@@ -225,6 +231,7 @@ class FakeWorld:
             "Gateway": GLib.Variant("s", "192.168.1.1"),
             "Sessions": GLib.Variant("a(so)", [("2", SESSION_PATH)]),
             "LockedHint": GLib.Variant("b", self.locked),
+            "Mode": GLib.Variant("s", self.dns_mode),
         }
         if iface == IP6_IFACE:
             return {"AddressData": GLib.Variant("aa{sv}", [
@@ -350,6 +357,7 @@ def world(bus, monkeypatch, tmp_path):
     monkeypatch.setattr(service.Service, "release_claim", lambda self: None)
     monkeypatch.setattr(guard, "guard_listed", lambda table: True)
     monkeypatch.setattr(tunnel, "ipv6_available", lambda: True)
+    monkeypatch.setattr(tunnel, "resolv_conf_problem", lambda: None)
     monkeypatch.setattr(service.pwd, "getpwnam", fake_getpwnam)
     monkeypatch.setattr(service.Service, "run_cleanup", lambda self, done: done())
     monkeypatch.setattr(service.Service, "write_tunnel_spec", lambda self, spec: None)
@@ -606,3 +614,12 @@ def test_only_networkmanager_may_call_the_plugin(world, bus):
     svc.sup.nm_current_owner = None
     r = fake.call_plugin("NeedSecrets", GLib.Variant("(a{sa{sv}})", ({},)))
     assert r.unpack() == ("",)
+
+
+def test_split_dns_needs_resolved_behind_networkmanager(world):
+    fake, svc, host = world
+    fake.dns_mode = "default"          # NM writes /etc/resolv.conf itself
+    fake.call_plugin("Connect", settings_variant())
+    iterate_until(lambda: f"State{ST_STOPPED}" in fake.names())
+    assert fake.names() == [f"State{ST_STARTING}", "Failure", f"State{ST_STOPPED}"]
+    assert fake.signals[1][1] == FAIL_CONNECT and "create_link" not in host["ops"]
