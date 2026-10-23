@@ -66,3 +66,17 @@ def test_tunnel_unit_outlasts_the_plugins_longest_attempt():
     from nm_sshuttle.supervisor import Supervisor
     timeout = int(ini("nm-sshuttle-tunnel@.service.in")["Service"]["TimeoutStartSec"])
     assert timeout > Supervisor.UNLOCK_START_TIMEOUT > Supervisor.TUNNEL_START_TIMEOUT
+
+
+def directives(name):
+    """The [Service] keys of a unit, with space-separated values as sets."""
+    return {k: set(v.split()) for k, v in ini(name)["Service"].items()}
+
+
+def test_the_tunnel_unit_keeps_etc_read_only_and_ssh_working():
+    svc = directives("nm-sshuttle-tunnel@.service.in")
+    # sshuttle's root firewall helper must not write /etc/hosts (design §4.8)
+    assert svc["ProtectSystem"] == {"full"}
+    assert not any(k.startswith(("ReadWritePaths", "ProtectHome", "PrivateTmp",
+                                 "RestrictAddressFamilies", "RestrictNamespaces"))
+                   for k in svc)

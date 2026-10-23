@@ -1680,7 +1680,8 @@ lets the helper finish and still removes ssh is a lab question.
 `CAP_NET_BIND_SERVICE` for the redirect port of §4.8, `CAP_SETUID`,
 `CAP_SETGID`) is added and tested one directive at a time.
 The ssh child inherits the sandbox, and it must still read `~/.ssh` and
-write `known_hosts`.
+write `known_hosts`. The tunnel unit has `ProtectSystem=full`, so that
+sshuttle's firewall helper cannot write `/etc/hosts` (§4.8).
 
 **The plugin unit's sandbox.** **[spike]** The shim-started plugin runs as
 `unconfined_service_t` with every capability (R1b). A plugin that NM
@@ -1704,7 +1705,19 @@ outside the user's slice, until the unit stops.
   stream coming from the remote host. Mitigations:
   - the sandboxing above;
   - `--auto-nets` off, so the remote cannot choose what gets captured;
-  - `--auto-hosts` off, so `/etc/hosts` is never edited.
+  - `--auto-hosts` off, and `/etc` read-only in the tunnel unit (§4.7)
+    as well, so that the root firewall helper cannot write `/etc/hosts`;
+  - `cleanup`, which runs outside the tunnel unit (the plugin's startup
+    cleanup and `ExecStopPost`, and the dispatcher's after an upgrade
+    from a single-tunnel version), removes the lines that a helper killed
+    before it restored the file left in `/etc/hosts`. It removes only
+    lines in the form the helper writes,
+    `IP NAME  # sshuttle-firewall-PORT AUTOCREATED`, and keeps those
+    whose PORT has a listener as the sweep counts them (below). It
+    replaces the file in one rename, with its owner, mode and SELinux
+    label, only if the file did not change meanwhile, and leaves a
+    symlink alone. A leftover line whose port a running sshuttle has
+    taken again stays until that sshuttle stops.
 
   Longer term, propose an upstream hook that lets an already-privileged
   caller provide the firewall helper. The client could then run as the user,
@@ -1807,7 +1820,8 @@ nm_sshuttle/
   watch.py        NM and logind D-Bus watchers (systemd's and NM's active
                   connection signals stay in service.py)
   profile.py      vpn.data parsing and validation
-  tunnel.py       sshuttle argv, exec-tunnel, sweep, ssh-as-user
+  tunnel.py       sshuttle argv, exec-tunnel, sweep, ssh-as-user, the
+                  cleanup of sshuttle's lines in /etc/hosts
   guard.py        nft guard table, dummy link
   claims.py       what each active profile claims; the conflict rules
   dispatcher.py   gives each activation a slot (several tunnels)

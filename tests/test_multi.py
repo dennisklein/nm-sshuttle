@@ -473,7 +473,8 @@ def host(monkeypatch, tmp_path):
     """Record what cleanup does; plugin units in `running` are active."""
     monkeypatch.setattr(const, "STATE_DIR", str(tmp_path))
     monkeypatch.setattr(claims, "STATE_DIR", str(tmp_path))
-    rec = SimpleNamespace(stopped=[], removed=[], routing=[], running=set(), swept=0)
+    rec = SimpleNamespace(stopped=[], removed=[], routing=[], running=set(), swept=0,
+                          hosts=[], hosts_ok=True)
 
     def systemctl(*args, timeout=30):
         if args[0] == "stop":
@@ -492,6 +493,8 @@ def host(monkeypatch, tmp_path):
     def sweep():
         rec.swept += 1
     monkeypatch.setattr(cli.tunnel, "sweep", sweep)
+    monkeypatch.setattr(cli.tunnel, "strip_etc_hosts",
+                        lambda: rec.hosts.append(rec.stopped[:]) or rec.hosts_ok)
     return rec
 
 
@@ -505,6 +508,15 @@ def test_cleanup_of_one_slot_touches_only_that_slot(host, tmp_path):
     assert host.routing == [2] and host.swept == 1
     assert not (tmp_path / "2" / "tunnel.json").exists()
     assert not (tmp_path / "2" / "claim.json").exists()
+
+
+def test_cleanup_removes_sshuttles_lines_from_etc_hosts_after_the_tunnel_stopped(host):
+    # The tunnel unit cannot write /etc; the plugin unit's cleanup can (design §4.8).
+    assert cli.main(["cleanup", "--slot", "3"]) == 0
+    assert host.hosts == [["nm-sshuttle-tunnel@3.service"]]
+    assert cli.main(["cleanup", "--all"]) == 0 and len(host.hosts) == 2
+    host.hosts_ok = False
+    assert cli.main(["cleanup", "--slot", "3"]) == 1
 
 
 def test_cleanup_all_skips_running_slots_and_takes_the_v1_names(host):

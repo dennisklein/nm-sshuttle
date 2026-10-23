@@ -10,8 +10,8 @@ Type=notify
 NotifyAccess=main
 ExecStart=@LIBEXECDIR@/nm-sshuttle-service --slot %i
 # After a stop, a kill or a crash: stop this slot's tunnel unit, remove its
-# link, guard and stale sshuttle tables. NetworkManager never removes the link
-# itself (design §4.4, §4.7).
+# link, guard and stale sshuttle tables, and sshuttle's lines in /etc/hosts.
+# NetworkManager never removes the link itself (design §4.4, §4.7, §4.8).
 ExecStopPost=@LIBEXECDIR@/nm-sshuttle cleanup --slot %i
 # The plugin owns the restart policy; a restart under an active VPN would
 # leave NetworkManager's DNS entry behind.

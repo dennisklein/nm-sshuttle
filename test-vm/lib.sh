@@ -711,6 +711,17 @@ bridge_remote() {
         grep -q -F -- " --remote ${REMOTE:-$USER_NAME@$JUMP_IP} " <<< "$args" &&
         grep -q -F -- " ${REMOTE:-$USER_NAME@$JUMP_IP} -- " <<< "$ssh"
 }
+# design §4.7, §4.8: /etc is read-only in the tunnel unit, so that sshuttle's
+# root firewall helper cannot write /etc/hosts
+tunnel_etc_read_only() {
+    local pid out
+    pid=$(sc show -p MainPID --value "$TUNNEL_UNIT" 2> /dev/null)
+    [ -n "$pid" ] && [ "$pid" != 0 ] || { echo "the tunnel unit has no main process"; return 1; }
+    out=$(LC_ALL=C nsenter -t "$pid" -m -- touch /etc/.nm-sshuttle-probe 2>&1)
+    rm -f /etc/.nm-sshuttle-probe
+    echo "touch in sshuttle's mount namespace: ${out:-succeeded}"
+    grep -q "Read-only file system" <<< "$out"
+}
 # method=tproxy: sshuttle's chains in iptables' mangle table, the plugin's rule and route
 mangle_chains() { iptables -w -t mangle -S 2> /dev/null | awk '$1 == "-N" && $2 ~ /^sshuttle-[mtd]-[0-9]+$/ {print $2}'; }
 tproxy_rule() { ip rule list 2> /dev/null | grep "fwmark $TPROXY_MARK lookup $TPROXY_TABLE"; }
