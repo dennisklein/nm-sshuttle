@@ -647,6 +647,18 @@ s_stoppost() {
     make_leftovers
     sc stop "$PLUGIN_UNIT"
     check M2-14d "leftovers made while the plugin idles are removed by ExecStopPost on stop" all_clean
+    # e: another user's listener on a stale table's port does not keep the table
+    as_user python3 -c 'import socket, time
+s = [socket.create_server((a, 59998)) for a in ("127.0.0.1", "127.0.0.2")]
+time.sleep(30)' &
+    local lpid=$!
+    wait_for 5 sh -c "ss -ltnH 'sport = :59998' | grep -q ."
+    nft add table inet sshuttle-ipv4-59998
+    "$LIBEXEC/nm-sshuttle" sweep 2> /dev/null
+    check M2-14e "the sweep removes a stale table whose port another user listens on" \
+        sh -c "! nft list tables | grep -q sshuttle-ipv4-59998"
+    kill "$lpid" 2> /dev/null
+    nft delete table inet sshuttle-ipv4-59998 2> /dev/null
     end_checks M2-14
 }
 

@@ -1120,6 +1120,11 @@ class Supervisor:
         method = self.profile.method
         snap = self.fx.nft_health(method)
         if snap is not None:
+            if snap.get("cgroup") is False:
+                # It would drop the tunnel every 10 s (design §4.8).
+                self.give_up(FAIL_CONNECT, "health: no cgroup hierarchy under /sys/fs/cgroup "
+                             "holds systemd's units, so no listener counts as the tunnel's own")
+                return
             if self.profile.fail_closed and not snap["guard"]:
                 if not self._restore_guard("while up"):
                     return

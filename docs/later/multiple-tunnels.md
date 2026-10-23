@@ -378,8 +378,10 @@ The design as above, with these results and details:
 - **The health check finds the tunnel's own listener through its unit's
   cgroup** (`cgroup.procs` of `nm-sshuttle-tunnel@N.service`), not
   through `MainPID`, so it does not depend on which process holds the
-  socket. Where the cgroup is not at the expected path, it falls back to
-  any listener, as v1 did.
+  socket. It finds the cgroup under cgroup v2, a hybrid host's unified
+  hierarchy or systemd's v1 hierarchy. Where none holds systemd's units,
+  the plugin gives up at the first health check; it never falls back to
+  every listener (design §4.8).
 - **`list` marks active profiles without their slot:** the claims under
   `/run/nm-sshuttle/` are readable by root only.
 - **An error while reading or writing the claims fails the activation**,

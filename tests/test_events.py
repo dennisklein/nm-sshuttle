@@ -322,6 +322,15 @@ def test_health_drops_when_sshuttle_outlives_its_ssh(up):
     assert sup.phase == "gap" and ("state", ST_STARTING) in fx.events
 
 
+def test_health_gives_up_once_without_systemds_cgroups(up, caplog):
+    # dropping every 10 s would never end on such a host (design §4.8)
+    fx, sup = up
+    fx.health = {"guard": True, "sshuttle": set(), "cgroup": False}
+    fx.advance(10)
+    assert sup.phase == "stopping" and ("failure", FAIL_CONNECT) in fx.events
+    assert "no listener counts as the tunnel's own" in caplog.text
+
+
 def test_a_gap_puts_back_a_flushed_guard_while_paused(up):
     fx, sup = up
     sup.on_network(OFFLINE, CONN_NONE, None)       # a paused gap: no attempts at all

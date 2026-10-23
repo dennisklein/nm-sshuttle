@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: MIT
+import os
 import socket
 import subprocess
 import time
@@ -201,35 +202,131 @@ def test_classify_failure():
     assert tunnel.classify_failure("ssh: connect to host corp port 22: timed out") == "connect"
 
 
-def test_stale_tables(tmp_path):
-    tcp = tmp_path / "tcp"
-    tcp.write_text(
-        "  sl  local_address rem_address   st\n"
-        "   0: 0100007F:3011 00000000:0000 0A 00000000:00000000\n"     # 12305 listening
-        "   1: 0100007F:300C 0100007F:9999 01 00000000:00000000\n")    # 12300 established
-    ports = tunnel.listening_ports((str(tcp), str(tmp_path / "missing")))
-    assert ports == {12305}
+HEAD = ("  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  "
+        "timeout inode\n")
+
+
+def tcp_line(local, state="0A", uid=0, inode=1):
+    return (f"   0: {local} 00000000:0000 {state} 00000000:00000000 00:00000000 00000000 "
+            f"{uid} 0 {inode}\n")
+
+
+def fake_net(tmp_path, tcp, tcp6=""):
+    (tmp_path / "net").mkdir()
+    (tmp_path / "net" / "tcp").write_text(HEAD + tcp)
+    (tmp_path / "net" / "tcp6").write_text(HEAD + tcp6)
+    return str(tmp_path)
+
+
+def test_listening_ports_are_roots_on_the_address_sshuttle_listens_on(tmp_path):
+    lo6 = tunnel.socket.inet_pton(socket.AF_INET6, "::1")
+    hex6 = "".join(f"{tunnel.struct.unpack('=I', lo6[i:i + 4])[0]:08X}" for i in range(0, 16, 4))
+    proc = fake_net(tmp_path,
+                    tcp_line("0100007F:3011")                    # 127.0.0.1:12305, root
+                    + tcp_line("0100007F:300C", state="01")      # established
+                    + tcp_line("0100007F:3012", uid=1000)        # another user's
+                    + tcp_line("0200007F:3013")                  # 127.0.0.2
+                    + tcp_line("00000000:3014"),                 # 0.0.0.0, an admin's --listen
+                    tcp_line(f"{hex6}:300C")                     # [::1]:12300
+                    + tcp_line(f"{hex6}:3015", uid=1000))
+    assert tunnel.listening_ports(proc) == {4: {12305, 12308}, 6: {12300}}
+    assert tunnel.listening_ports(str(tmp_path / "missing")) == {4: set(), 6: set()}
+
+
+def test_stale_tables():
+    ports = {4: {12305}, 6: {12300}}
     tables = ("table inet sshuttle-ipv4-12305\ntable inet sshuttle-ipv4-12300\n"
-              "table inet nm-sshuttle-guard-0\ntable ip nat\ntable inet sshuttle-ipv6-12299\n")
-    assert tunnel.stale_tables(tables, ports) == ["sshuttle-ipv4-12300", "sshuttle-ipv6-12299"]
-    assert tunnel.sshuttle_tables(tables, ports, live=True) == ["sshuttle-ipv4-12305"]
+              "table inet nm-sshuttle-guard-0\ntable ip nat\ntable inet sshuttle-ipv6-12299\n"
+              "table inet sshuttle-ipv6-12300\ntable inet sshuttle-ipv6-12305\n")
+    assert tunnel.stale_tables(tables, ports) == ["sshuttle-ipv4-12300", "sshuttle-ipv6-12299",
+                                                  "sshuttle-ipv6-12305"]
+    assert tunnel.sshuttle_tables(tables, ports, live=True) == ["sshuttle-ipv4-12305",
+                                                                "sshuttle-ipv6-12300"]
+
+
+def run_sweep(monkeypatch, proc, tables):
+    ran = []
+
+    def run(argv, **kw):
+        ran.append(argv)
+        return subprocess.CompletedProcess(argv, 0, tables if argv[1] == "list" else "", "")
+    monkeypatch.setattr(tunnel.subprocess, "run", run)
+    monkeypatch.setattr(tunnel.shutil, "which", lambda *a, **k: None)
+    tunnel.sweep(proc)
+    return ran[1:]
+
+
+def test_the_sweep_ignores_another_users_listener(tmp_path, monkeypatch, caplog):
+    # a user listening on a leftover table's port must not keep the table
+    caplog.set_level("INFO", "nm-sshuttle")
+    proc = fake_net(tmp_path, tcp_line("0100007F:3011") + tcp_line("0100007F:300C", uid=1000)
+                    + tcp_line("0200007F:3012"))
+    ran = run_sweep(monkeypatch, proc, "table inet sshuttle-ipv4-12305\n"
+                    "table inet sshuttle-ipv4-12300\ntable inet sshuttle-ipv4-12306\n")
+    assert ran == [["nft", "delete", "table", "inet", "sshuttle-ipv4-12300"],
+                   ["nft", "delete", "table", "inet", "sshuttle-ipv4-12306"]]
+    assert "deleted table sshuttle-ipv4-12300 although uid 1000 listens on its port" in \
+        caplog.text
+    assert "deleted stale table sshuttle-ipv4-12306" in caplog.text
+
+
+def fake_process(proc, pid, ppid, cmdline, uids=(0, 0, 0, 0), sockets=()):
+    d = proc / str(pid)
+    (d / "fd").mkdir(parents=True)
+    (d / "stat").write_text(f"{pid} (x) S {ppid} " + "0 " * 40 + "\n")
+    (d / "cmdline").write_bytes(b"\0".join(cmdline) + b"\0")
+    (d / "status").write_text("Uid:\t" + "\t".join(map(str, uids)) + "\n")
+    for n, inode in enumerate(sockets):
+        os.symlink(f"socket:[{inode}]", d / "fd" / str(n + 3))
+
+
+def test_the_sweep_spares_an_sshuttle_a_user_runs(tmp_path, monkeypatch):
+    # the client listens as the user; its firewall helper runs as root via sudo
+    proc = fake_net(tmp_path, tcp_line("0100007F:300C", uid=1000, inode=50)
+                    + tcp_line("0100007F:3011", uid=1001, inode=60)
+                    + tcp_line("0100007F:3012", uid=1002, inode=70))
+    root = tmp_path
+    user = (1000,) * 4
+    fake_process(root, 100, 1, [b"/usr/bin/python3", b"/usr/bin/sshuttle", b"-r", b"h", b"0/0"],
+                 user, [50])
+    fake_process(root, 101, 100, [b"sudo", b"-p", b"x", b"/usr/bin/sshuttle", b"--firewall"])
+    fake_process(root, 102, 101, [b"/usr/bin/python3", b"/usr/bin/sshuttle", b"-v",
+                                  b"--method", b"nft", b"--firewall"])
+    # 1001 has sudo wait for a password below its listener: euid 0, real ID 1001
+    fake_process(root, 200, 1, [b"camp"], (1001,) * 4, [60])
+    fake_process(root, 201, 200, [b"sudo", b"-S", b"/usr/bin/sshuttle", b"--firewall"],
+                 (1001, 0, 0, 0))
+    # 1002's listener has no helper below it, though root runs one elsewhere
+    fake_process(root, 300, 1, [b"camp"], (1002,) * 4, [70])
+    fake_process(root, 400, 1, [b"/usr/bin/python3", b"/usr/bin/sshuttle", b"--firewall"])
+    ran = run_sweep(monkeypatch, proc, "table inet sshuttle-ipv4-12300\n"
+                    "table inet sshuttle-ipv4-12305\ntable inet sshuttle-ipv4-12306\n")
+    assert ran == [["nft", "delete", "table", "inet", "sshuttle-ipv4-12305"],
+                   ["nft", "delete", "table", "inet", "sshuttle-ipv4-12306"]]
+    assert tunnel.user_sshuttle_ports(
+        [(4, 12300, 1000, "50"), (4, 12305, 1001, "60")], proc) == {4: {12300}, 6: set()}
 
 
 def test_nft_health(monkeypatch):
     out = "table inet sshuttle-ipv4-12305\ntable inet nm-sshuttle-guard-0\n"
     monkeypatch.setattr(tunnel.subprocess, "run",
                         lambda *a, **k: subprocess.CompletedProcess(a, 0, out, ""))
-    monkeypatch.setattr(tunnel, "listening_ports", lambda: {12305})
-    assert tunnel.nft_health("nft", "nm-sshuttle-guard-0") == {"guard": True, "sshuttle": {4}}
-    monkeypatch.setattr(tunnel, "listening_ports", lambda: set())
-    assert tunnel.nft_health("nft", "nm-sshuttle-guard-0") == {"guard": True, "sshuttle": set()}
-    out = ("table inet sshuttle-ipv4-12305\ntable inet sshuttle-ipv6-12305\n"
-           "table inet sshuttle-ipv6-12300\n")
-    monkeypatch.setattr(tunnel, "listening_ports", lambda: {12305})
-    assert tunnel.nft_health("nft", "nm-sshuttle-guard-0") == {"guard": False, "sshuttle": {4, 6}}
+    assert tunnel.nft_health("nft", "nm-sshuttle-guard-0", {4: {12305}, 6: set()}) == \
+        {"guard": True, "sshuttle": {4}}
+    assert tunnel.nft_health("nft", "nm-sshuttle-guard-0", {4: set(), 6: set()}) == \
+        {"guard": True, "sshuttle": set()}
+    # the unit's cgroup was not found: no listener counts
+    assert tunnel.nft_health("nft", "nm-sshuttle-guard-0", {}) == \
+        {"guard": True, "sshuttle": set()}
+    out = ("table inet sshuttle-ipv4-225\ntable inet sshuttle-ipv6-12300\n"
+           "table inet sshuttle-ipv6-12299\n")
+    assert tunnel.nft_health("nft", "nm-sshuttle-guard-0", {4: {225}, 6: {12300}}) == \
+        {"guard": False, "sshuttle": {4, 6}}
+    assert tunnel.nft_health("nft", "g", {4: {12300}, 6: {225}}) == {"guard": False,
+                                                                       "sshuttle": set()}
     monkeypatch.setattr(tunnel.subprocess, "run",
                         lambda *a, **k: subprocess.CompletedProcess(a, 1, "", "denied"))
-    assert tunnel.nft_health("nft", "nm-sshuttle-guard-0") is None
+    assert tunnel.nft_health("nft", "nm-sshuttle-guard-0", {4: {12305}}) is None
 
 
 def test_resolv_conf_must_point_at_resolveds_stub(tmp_path):

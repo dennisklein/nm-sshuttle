@@ -18,6 +18,19 @@ uses [semantic versioning](https://semver.org/).
   in the GNOME editor: an empty user or host (`@`, `@corp`), a host that starts
   with `-` (`@-gD1080`), a password (`user:password@host`, which ended up in
   sshuttle's command line and the journal) and a bad port are refused.
+- The sweep and the health check count only root's listeners on `127.0.0.1`
+  or `::1` (or the wildcard address). Any user's listener on the port of a
+  table that a killed sshuttle left behind kept the table, and with it the
+  redirect of the tunnelled traffic and DNS to that user's socket, past the
+  guard; such a table is now removed at the next sweep, with a warning
+  that names the user. A user's listener still counts while sshuttle's
+  root firewall helper runs below it, as for an sshuttle the user runs in
+  the foreground; one run with `--daemon`, or a root one listening on a
+  LAN address, now loses its tables at the plugin's sweeps. The health
+  check no longer falls back to every listener when it cannot find the
+  tunnel unit's cgroup; it now also finds it on hybrid and legacy cgroup
+  hosts, and gives up once, instead of reconnecting every 10 s, where
+  there is none. `check` warns about that.
 - The plugin answers `VPN.Plugin` calls only from NetworkManager.
 - A profile with `dns split` or `all` is refused unless NetworkManager uses
   systemd-resolved and `/etc/resolv.conf` sends every lookup to its stub;

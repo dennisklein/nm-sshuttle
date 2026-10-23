@@ -258,10 +258,14 @@ def test_the_plugin_reads_its_bus_name(state_dir):
 # --------------------------------------------------------- one tunnel's ports
 def proc_tree(tmp_path, unit, pids):
     """A fake cgroup and /proc: pid 10 holds socket 111 (port 0x3039), pid 20
-    socket 222 (port 0x303a); both listen."""
+    socket 222 (port 0x303a), both root's, and socket 333 (port 0x303b) of
+    uid 1000, as a user's ssh with a LocalForward would; all listen."""
     cg = tmp_path / "cg"
     slice_dir = cg / "system.slice" / "system-nm\\x2dsshuttle\\x2dtunnel.slice"
-    slice_dir.mkdir(parents=True)
+    if pids is not None:
+        slice_dir.mkdir(parents=True)
+    else:
+        (cg / "system.slice").mkdir(parents=True)     # an empty slice goes too
     if pids is not None:
         (slice_dir / unit).mkdir()
         (slice_dir / unit / "cgroup.procs").write_text("".join(f"{p}\n" for p in pids))
@@ -272,27 +276,29 @@ def proc_tree(tmp_path, unit, pids):
     (proc / "net" / "tcp").write_text(
         head
         + "   0: 0100007F:3039 00000000:0000 0A 00000000:00000000 00:00000000 00000000 0 0 111\n"
-        + "   1: 0100007F:303A 00000000:0000 0A 00000000:00000000 00:00000000 00000000 0 0 222\n")
+        + "   1: 0100007F:303A 00000000:0000 0A 00000000:00000000 00:00000000 00000000 0 0 222\n"
+        + "   2: 0100007F:303B 00000000:0000 0A 00000000:00000000 00:00000000 00000000 "
+          "1000 0 333\n")
     (proc / "net" / "tcp6").write_text(head)
-    for pid, inode in ((10, 111), (20, 222)):
+    for pid, inode in ((10, 111), (20, 222), (30, 333)):
         (proc / str(pid) / "fd").mkdir(parents=True)
         os.symlink(f"socket:[{inode}]", proc / str(pid) / "fd" / "3")
         os.symlink("/dev/null", proc / str(pid) / "fd" / "0")
-    return str(cg), str(proc)
+    return (str(cg),), str(proc)
 
 
 def test_unit_ports_are_only_the_units_own(tmp_path):
     unit = "nm-sshuttle-tunnel@1.service"
-    cg, proc = proc_tree(tmp_path, unit, [10])
-    assert tunnel.unit_ports(unit, cg, proc) == {0x3039}
+    cg, proc = proc_tree(tmp_path, unit, [10, 30])
+    assert tunnel.unit_ports(unit, cg, proc) == {4: {0x3039}, 6: set()}
 
 
 def test_unit_ports_of_a_stopped_unit_and_an_unknown_layout(tmp_path):
     unit = "nm-sshuttle-tunnel@1.service"
     cg, proc = proc_tree(tmp_path, unit, None)
-    assert tunnel.unit_ports(unit, cg, proc) == set()
-    # no slice where expected: the caller falls back to every listener
-    assert tunnel.unit_ports(unit, str(tmp_path / "elsewhere"), proc) is None
+    assert tunnel.unit_ports(unit, cg, proc) == {4: set(), 6: set()}
+    # no hierarchy with systemd's units: the caller gives up (design §4.8)
+    assert tunnel.unit_ports(unit, (str(tmp_path / "elsewhere"),), proc) is None
 
 
 def test_unit_runs_finds_a_command_among_the_units_processes(tmp_path):
@@ -306,13 +312,18 @@ def test_unit_runs_finds_a_command_among_the_units_processes(tmp_path):
     assert tunnel.unit_runs(unit, "ssh", cg, proc) is False   # sshuttle outlived its ssh
     cg, proc = proc_tree(tmp_path / "c", unit, None)
     assert tunnel.unit_runs(unit, "ssh", cg, proc) is False   # the unit stopped
-    assert tunnel.unit_runs(unit, "ssh", str(tmp_path / "elsewhere"), proc) is None
+    assert tunnel.unit_runs(unit, "ssh", (str(tmp_path / "elsewhere"),), proc) is None
 
 
-def test_unit_cgroup_of_a_plain_and_a_template_unit():
-    assert tunnel.unit_cgroup("a.service", "/c") == "/c/system.slice/a.service"
-    assert tunnel.unit_cgroup("nm-sshuttle-tunnel@0.service", "/c") == (
-        "/c/system.slice/system-nm\\x2dsshuttle\\x2dtunnel.slice/nm-sshuttle-tunnel@0.service")
+def test_unit_cgroup_on_unified_hybrid_and_legacy_hosts(tmp_path):
+    roots = tuple(str(tmp_path / r) for r in ("v2", "v2/unified", "v2/systemd"))
+    assert tunnel.unit_cgroup("a.service", roots) is None
+    for root in reversed(roots):         # legacy (name=systemd), hybrid, then cgroup v2
+        os.makedirs(os.path.join(root, "system.slice"))
+        assert tunnel.unit_cgroup("a.service", roots) == f"{root}/system.slice/a.service"
+    assert tunnel.unit_cgroup("nm-sshuttle-tunnel@0.service", roots) == (
+        f"{roots[0]}/system.slice/system-nm\\x2dsshuttle\\x2dtunnel.slice/"
+        "nm-sshuttle-tunnel@0.service")
 
 
 # --------------------------------------------------------------- supervisor
