@@ -14,6 +14,10 @@ uses [semantic versioning](https://semver.org/).
   `include` made root read a file in `/etc` and log its first lines. The guard's set
   elements are now written from each network's number, and a failed guard
   logs only nft's error line.
+- The `remote` destination is checked as sshuttle splits it, in the plugin and
+  in the GNOME editor: an empty user or host (`@`, `@corp`), a host that starts
+  with `-` (`@-gD1080`), a password (`user:password@host`, which ended up in
+  sshuttle's command line and the journal) and a bad port are refused.
 
 ## [0.1.0] - 2026-10-11
 

@@ -127,6 +127,35 @@ all_digits(const char *s)
     return TRUE;
 }
 
+/* An IPv6 address with an optional scope id ("fe80::1%eth0"), as Python's
+ * ipaddress.IPv6Address takes it. Only an ssh destination may have a scope. */
+static gboolean
+parse_ipv6_scoped(const char *s)
+{
+    const char *percent = strchr(s, '%');
+    g_autofree char *addr = NULL;
+
+    if (!percent)
+        return parse_ipv6(s);
+    if (!percent[1] || strchr(percent + 1, '%'))
+        return FALSE;
+    addr = g_strndup(s, percent - s);
+    return parse_ipv6(addr);
+}
+
+/* 1 to 65535 in decimal digits, leading zeros allowed, as int() reads it. */
+static gboolean
+valid_port(const char *s)
+{
+    guint64 port = 0;
+
+    if (!all_digits(s))
+        return FALSE;
+    for (; *s && port <= 65535; s++)
+        port = port * 10 + (*s - '0');
+    return port > 0 && port <= 65535;
+}
+
 /* A prefix length, a netmask or a hostmask, as Python's ipaddress takes them. */
 static gboolean
 valid_ipv4_mask(const char *s)
@@ -174,16 +203,56 @@ check_networks(NmssField field, const char *value, gboolean required, GError **e
     return TRUE;
 }
 
+/* [USER@]HOST[:PORT] as sshuttle's parse_hostport splits it, and as profile.py's
+ * _remote() checks it: USER is not empty and has no ":"; HOST is not empty, does
+ * not start with "-", and may be an IPv6 address, in brackets when a port
+ * follows. */
 gboolean
 nmss_check_remote(const char *value, GError **error)
 {
+    const char *at;
+    const char *rest;
+    const char *port = NULL;
+    g_autofree char *host = NULL;
+    gboolean ok;
+
     if (is_blank(value))
         return fail(error, NMSS_FIELD_REMOTE, _("SSH destination is required"));
-    if (*value == '-' || strspn(value, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-                                       "0123456789._@:%[]-") != strlen(value))
+    at = strrchr(value, '@');
+    if (at && memchr(value, ':', at - value))
+        return fail(error, NMSS_FIELD_REMOTE,
+                    _("SSH destination: the part before “@” must not contain “:”, which "
+                      "sshuttle reads as the start of a password"));
+    rest = at ? at + 1 : value;
+    ok = *value != '-' && at != value
+         && strspn(value, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+                          "0123456789._@:%[]-") == strlen(value);
+    if (ok && *rest == '[') {
+        const char *close = strchr(rest, ']');
+
+        ok = close && (close[1] == '\0' || close[1] == ':');
+        if (ok) {
+            host = g_strndup(rest + 1, close - rest - 1);
+            ok = parse_ipv6_scoped(host);
+            port = close[1] ? close + 2 : NULL;
+        }
+    } else if (ok) {
+        const char *colon = strchr(rest, ':');
+
+        if (colon && !strchr(colon + 1, ':')) {
+            host = g_strndup(rest, colon - rest);
+            port = colon + 1;
+        } else {
+            host = g_strdup(rest);
+            ok = !colon || parse_ipv6_scoped(host);
+        }
+    }
+    ok = ok && (!port || valid_port(port)) && *host && *host != '-' && !strpbrk(host, "[]");
+    if (!ok)
         return fail(error, NMSS_FIELD_REMOTE,
                     _("SSH destination: “%s” is not valid. Use a host name, an alias from "
-                      "~/.ssh/config or user@host, and do not start with “-”"),
+                      "~/.ssh/config or an address, optionally as user@host, and do not "
+                      "start the host with “-”"),
                     value);
     return TRUE;
 }
@@ -302,18 +371,14 @@ nmss_check_probe(const char *value, GError **error)
     const char *colon;
     g_autofree char *host = NULL;
     gsize len;
-    guint64 port = 0;
     gboolean ok = FALSE;
 
     if (is_blank(value))
         return TRUE;
     colon = strrchr(value, ':');
-    if (colon && all_digits(colon + 1)) {
-        for (const char *p = colon + 1; *p && port <= 65535; p++)
-            port = port * 10 + (*p - '0');
+    if (colon && valid_port(colon + 1))
         host = g_strndup(value, colon - value);
-    }
-    if (host && port > 0 && port <= 65535) {
+    if (host) {
         len = strlen(host);
         if (len >= 2 && host[0] == '[' && host[len - 1] == ']') {
             g_autofree char *inner = g_strndup(host + 1, len - 2);

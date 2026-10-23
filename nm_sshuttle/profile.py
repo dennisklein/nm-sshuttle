@@ -141,6 +141,59 @@ def _ipv4(key, value):
     raise ProfileError(f"{key}: {value} is IPv6; only IPv4 DNS servers are supported")
 
 
+def _port(text):
+    """1 to 65535 in ASCII digits, leading zeros allowed, as an int; else None.
+    The length check comes first: int() refuses a string of over 4300 digits
+    with a ValueError of its own."""
+    digits = text.lstrip("0")
+    if not (text.isascii() and text.isdigit() and 0 < len(digits) <= 5):
+        return None
+    port = int(digits)
+    return port if port < 65536 else None
+
+
+def _is_ipv6(text):
+    try:
+        ipaddress.IPv6Address(text)
+    except ValueError:
+        return False
+    return True
+
+
+def _remote(value):
+    """Check an ssh destination as sshuttle's parse_hostport splits it:
+    [USER@]HOST[:PORT], where HOST may be an IPv6 address, in brackets when a
+    port follows. sshuttle starts its server locally, as root and without ssh,
+    when HOST is empty, passes a HOST that starts with "-" to ssh as an option,
+    and reads USER:PASSWORD@HOST as a password.
+
+    A scope id is fine here, unlike in the address keys: ssh takes it, and the
+    destination never reaches nft."""
+    user, at, host = value.rpartition("@")
+    if ":" in user:
+        # Not in the message, which is logged: what follows ":" is a password.
+        raise ProfileError("remote: the user part must not contain ':' (sshuttle takes "
+                           "what follows as a password)")
+    bad = ProfileError(f"remote: {value!r} is not a valid ssh destination")
+    if not REMOTE_RE.fullmatch(value) or value.startswith("-") or (at and not user):
+        raise bad
+    port = None
+    if host.startswith("["):
+        host, sep, rest = host[1:].partition("]")
+        if not sep or rest[:1] not in ("", ":") or not _is_ipv6(host):
+            raise bad
+        port = rest[1:] if rest else None
+    elif host.count(":") == 1:
+        host, _, port = host.partition(":")
+    elif ":" in host and not _is_ipv6(host):
+        raise bad
+    if port is not None and _port(port) is None:
+        raise bad
+    if not host or host.startswith("-") or "[" in host or "]" in host:
+        raise bad
+    return value
+
+
 def _bool(key, value, default):
     if value is None or value == "":
         return default
@@ -158,9 +211,7 @@ def parse(settings, getpwnam=pwd.getpwnam):
     s_ip4 = settings.get("ipv4", {})
     data = s_vpn.get("data", {})
 
-    remote = data.get("remote", "")
-    if not REMOTE_RE.fullmatch(remote) or remote.startswith("-"):
-        raise ProfileError(f"remote: {remote!r} is not a valid ssh destination")
+    remote = _remote(data.get("remote", ""))
 
     user = data.get("local-user", "")
     if not USER_RE.fullmatch(user):
@@ -215,13 +266,14 @@ def parse(settings, getpwnam=pwd.getpwnam):
     probe = data.get("probe") or None
     if probe:
         host, sep, port = probe.rpartition(":")
-        if not sep or not port.isdigit() or not 0 < int(port) < 65536:
+        port = _port(port)
+        if not sep or port is None:
             raise ProfileError(f"probe: expected ADDRESS:PORT or [IPV6]:PORT, got {probe!r}")
         bracketed = host.startswith("[") and host.endswith("]")
         addr = _address("probe", host[1:-1] if bracketed else host)
         if (family(addr) == 6) != bracketed:
             raise ProfileError(f"probe: expected ADDRESS:PORT or [IPV6]:PORT, got {probe!r}")
-        probe = f"[{addr}]:{int(port)}" if bracketed else f"{addr}:{int(port)}"
+        probe = f"[{addr}]:{port}" if bracketed else f"{addr}:{port}"
 
     return Profile(
         id=s_con.get("id", "?"), uuid=s_con.get("uuid", ""), remote=remote, user=user,
