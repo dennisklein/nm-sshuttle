@@ -1289,10 +1289,10 @@ Events and what the supervisor does:
 - **Health (every 10 s while up)**, from the plugin's own checks; NM's
   state is not evidence (see "Activated is not proof"):
   - the tunnel unit is active (an unreadable state is no failure);
-  - with `method=nft`, sshuttle's nft table exists and a listener holds its
-    port; with `method=tproxy`, its mark chain in iptables' `mangle` table
-    does, for each tunnelled family, and the plugin's rule and route are
-    there (put back if not);
+  - with `method=nft`, sshuttle's nft table exists and a listener of
+    root's in the tunnel unit holds its port (§4.8); with `method=tproxy`,
+    its mark chain in iptables' `mangle` table does, for each tunnelled
+    family, and the plugin's rule and route are there (put back if not);
   - the guard table exists (re-install it if something flushed the ruleset).
     A gap and the reconfiguration after it check that too, every 10 s,
     paused or not, and before each attempt;
@@ -1641,6 +1641,39 @@ minimal path under it; `ip` and `nft` there are untested.
   names rely on the bus's default deny of method calls. The policy adds no
   deny by interface: one without a destination also refuses every message
   that has no interface field, to any service on the bus (dbus-daemon(1)).
+- **Other local users** must not be able to take sshuttle's traffic:
+  - **What counts as a listener.** The sweep and the health check count
+    only TCP listeners of uid 0 on `127.0.0.1` or `::1` (or the wildcard
+    address, as an admin's `--listen` gives), each for its own family; the
+    sweep makes one exception, below. A
+    user's listener on a leftover table's port, or on `127.0.0.2` with the
+    same port, would otherwise keep the table, and the user would receive
+    what it still redirects, past the guard. The health check further
+    counts only the sockets in the tunnel unit's cgroup. It looks for
+    systemd's `system.slice` in cgroup v2 (`/sys/fs/cgroup`), then in the
+    unified hierarchy of a hybrid host (`/sys/fs/cgroup/unified`), then in
+    systemd's own v1 hierarchy (`/sys/fs/cgroup/systemd`). Where none has
+    it, no listener could count, and the plugin gives up at the first
+    health check with that reason rather than drop and reconnect every
+    10 s; `check` warns about it.
+  - **What the sweep removes.** Every sshuttle table and chain without such
+    a listener, whoever made it. A root listener keeps it, also outside the
+    plugin's units: another tunnel of the plugin keeps its tables, and so
+    does an sshuttle run as root by hand (`sudo sshuttle …`, lab T7c), as
+    long as it listens on loopback or the wildcard. One that listens on
+    another address, such as a LAN gateway's `-l 192.168.1.5:0`, loses
+    them. **An sshuttle a user runs the usual way** listens as that user,
+    and only its firewall helper runs as root, through sudo, below the
+    client. The sweep therefore also counts another user's listener, but
+    only while a process below the one that holds the socket is sshuttle's
+    firewall helper (`--firewall` and `sshuttle` in its command line) with
+    every user ID 0. Only root, or a user whom sudo lets run that helper
+    and who could therefore redirect any traffic anyway, can start one:
+    sudo waiting for a password already has euid 0 but keeps its caller's
+    real user ID. Any other user listener does not count. The tables of a
+    user's `sshuttle --daemon` are lost: the daemon is no longer the
+    helper's ancestor. Each table or chain deleted while a user listens on
+    its port gets a warning in the journal that names the user ID.
 - **Claims** count while the process they name has the start time
   recorded in the claim (`/proc/PID/stat`), so a process that reuses the
   PID never counts. A claim written before start times, during an upgrade,

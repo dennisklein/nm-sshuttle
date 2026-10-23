@@ -34,7 +34,7 @@ slot.
 | M2-11 | Connect right after Disconnect: a new instance serves it |
 | M2-12 | a user override of the unmanaged setting: the plugin logs it |
 | M2-13 | NetworkManager restart under an active VPN |
-| M2-14 | `ExecStopPost` removes leftovers |
+| M2-14 | `ExecStopPost` removes leftovers; the sweep removes a stale table whose port another user listens on |
 | M2-15 | no SELinux denials during the run |
 | M2-16 | `kill -9` of sshuttle while up: a reconnect without a block |
 | M2-17 | `nft flush ruleset` while up: the health check restores the guard and restarts the tunnel |

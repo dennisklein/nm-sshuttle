@@ -292,7 +292,7 @@ def nm_dns_mode(run=subprocess.run):
 
 
 def check(args, nmcli=nmcli_run, ssh_g=ssh_g_as_self, run=subprocess.run,
-          iptables_available=None, dns_mode=None, resolv_conf=None):
+          iptables_available=None, dns_mode=None, resolv_conf=None, cgroup=None):
     """Check a profile as the user it belongs to (design §4.2, §4.3).
 
     Returns 0 when everything passes. The test login may prompt for a host key
@@ -325,6 +325,10 @@ def check(args, nmcli=nmcli_run, ssh_g=ssh_g_as_self, run=subprocess.run,
         if why:
             print(f"FAIL dns={prof.dns} needs every lookup to go to systemd-resolved; {why}")
             return 1
+    if (cgroup or tunnel.unit_cgroup)("nm-sshuttle.service") is None:
+        print("WARN no cgroup hierarchy under /sys/fs/cgroup holds systemd's units: the health "
+              "check cannot tell the tunnel's own listener, and the plugin gives up 10 s after "
+              "it connects")
     if settings["ipv6"]["auto-route-ext-gw"] != "no":
         # Profiles added before IPv6 support lack it; NM then adds a host route
         # towards an IPv6 first hop (docs/later/ipv6.md).

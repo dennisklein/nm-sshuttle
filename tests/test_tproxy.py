@@ -105,7 +105,7 @@ def test_mangle_chains_are_parsed():
 
 
 def test_the_sweep_removes_the_chains_of_a_port_without_listener():
-    cmds = tunnel.stale_chain_commands(MANGLE, ports={12301})
+    cmds = tunnel.stale_chain_commands(MANGLE, ports={12301})     # this family's
     assert cmds == [["-D", "PREROUTING", "-j", "sshuttle-t-12300"],
                     ["-D", "OUTPUT", "-j", "sshuttle-m-12300"],
                     ["-F", "sshuttle-d-12300"], ["-F", "sshuttle-m-12300"],
@@ -119,10 +119,10 @@ def test_health_reads_the_mark_chain_for_tproxy(monkeypatch):
     monkeypatch.setattr(tunnel.subprocess, "run", lambda argv, **kw: SimpleNamespace(
         returncode=0, stdout=MANGLE if argv[0].endswith("tables") else
         "table inet g\ntable inet sshuttle-ipv4-12300\n"))
-    monkeypatch.setattr(tunnel, "listening_ports", lambda: {12300})
-    assert tunnel.nft_health("tproxy", "g") == {"guard": True, "sshuttle": {4, 6}}
-    monkeypatch.setattr(tunnel, "listening_ports", lambda: {12399})
-    assert tunnel.nft_health("tproxy", "g")["sshuttle"] == set()
+    assert tunnel.nft_health("tproxy", "g", {4: {12300}, 6: {12300}}) == \
+        {"guard": True, "sshuttle": {4, 6}}
+    assert tunnel.nft_health("tproxy", "g", {4: {12300}, 6: set()})["sshuttle"] == {4}
+    assert tunnel.nft_health("tproxy", "g", {4: {12399}, 6: set()})["sshuttle"] == set()
 
 
 # -------------------------------------------------------------- supervisor

@@ -583,10 +583,12 @@ class Service:
         tunnel.sweep()
 
     def nft_health(self, method="nft"):
-        # Only this tunnel's own listeners count, never another tunnel's.
-        snap = tunnel.nft_health(method, self.slot.guard_table,
-                                 tunnel.unit_ports(self.tunnel_unit))
+        # Only this tunnel's own listeners count, never another tunnel's or
+        # another user's (design §4.8).
+        ports = tunnel.unit_ports(self.tunnel_unit)
+        snap = tunnel.nft_health(method, self.slot.guard_table, ports or {})
         if snap is not None:
+            snap["cgroup"] = ports is not None
             snap["ssh"] = tunnel.unit_runs(self.tunnel_unit, "ssh")
         return snap
 

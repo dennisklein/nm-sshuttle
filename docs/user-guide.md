@@ -250,6 +250,9 @@ Common causes:
   Programs then ask those servers directly, and fall back to the local
   network's when the tunnel is down. Link it to the stub:
   `sudo ln -sf ../run/systemd/resolve/stub-resolv.conf /etc/resolv.conf`.
+- **`check` warns that no cgroup hierarchy holds systemd's units:** the
+  plugin cannot find the tunnel unit's processes, so it gives up 10 s
+  after connecting. This happens only with an unusual cgroup setup.
 - **`check` warns about `ipv6.auto-route-ext-gw`:** the profile was made
   before IPv6 support. Run the `nmcli connection modify` command it
   prints.
@@ -277,6 +280,13 @@ Common causes:
 - The tunnelled networks need a route on your machine; a default route is
   enough. On a network without one, the tunnel comes up but connections to
   those networks fail.
+- An sshuttle you run yourself next to these tunnels keeps its firewall
+  rules when it runs in the foreground, as root or as a user (whose
+  firewall helper runs through sudo), and listens on `127.0.0.1`, `::1`
+  or the wildcard address, as it does by default. Run with `--daemon` as
+  a user, or listening on another address (`-l 192.168.1.5:0`), it loses
+  them whenever one of these tunnels starts or stops, and its traffic
+  then goes around it. The journal then has a warning from the sweep.
 - GNOME Settings can edit these profiles only with the `nm-sshuttle-gnome`
   package. `nm-connection-editor` (GTK3) has no editor yet; use the commands
   above there.

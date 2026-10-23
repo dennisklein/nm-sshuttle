@@ -125,7 +125,8 @@ def test_check_passes(dennis, capsys):
     def run(argv):
         ran.append(argv)
         return SimpleNamespace(returncode=0)
-    assert cli.check(argparse.Namespace(name="corp"), Nmcli({"u1": conn()}), ssh_g_ok, run) == 0
+    assert cli.check(argparse.Namespace(name="corp"), Nmcli({"u1": conn()}), ssh_g_ok, run,
+                     cgroup=lambda unit: "/sys/fs/cgroup/x") == 0
     assert ran == [["ssh", "-o", "ConnectTimeout=15", "--", "corp", "true"]]
     out = capsys.readouterr().out
     assert "first hop 192.0.2.7" in out and "WARN" not in out
@@ -162,6 +163,15 @@ def test_nm_dns_mode_from_busctl():
         return SimpleNamespace(returncode=0, stdout='s "systemd-resolved"\n')
     assert cli.nm_dns_mode(run) == "systemd-resolved"
     assert cli.nm_dns_mode(lambda argv, **kw: SimpleNamespace(returncode=1, stdout="")) is None
+
+
+def test_check_warns_without_systemds_cgroups(dennis, capsys):
+    def run(argv):
+        return SimpleNamespace(returncode=0)
+    assert cli.check(argparse.Namespace(name="corp"), Nmcli({"u1": conn()}), ssh_g_ok, run,
+                     cgroup=lambda unit: None) == 0
+    assert "WARN no cgroup hierarchy under /sys/fs/cgroup holds systemd's units" in \
+        capsys.readouterr().out
 
 
 

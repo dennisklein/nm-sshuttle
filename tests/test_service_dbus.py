@@ -351,7 +351,7 @@ def world(bus, monkeypatch, tmp_path):
     monkeypatch.setattr(guard, "remove_guard", lambda t: host["ops"].append("unguard"))
     monkeypatch.setattr(tunnel, "sweep", lambda: None)
     monkeypatch.setattr(tunnel, "nft_health",
-                        lambda method, table, ports=None: {"guard": True, "sshuttle": {4, 6}})
+                        lambda method, table, ports: {"guard": True, "sshuttle": {4, 6}})
     monkeypatch.setattr(tunnel, "unit_ports", lambda unit: None)
     monkeypatch.setattr(service.Service, "take_claim", lambda self, claim: None)
     monkeypatch.setattr(service.Service, "release_claim", lambda self: None)
@@ -623,3 +623,18 @@ def test_split_dns_needs_resolved_behind_networkmanager(world):
     iterate_until(lambda: f"State{ST_STOPPED}" in fake.names())
     assert fake.names() == [f"State{ST_STARTING}", "Failure", f"State{ST_STOPPED}"]
     assert fake.signals[1][1] == FAIL_CONNECT and "create_link" not in host["ops"]
+
+
+def test_health_counts_no_listener_without_systemds_cgroups(monkeypatch):
+    seen = []
+    monkeypatch.setattr(tunnel, "unit_ports", lambda unit: None)
+    monkeypatch.setattr(tunnel, "unit_runs", lambda unit, comm: None)
+    monkeypatch.setattr(tunnel, "nft_health",
+                        lambda method, table, ports: seen.append(ports) or
+                        {"guard": True, "sshuttle": set()})
+    svc = service.Service(None, None, slot=2)
+    assert svc.nft_health("nft") == {"guard": True, "sshuttle": set(), "cgroup": False,
+                                     "ssh": None}
+    assert seen == [{}]
+    monkeypatch.setattr(tunnel, "unit_ports", lambda unit: {4: {229}, 6: set()})
+    assert svc.nft_health("nft")["cgroup"] is True and seen[1] == {4: {229}, 6: set()}

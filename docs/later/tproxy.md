@@ -157,10 +157,10 @@ chains (below).
 - **Sweep:** a `tproxy` tunnel's leftovers are iptables chains, not an
   nft table. `tunnel.sweep()` also lists `iptables -t mangle -S` and
   `ip6tables -t mangle -S`, and for every `sshuttle-[mtd]-PORT` chain
-  whose port has no listener it deletes the jump from `OUTPUT` or
-  `PREROUTING`, then flushes and deletes the chain. It skips this when
-  iptables is missing. It runs through iptables, not nft, so that it also
-  works on hosts that use iptables-legacy.
+  whose port has no root listener of that family (design §4.8) it deletes
+  the jump from `OUTPUT` or `PREROUTING`, then flushes and deletes the
+  chain. It skips this when iptables is missing. It runs through iptables,
+  not nft, so that it also works on hosts that use iptables-legacy.
 - **Health:** the check that sshuttle's table exists becomes, for
   `tproxy`, a check that `sshuttle-m-PORT` exists in `mangle` for each
   family the tunnel uses, with a listener on its port, and that the

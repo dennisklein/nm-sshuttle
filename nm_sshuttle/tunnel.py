@@ -11,10 +11,12 @@ import re
 import shutil
 import socket
 import stat
+import struct
 import subprocess
 import sys
 import threading
 
+from .claims import runs_as_root
 from .const import LIBEXEC, SSH_CONFIG, V1_TUNNEL_SPEC, Slot
 from .profile import collapse, family
 
@@ -328,42 +330,144 @@ def write_ssh_config(text, path=SSH_CONFIG):
 
 
 # ------------------------------------------------------------------ sweep
-def listening_ports(proc_files=("/proc/net/tcp", "/proc/net/tcp6"), inodes=None):
-    """Ports with a TCP listener; with inodes, only those of these sockets."""
-    ports = set()
-    for path in proc_files:
+# Where sshuttle listens: loopback, or the wildcard with an admin's --listen.
+LISTEN_ADDRESSES = {4: {"127.0.0.1", "0.0.0.0"}, 6: {"::1", "::"}}
+
+
+def proc_address(text):
+    """An address from /proc/net/tcp{,6}: 32-bit words in host byte order."""
+    raw = b"".join(struct.pack("=I", int(text[i:i + 8], 16)) for i in range(0, len(text), 8))
+    return socket.inet_ntop(socket.AF_INET if len(raw) == 4 else socket.AF_INET6, raw)
+
+
+def loopback_listeners(proc="/proc"):
+    """The TCP listeners on the address sshuttle listens on, as (family, port,
+    uid, socket inode)."""
+    out = []
+    for version, name in ((4, "net/tcp"), (6, "net/tcp6")):
         try:
-            with open(path) as f:
+            with open(os.path.join(proc, name)) as f:
                 next(f, None)
                 for line in f:
                     fields = line.split()
-                    if len(fields) > 3 and fields[3] == "0A" and (     # TCP_LISTEN
-                            inodes is None or (len(fields) > 9 and fields[9] in inodes)):
-                        ports.add(int(fields[1].rsplit(":", 1)[1], 16))
+                    if len(fields) < 10 or fields[3] != "0A":   # TCP_LISTEN
+                        continue
+                    addr, _, port = fields[1].rpartition(":")
+                    try:
+                        if proc_address(addr) in LISTEN_ADDRESSES[version]:
+                            out.append((version, int(port, 16), int(fields[7]), fields[9]))
+                    except (ValueError, OSError, struct.error):
+                        continue
         except OSError:
             pass
+    return out
+
+
+def listening_ports(proc="/proc", inodes=None):
+    """{4: ports, 6: ports}: the ports root listens on for TCP, on the
+    address sshuttle listens on; with inodes, only those of these sockets.
+
+    Another user's listener never counts (design §4.8): one on the port of a
+    leftover table would receive what that table still redirects."""
+    ports = {4: set(), 6: set()}
+    for version, port, uid, inode in loopback_listeners(proc):
+        if uid == 0 and (inodes is None or inode in inodes):
+            ports[version].add(port)
     return ports
 
 
-def unit_cgroup(unit, root="/sys/fs/cgroup"):
+def _firewall_helper(pid, proc):
+    """Whether pid is sshuttle's firewall helper, run as root."""
+    try:
+        with open(os.path.join(proc, str(pid), "cmdline"), "rb") as f:
+            args = f.read().split(b"\0")
+    except OSError:
+        return False
+    return (b"--firewall" in args and any(b"sshuttle" in a for a in args)
+            and runs_as_root(pid, proc))
+
+
+def user_sshuttle_ports(listeners, proc="/proc"):
+    """{4: ports, 6: ports}: those of listeners whose process has sshuttle's
+    firewall helper, run as root, among its descendants: an sshuttle a user
+    runs, with its helper through sudo (design §4.8). Only root, or a user
+    whom sudo lets run that helper, can start one: sudo waiting for a
+    password still has the caller's real user ID."""
+    inodes = {inode: (version, port) for version, port, _, inode in listeners}
+    parent, holders, helpers = {}, {}, []
+    try:
+        pids = [int(name) for name in os.listdir(proc) if name.isdigit()]
+    except OSError:
+        pids = []
+    for pid in pids:
+        base = os.path.join(proc, str(pid))
+        try:
+            with open(os.path.join(base, "stat")) as f:
+                text = f.read()
+            parent[pid] = int(text[text.rindex(")") + 2:].split()[1])
+            fds = os.listdir(os.path.join(base, "fd"))
+        except (OSError, ValueError, IndexError):
+            continue
+        for fd in fds:
+            try:
+                target = os.readlink(os.path.join(base, "fd", fd))
+            except OSError:
+                continue
+            if target.startswith("socket:[") and target[8:-1] in inodes:
+                holders.setdefault(pid, set()).add(inodes[target[8:-1]])
+        if _firewall_helper(pid, proc):
+            helpers.append(pid)
+    ancestors = set()
+    for pid in helpers:
+        pid = parent.get(pid)
+        while pid and pid not in ancestors:
+            ancestors.add(pid)
+            pid = parent.get(pid)
+    ports = {4: set(), 6: set()}
+    for pid in ancestors & holders.keys():
+        for version, port in holders[pid]:
+            ports[version].add(port)
+    return ports
+
+
+# Where systemd's units are: cgroup v2; the unified hierarchy of a hybrid
+# host; systemd's own name=systemd hierarchy on a legacy (v1) host.
+CGROUP_ROOTS = ("/sys/fs/cgroup", "/sys/fs/cgroup/unified", "/sys/fs/cgroup/systemd")
+
+
+def unit_cgroup(unit, roots=CGROUP_ROOTS):
     """Where systemd puts a system service's processes: a template instance
-    sits in its template's slice."""
+    sits in its template's slice. None when no hierarchy holds system.slice."""
+    root = next((r for r in roots if os.path.isdir(os.path.join(r, "system.slice"))), None)
+    if root is None:
+        return None
     if "@" in unit:
         template = unit.split("@", 1)[0].replace("-", "\\x2d")
         return os.path.join(root, "system.slice", f"system-{template}.slice", unit)
     return os.path.join(root, "system.slice", unit)
 
 
-def unit_runs(unit, comm, root="/sys/fs/cgroup", proc="/proc"):
-    """Does a process of this unit have the command name comm? sshuttle 1.3
-    can outlive its ssh, listening on with nothing behind it. None when the
-    unit's cgroup is not where it is expected."""
+def unit_pids(unit, roots=CGROUP_ROOTS):
+    """The processes of this unit, [] once it has stopped, or None when
+    systemd's cgroups cannot be found."""
+    cgroup = unit_cgroup(unit, roots)
+    if cgroup is None:
+        return None
     try:
-        with open(os.path.join(unit_cgroup(unit, root), "cgroup.procs")) as f:
-            pids = f.read().split()
+        with open(os.path.join(cgroup, "cgroup.procs")) as f:
+            return f.read().split()
     except FileNotFoundError:
-        return None if not os.path.isdir(os.path.dirname(unit_cgroup(unit, root))) else False
+        return []           # systemd removed the cgroup, and an empty slice's
     except OSError:
+        return None
+
+
+def unit_runs(unit, comm, roots=CGROUP_ROOTS, proc="/proc"):
+    """Does a process of this unit have the command name comm? sshuttle 1.3
+    can outlive its ssh, listening on with nothing behind it. None when
+    systemd's cgroups cannot be found."""
+    pids = unit_pids(unit, roots)
+    if pids is None:
         return None
     for pid in pids:
         try:
@@ -375,16 +479,12 @@ def unit_runs(unit, comm, root="/sys/fs/cgroup", proc="/proc"):
     return False
 
 
-def unit_ports(unit, root="/sys/fs/cgroup", proc="/proc"):
-    """The TCP ports processes of this unit listen on: one tunnel's own
-    sshuttle, never another's (docs/later/multiple-tunnels.md). None when
-    the unit's cgroup is not where it is expected."""
-    try:
-        with open(os.path.join(unit_cgroup(unit, root), "cgroup.procs")) as f:
-            pids = f.read().split()
-    except FileNotFoundError:
-        return None if not os.path.isdir(os.path.dirname(unit_cgroup(unit, root))) else set()
-    except OSError:
+def unit_ports(unit, roots=CGROUP_ROOTS, proc="/proc"):
+    """The ports processes of this unit listen on, as listening_ports: one
+    tunnel's own sshuttle, never another's (docs/later/multiple-tunnels.md).
+    None when systemd's cgroups cannot be found."""
+    pids = unit_pids(unit, roots)
+    if pids is None:
         return None
     inodes = set()
     for pid in pids:
@@ -400,8 +500,7 @@ def unit_ports(unit, root="/sys/fs/cgroup", proc="/proc"):
                 continue
             if target.startswith("socket:["):
                 inodes.add(target[8:-1])
-    return listening_ports((os.path.join(proc, "net/tcp"), os.path.join(proc, "net/tcp6")),
-                           inodes)
+    return listening_ports(proc, inodes)
 
 
 def inet_tables(nft_list_tables):
@@ -415,17 +514,18 @@ def inet_tables(nft_list_tables):
 
 
 def sshuttle_tables(nft_list_tables, ports, live):
-    """sshuttle tables whose redirect port has a listener (live) or none (stale)."""
+    """sshuttle tables whose redirect port has a listener of their family
+    (live) or none (stale); ports as listening_ports returns them."""
     out = []
     for name in inet_tables(nft_list_tables):
         m = SSHUTTLE_TABLE_RE.match(name)
-        if m and (int(m.group(2)) in ports) == live:
+        if m and (int(m.group(2)) in ports.get(int(m.group(1)), ())) == live:
             out.append(name)
     return out
 
 
 def stale_tables(nft_list_tables, ports):
-    """sshuttle tables whose redirect port has no listener (lab T7c)."""
+    """sshuttle tables whose redirect port has no root listener (lab T7c)."""
     return sshuttle_tables(nft_list_tables, ports, live=False)
 
 
@@ -443,8 +543,9 @@ def mangle_chains(iptables_s):
 
 def stale_chain_commands(iptables_s, ports):
     """The iptables arguments that remove the sshuttle chains whose port has no
-    listener: the jumps from OUTPUT and PREROUTING first, then flush every
-    chain, then delete them (the t-chain jumps to the d-chain)."""
+    listener among ports, those of the listing's family: the jumps from
+    OUTPUT and PREROUTING first, then flush every chain, then delete them
+    (the t-chain jumps to the d-chain)."""
     stale = [c for c, port in mangle_chains(iptables_s).items() if port not in ports]
     cmds = []
     for line in iptables_s.splitlines():
@@ -473,12 +574,13 @@ def _mangle(family):
     return p.stdout if p.returncode == 0 else None
 
 
-def nft_health(method, guard_table, ports=None):
+def nft_health(method, guard_table, ports):
     """What the health check reads from the firewall (design §4.4, "Health"):
     is the guard table there, and for which families (4, 6) does sshuttle have
     its rules with a listener on their port? Those are a table in nft, or for
-    method=tproxy a mark chain in iptables' mangle table. ports limits it to
-    this tunnel's own listeners. None when nft cannot be asked."""
+    method=tproxy a mark chain in iptables' mangle table. ports are this
+    tunnel's own listeners, as unit_ports returns them. None when nft cannot
+    be asked."""
     try:
         p = subprocess.run(["nft", "list", "tables"], capture_output=True, text=True,
                            timeout=10)
@@ -486,13 +588,12 @@ def nft_health(method, guard_table, ports=None):
         return None
     if p.returncode:
         return None
-    if ports is None:
-        ports = listening_ports()
     if method == "tproxy":
         families = set()
         for version in IPTABLES:
             chains = mangle_chains(_mangle(version) or "")
-            if any(c.startswith("sshuttle-m-") and port in ports for c, port in chains.items()):
+            if any(c.startswith("sshuttle-m-") and port in ports.get(version, ())
+                   for c, port in chains.items()):
                 families.add(version)
     else:
         live = sshuttle_tables(p.stdout, ports, live=True)
@@ -500,36 +601,73 @@ def nft_health(method, guard_table, ports=None):
     return {"guard": guard_table in inet_tables(p.stdout), "sshuttle": families}
 
 
-def sweep():
-    """Delete sshuttle tables and chains left by a killed tunnel; they only
-    black-hole traffic."""
+def sweep(proc="/proc"):
+    """Delete sshuttle tables and chains left by a killed tunnel (lab T7).
+
+    A table or chain is live while root listens on its port, on 127.0.0.1 for
+    IPv4 or ::1 for IPv6 (or the wildcard), whichever tunnel unit holds it: a
+    tunnel's sweep must spare the other tunnels, and an sshuttle run as root
+    outside the plugin. Another user's listener keeps it only while sshuttle's
+    root firewall helper runs below that listener's process, as for an
+    sshuttle the user runs; any other listener would receive the redirected
+    traffic (design §4.8)."""
     try:
         out = subprocess.run(["nft", "list", "tables"], capture_output=True, text=True,
                              timeout=10).stdout
     except (OSError, subprocess.TimeoutExpired) as e:
         log.warning("sweep: cannot list nft tables: %s", e)
         out = ""
-    ports = listening_ports()
+    # method=tproxy leaves iptables chains; through iptables, so that this also
+    # works with iptables-legacy (docs/later/tproxy.md).
+    listings = {}
+    for version, cmd in IPTABLES.items():
+        if shutil.which(cmd, path=SEARCH_PATH):
+            listing = _mangle(version)
+            if listing is not None:
+                listings[version] = listing
+    listeners = loopback_listeners(proc)
+    ports = {4: set(), 6: set()}
+    users = {}
+    for version, port, uid, _ in listeners:
+        if uid == 0:
+            ports[version].add(port)
+        else:
+            users.setdefault((version, port), set()).add(uid)
+    stale = {(int(m.group(1)), int(m.group(2))) for m in
+             (SSHUTTLE_TABLE_RE.match(t) for t in stale_tables(out, ports)) if m}
+    stale |= {(version, port) for version, listing in listings.items()
+              for port in mangle_chains(listing).values() if port not in ports[version]}
+    held = [x for x in listeners if x[2] != 0 and (x[0], x[1]) in stale]
+    if held:
+        for version, kept in user_sshuttle_ports(held, proc).items():
+            ports[version] |= kept
+
+    def deleted(what, version, port):
+        uids = users.get((version, port))
+        if uids:
+            log.warning("sweep: deleted %s although uid %s listens on its port, without "
+                        "sshuttle's root firewall helper below it; an sshuttle run that way "
+                        "has lost its rules (design §4.8)", what,
+                        ", ".join(str(u) for u in sorted(uids)))
+        else:
+            log.info("sweep: deleted stale %s", what)
+
     for table in stale_tables(out, ports):
         p = subprocess.run(["nft", "delete", "table", "inet", table], capture_output=True,
                            text=True, timeout=10)
         if p.returncode == 0:
-            log.info("sweep: deleted stale table %s", table)
+            m = SSHUTTLE_TABLE_RE.match(table)
+            deleted(f"table {table}", int(m.group(1)), int(m.group(2)))
         else:
             log.warning("sweep: cannot delete %s: %s", table, p.stderr.strip())
-    # method=tproxy leaves iptables chains; through iptables, so that this also
-    # works with iptables-legacy (docs/later/tproxy.md).
-    for version, cmd in IPTABLES.items():
-        if not shutil.which(cmd, path=SEARCH_PATH):
-            continue
-        listing = _mangle(version)
-        if listing is None:
-            continue
-        for args in stale_chain_commands(listing, ports):
+    for version, listing in listings.items():
+        cmd = IPTABLES[version]
+        chains = mangle_chains(listing)
+        for args in stale_chain_commands(listing, ports[version]):
             p = subprocess.run([cmd, "-w", "-t", "mangle", *args], capture_output=True,
                                text=True, timeout=10)
             if p.returncode:
                 log.warning("sweep: %s -t mangle %s: %s", cmd, " ".join(args),
                             p.stderr.strip())
             elif args[0] == "-X":
-                log.info("sweep: deleted stale chain %s (IPv%d)", args[1], version)
+                deleted(f"chain {args[1]} (IPv{version})", version, chains[args[1]])
