@@ -4,7 +4,7 @@
 import pytest
 
 from fakes import fake_getpwnam, settings
-from nm_sshuttle.profile import ProfileError, parse
+from nm_sshuttle.profile import ProfileError, collapse, parse
 
 
 def p(s):
@@ -89,3 +89,33 @@ def test_persistent_and_ipv4_method_are_required():
 
 def test_unknown_keys_are_reported_not_used():
     assert p(settings(**{"ssh-options": "-oFoo"})).ignored_keys == ["ssh-options"]
+
+
+INCLUDE = 'fe80::%x};include"passwd";/64'
+
+
+@pytest.mark.parametrize("key,value", [
+    ("subnets", INCLUDE), ("subnets", "10.0.0.0/8 fe80::%eth0/64"), ("exclude", INCLUDE),
+    ("gateway", "fe80::1%x }\ninclude \"passwd\""), ("gateway", "fe80::1%eth0"),
+    ("probe", "[fe80::1%a b]:22"), ("dns-servers", "fe80::53%eth0")])
+def test_a_scope_id_is_refused(key, value):
+    # ipaddress keeps any text after "%" in str(), and that text would reach
+    # the root nft script and sshuttle's argv.
+    with pytest.raises(ProfileError, match=f"^{key}: .* has a scope id"):
+        p(settings(**{key: value}))
+
+
+def test_stored_networks_are_address_text_only():
+    prof = p(settings(subnets="10.1.2.3/8, 2001:DB8:10::1/48", exclude="2001:db8:10:5::7",
+                      gateway="2001:DB8::7"))
+    assert prof.subnets == ["10.0.0.0/8", "2001:db8:10::/48"]
+    assert prof.exclude == ["2001:db8:10:5::7/128"]
+    assert prof.gateway == "2001:db8::7"
+
+
+def test_collapse_drops_a_scope_that_got_through():
+    # Even past validation, a network's text is rebuilt from its number.
+    assert collapse([INCLUDE, "fe80::1%eth0", "10.0.0.0/8"]) == [
+        "10.0.0.0/8", "fe80::/64"]
+    assert collapse(["fe80::%a b/10"]) == ["fe80::/10"]
+

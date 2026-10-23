@@ -86,6 +86,10 @@ places below) and NetworkManager `main` (1.59.2-dev, ef234f8).
 | `probe` | `ADDRESS:PORT` or `[IPV6]:PORT`. |
 | `dns-servers` | Unchanged: IPv4 only. An IPv6 server is refused with a message that names this limit. |
 
+No address or network key takes a scope id (`fe80::1%eth0`): `ipaddress`
+accepts one and keeps its text, which is free, so `profile.parse` refuses it
+(design §4.2). Only `remote` may have one, since it never reaches nft.
+
 `profile.parse` keeps networks as strings; `Profile` gains nothing new.
 `guarded_networks()` returns both families, each collapsed on its own.
 The IPv6 /128s of DNS servers do not arise, since servers stay IPv4.

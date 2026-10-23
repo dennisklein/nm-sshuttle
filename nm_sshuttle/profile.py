@@ -72,13 +72,23 @@ def family(network):
     return ipaddress.ip_network(network, strict=False).version
 
 
+def _network(text):
+    """An address or network string as an ipaddress network without a scope id.
+
+    ipaddress takes "fe80::%eth0/64" and keeps the scope, which is free text, in
+    str(). Rebuilt from its number, the network prints as address characters
+    only, whatever text it came from: its str() may go into the root nft script."""
+    net = ipaddress.ip_network(text, strict=False)
+    return type(net)((int(net.network_address), net.prefixlen))
+
+
 def collapse(networks, version=None):
     """Merge overlapping and adjacent networks, as strings: IPv4 first, then
     IPv6, each family on its own (version: only that family).
 
     nft refuses an interval set with overlapping elements ("conflicting
     intervals"), and a DNS server's /32 usually lies inside a profile subnet."""
-    nets = [ipaddress.ip_network(n, strict=False) for n in networks]
+    nets = [_network(n) for n in networks]
     out = []
     for v in (4, 6):
         if version in (None, v):
@@ -91,17 +101,26 @@ def _split(value):
     return [v for v in re.split(r"[\s,]+", value or "") if v]
 
 
+def _unscoped(key, value):
+    """Refuse an IPv6 scope id ("fe80::1%eth0"). ipaddress takes any text after
+    the "%", spaces and newlines included, and keeps it."""
+    if "%" in value:
+        raise ProfileError(f"{key}: {value!r} has a scope id; addresses with % are not supported")
+
+
 def _networks(key, value):
     nets = []
     for item in _split(value):
+        _unscoped(key, item)
         try:
-            nets.append(str(ipaddress.ip_network(item, strict=False)))
+            nets.append(str(_network(item)))
         except ValueError:
             raise ProfileError(f"{key}: {item!r} is not a network") from None
     return nets
 
 
 def _address(key, value):
+    _unscoped(key, value)
     try:
         return str(ipaddress.ip_address(value))
     except ValueError:
@@ -109,6 +128,7 @@ def _address(key, value):
 
 
 def _ipv4(key, value):
+    _unscoped(key, value)
     try:
         return str(ipaddress.IPv4Address(value))
     except ValueError:

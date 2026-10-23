@@ -77,6 +77,8 @@ def guard_ruleset(table, networks, exclude, mark=None):
     takes (priority mangle, before this hook), so a packet with that mark is
     let through (docs/later/tproxy.md)."""
     def set_def(name, items, version):
+        # collapse() rebuilds each network from its number, so only address
+        # characters reach the script, whatever text the profile held.
         items = collapse(items, version)
         body = f"type ipv{version}_addr; flags interval;"
         if items:
@@ -113,7 +115,11 @@ def install_guard(table, networks, exclude, mark=None):
     script += guard_ruleset(table, networks, exclude, mark)
     ok, out = run(["nft", "-f", "-"], input=script)
     if not ok:
-        raise RuntimeError(f"cannot install the guard table: {out}")
+        # Only the line that names the error (a warning may come before it):
+        # the lines after it quote the script, or a file that the script included.
+        lines = out.splitlines() or ["nft failed"]
+        first = next((line for line in lines if "Error:" in line), lines[0])
+        raise RuntimeError(f"cannot install the guard table: {first}")
 
 
 def guard_present(table):
