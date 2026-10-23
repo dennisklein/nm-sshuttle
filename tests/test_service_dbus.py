@@ -586,3 +586,22 @@ def test_probe_needs_data_from_the_far_end():
     assert results["closed"] is False
     banner.close()
     silent.close()
+
+
+def test_only_networkmanager_may_call_the_plugin(world, bus):
+    fake, svc, host = world
+    other = connect(bus)
+    out = []
+    other.call("org.freedesktop.NetworkManager.sshuttle",
+               "/org/freedesktop/NetworkManager/VPN/Plugin",
+               "org.freedesktop.NetworkManager.VPN.Plugin", "Connect", settings_variant(), None,
+               Gio.DBusCallFlags.NONE, 2000, None, lambda c, res: out.append(res))
+    iterate_until(lambda: out)
+    with pytest.raises(GLib.Error, match="AccessDenied"):
+        other.call_finish(out[0])
+    assert svc.sup.phase == "idle" and fake.signals == []
+
+    # before the name watch has reported NM, the bus is asked
+    svc.sup.nm_current_owner = None
+    r = fake.call_plugin("NeedSecrets", GLib.Variant("(a{sa{sv}})", ({},)))
+    assert r.unpack() == ("",)

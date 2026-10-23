@@ -1619,7 +1619,13 @@ minimal path under it; `ip` and `nft` there are untested.
   user.
 - **The bridge never runs anything as root except `setpriv`**, and ssh
   never runs as root.
-- **D-Bus access:** only root may own or call the plugin's name.
+- **D-Bus access:** only root may own or call the plugin's name, and the
+  plugin answers `VPN.Plugin` calls only from NetworkManager's current
+  unique name, others with `AccessDenied`. When the name watch has not
+  reported NM yet, it asks the bus (`GetNameOwner`). The per-activation
+  names rely on the bus's default deny of method calls. The policy adds no
+  deny by interface: one without a destination also refuses every message
+  that has no interface field, to any service on the bus (dbus-daemon(1)).
 - **Claims** count while the process they name has the start time
   recorded in the claim (`/proc/PID/stat`), so a process that reuses the
   PID never counts. A claim written before start times, during an upgrade,

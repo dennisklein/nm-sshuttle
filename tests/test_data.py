@@ -2,6 +2,7 @@
 """The installed files carry the settings the design depends on."""
 
 import configparser
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 DATA = Path(__file__).resolve().parent.parent / "data"
@@ -17,6 +18,13 @@ def ini(name):
 def test_conf_d_keeps_every_link_unmanaged_without_replacing_the_list():
     cp = ini("90-nm-sshuttle.conf")
     assert dict(cp["keyfile"]) == {"unmanaged-devices+": "interface-name:nmss*"}
+
+
+def test_bus_policy_denies_only_by_destination():
+    # dbus-daemon(1): a deny by interface alone also refuses every message
+    # without an interface field, to any service on the bus.
+    for deny in ET.parse(DATA / "nm-sshuttle.conf").getroot().iter("deny"):
+        assert "send_destination" in deny.attrib or "own_prefix" in deny.attrib, deny.attrib
 
 
 def test_plugin_unit_cleans_up_its_slot_after_any_exit():
