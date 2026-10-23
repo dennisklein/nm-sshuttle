@@ -36,6 +36,8 @@ SSH_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 # method=tproxy: sshuttle's chains in the mangle table (docs/later/tproxy.md).
 SSHUTTLE_CHAIN_RE = re.compile(r"^sshuttle-([mtd])-(\d+)$")
 IPTABLES = {4: "iptables", 6: "ip6tables"}
+# What runs as the user gets the default OOM score adjustment (design §4.7).
+OOM_SCORE_ADJ = "/proc/self/oom_score_adj"
 
 
 # sshuttle's -r. sshuttle 2.0.0 excludes its remote by itself, through ssh -G
@@ -232,6 +234,19 @@ def port_failure(journal, ipv6):
 
 
 # ------------------------------------------------------------- ssh bridge
+def reset_oom_score_adj(path=OOM_SCORE_ADJ):
+    """Give up the plugin unit's OOMScoreAdjust=-500 before anything runs as
+    the user, ssh -G's Match exec among it. systemd wrote it as root, so it is
+    also the floor the user could go back to; written as root, which has
+    CAP_SYS_RESOURCE, 0 resets the floor too (design §4.7)."""
+    try:
+        with open(path, "w") as f:
+            f.write("0")
+    except OSError as e:
+        print(f"ssh-as-user: cannot reset the OOM score adjustment: {e}", file=sys.stderr,
+              flush=True)
+
+
 def user_environment(user, pw):
     """The user's systemd manager environment, read as the user."""
     rt = f"/run/user/{pw.pw_uid}"
@@ -262,6 +277,7 @@ def ssh_as_user(user, args):
             raise ValueError("--remote needs a value")
         args = bridged_args(args[1], args[2:])
     pw = pwd.getpwnam(user)
+    reset_oom_score_adj()
     rt = f"/run/user/{pw.pw_uid}"
     menv = user_environment(user, pw)
     sock, origin = menv.get("SSH_AUTH_SOCK", ""), "user manager"
