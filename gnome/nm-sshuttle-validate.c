@@ -204,9 +204,9 @@ check_networks(NmssField field, const char *value, gboolean required, GError **e
 }
 
 /* [USER@]HOST[:PORT] as sshuttle's parse_hostport splits it, and as profile.py's
- * _remote() checks it: USER is not empty and has no ":"; HOST is not empty, does
- * not start with "-", and may be an IPv6 address, in brackets when a port
- * follows. */
+ * split_remote() checks it: USER is not empty and has no ":"; HOST is not
+ * empty, does not start with "-", and may be an IPv6 address, in brackets when
+ * a port follows. */
 gboolean
 nmss_check_remote(const char *value, GError **error)
 {

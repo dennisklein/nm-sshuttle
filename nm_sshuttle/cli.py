@@ -387,12 +387,17 @@ def remove(args, nmcli=nmcli_run):
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["ssh-as-user"]:
-        # Everything after the user goes to ssh unchanged; argparse would eat options.
+        # What follows the user goes to ssh, with --remote in place of sshuttle's stand-in
+        # (design §4.3); argparse would eat options.
         if len(argv) < 2:
-            print("usage: nm-sshuttle ssh-as-user USER [SSH-ARGS...]", file=sys.stderr)
+            print("usage: nm-sshuttle ssh-as-user USER [--remote REMOTE] [SSH-ARGS...]",
+                  file=sys.stderr)
             return 2
-        tunnel.ssh_as_user(argv[1], argv[2:])
-        return 255   # not reached: ssh_as_user execs
+        try:
+            tunnel.ssh_as_user(argv[1], argv[2:])
+        except ValueError as e:
+            print(f"ssh-as-user: {e}", file=sys.stderr)
+        return 255   # reached only on an error: ssh_as_user execs
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
     parser = argparse.ArgumentParser(prog="nm-sshuttle")
     sub = parser.add_subparsers(dest="cmd", required=True)

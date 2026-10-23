@@ -22,7 +22,7 @@ slot.
 | id | scenario |
 |---|---|
 | M2-01 | install: files, SELinux labels, `/etc/resolv.conf` is resolved's stub, `90-nm-sshuttle.conf` takes effect after `nmcli general reload conf` |
-| M2-02 | connect: address, resolved per link, split and outside lookups, guard, units, firewalld zone, the link unmanaged, a bus name of its own from NM, sshuttle on the slot's own redirect port |
+| M2-02 | connect: address, resolved per link, split and outside lookups, guard, units, firewalld zone, the link unmanaged, a bus name of its own from NM, sshuttle on the slot's own redirect port, sshuttle's remote 127.0.0.1 and ssh's the profile's |
 | M2-03 | reconnect (nbns) three times with firewalld: same ifindex, DNS, one VPN entry in NM, fail closed in the gap |
 | M2-04 | the same without firewalld |
 | M2-05 | a gap longer than 10 s |
