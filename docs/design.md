@@ -878,7 +878,10 @@ $ nm-sshuttle check corp     # as the user: ssh -G, host key, test login
 
 - `remote` must match `^[A-Za-z0-9._@:%\[\]-]+$` and must not start with
   `-`;
-- every address and network must parse with `ipaddress`;
+- every address and network must parse with `ipaddress` and have no IPv6
+  scope id (`fe80::1%eth0`): `ipaddress` keeps any text after the `%`,
+  spaces, quotes and braces included, and that text would reach the guard's
+  nft script and sshuttle's arguments;
 - `local-user` must exist and be a regular user;
 - `connection.permissions` must be exactly `user:<local-user>`;
 - `vpn.persistent` must be `yes`, so that NM keeps the VPN across drops
@@ -1496,6 +1499,12 @@ when they reach the guard. With `method=tproxy` there is no NAT; two rules
 ahead of the `dnat` ones accept what sshuttle's mangle chain marked
 (`ip daddr @subnets4 meta mark 0x4e530000 accept`, and the same for IPv6;
 [tproxy](later/tproxy.md)).
+
+The set elements are written from each network's number, never from the
+profile's text, so nothing but address characters reaches `nft -f -`, even
+if a check of §4.2 were missed. When nft refuses the script, the plugin logs
+only nft's line that names the error: the lines after it quote the script,
+or a file that the script included.
 
 **[lab T4]** In the lab, while the tunnel was down, connections failed in
 about 10 ms instead of leaking to the default route. In the lab's container,

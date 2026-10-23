@@ -74,3 +74,41 @@ def test_overlapping_networks_install_in_nft():
     rules = guard.guard_ruleset(T, ["10.99.0.0/24", "10.99.0.53/32", "10.0.0.0/8"], ["1.2.3.4"])
     p = subprocess.run(["nft", "-c", "-f", "-"], input=rules, text=True, capture_output=True)
     assert p.returncode == 0, p.stderr
+
+
+INCLUDE = 'fe80::%x};include"passwd";/64'
+
+
+def test_guard_ruleset_holds_only_address_text():
+    # A scope id is refused by profile.parse; should one get past it, its text
+    # still never reaches the root nft script.
+    rules = guard.guard_ruleset(T, ["10.0.0.0/8", INCLUDE], [INCLUDE, "fe80::1%a }\nb"])
+    assert "set subnets6 { type ipv6_addr; flags interval; elements = { fe80::/64 } }" in rules
+    assert "set exclude6 { type ipv6_addr; flags interval; elements = { fe80::/64 } }" in rules
+    assert "%" not in rules and "include" not in rules and '"' not in rules
+
+
+@pytest.mark.skipif(not nft_usable(), reason="needs a working nft (root)")
+def test_guard_ruleset_with_a_scope_parses_in_nft():
+    rules = guard.guard_ruleset(T, ["10.0.0.0/8", INCLUDE], [INCLUDE])
+    p = subprocess.run(["nft", "-c", "-f", "-"], input=rules, text=True, capture_output=True)
+    assert p.returncode == 0, p.stderr
+
+
+def test_install_guard_reports_only_the_error_line_of_nft(monkeypatch):
+    # nft quotes the lines it could not parse, including those of a file that
+    # the script included; only the line naming the error is passed on.
+    out = ("Warning: a warning first\n"
+           "/etc/passwd:1:1-4: Error: syntax error, unexpected string\n"
+           "root:x:0:0:root:/root:/bin/bash\n^^^^")
+    monkeypatch.setattr(guard, "run", lambda argv, input=None: (False, out))
+    with pytest.raises(RuntimeError) as e:
+        guard.install_guard(T, ["10.0.0.0/8"], [])
+    assert str(e.value) == ("cannot install the guard table: "
+                            "/etc/passwd:1:1-4: Error: syntax error, unexpected string")
+    monkeypatch.setattr(guard, "run", lambda argv, input=None: (False, "nft: odd\nmore"))
+    with pytest.raises(RuntimeError, match="table: nft: odd$"):
+        guard.install_guard(T, ["10.0.0.0/8"], [])
+    monkeypatch.setattr(guard, "run", lambda argv, input=None: (False, ""))
+    with pytest.raises(RuntimeError, match="nft failed"):
+        guard.install_guard(T, ["10.0.0.0/8"], [])

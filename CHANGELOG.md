@@ -4,6 +4,17 @@ All notable changes to nm-sshuttle are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 uses [semantic versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Security
+
+- A profile address or network with an IPv6 scope id (`fe80::%eth0/64`) is
+  refused. The scope is free text that `ipaddress` keeps, and a crafted one in
+  `subnets`, `exclude` or `gateway` reached the root `nft` script, where an
+  `include` made root read a file in `/etc` and log its first lines. The guard's set
+  elements are now written from each network's number, and a failed guard
+  logs only nft's error line.
+
 ## [0.1.0] - 2026-10-11
 
 The first release.
@@ -45,4 +56,5 @@ The first release.
 - There is no Debian or Ubuntu package repository; take the `.deb` files
   from a CI run.
 
+[Unreleased]: https://github.com/dennisklein/nm-sshuttle/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/dennisklein/nm-sshuttle/releases/tag/v0.1.0
