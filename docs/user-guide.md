@@ -27,11 +27,21 @@ it.
 ## Installing
 
 On Fedora, install from the signed package repository, which also brings
-updates:
+updates. Download its signing key file, and import it only if
+`gpg --show-keys` shows each fingerprint listed in the
+[README on GitHub](https://github.com/dennisklein/nm-sshuttle#install) and
+no other key, and reports no error (install `gnupg2` if `gpg` is missing). The
+site serves the key file and the repository package together, so the
+fingerprint on the site proves nothing on its own. Then install the
+repository package with `localpkg_gpgcheck=1`, so that dnf checks its
+signature against the key; it does not check a package named on the command
+line otherwise.
 
 ```console
-$ sudo rpm --import https://dennisklein.github.io/nm-sshuttle/RPM-GPG-KEY-nm-sshuttle
-$ sudo dnf install https://dennisklein.github.io/nm-sshuttle/nm-sshuttle-release.noarch.rpm
+$ curl -fsSLO https://dennisklein.github.io/nm-sshuttle/RPM-GPG-KEY-nm-sshuttle
+$ gpg --show-keys RPM-GPG-KEY-nm-sshuttle
+$ sudo rpm --import RPM-GPG-KEY-nm-sshuttle
+$ sudo dnf install --setopt=localpkg_gpgcheck=1 https://dennisklein.github.io/nm-sshuttle/nm-sshuttle-release.noarch.rpm
 $ sudo dnf install nm-sshuttle
 ```
 

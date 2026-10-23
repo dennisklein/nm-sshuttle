@@ -15,6 +15,14 @@ uses [semantic versioning](https://semver.org/).
   key. `scripts/signing-key.sh` now restricts the `github-pages`
   environment to `main` too, and `--restrict` restricts both environments
   again (packaging/README.md).
+- The install steps download the signing key file and show its keys with
+  `gpg --show-keys`, to compare with the fingerprints in the README on
+  GitHub before `rpm --import`, and install the repository package with
+  `localpkg_gpgcheck=1`, so that dnf checks its signature against that key.
+  The key, the repository package and the fingerprint on the site all come
+  from the same site, so the site alone proved nothing, and dnf did not
+  check the repository package at all. The README and the site show
+  fingerprints as gpg prints them.
 - A profile address or network with an IPv6 scope id (`fe80::%eth0/64`) is
   refused. The scope is free text that `ipaddress` keeps, and a crafted one in
   `subnets`, `exclude` or `gateway` reached the root `nft` script, where an

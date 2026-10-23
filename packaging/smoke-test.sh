@@ -13,7 +13,7 @@ base=${base%/}
 
 curl -fsSL --retry 5 --retry-all-errors "$base/RPM-GPG-KEY-nm-sshuttle" -o /tmp/RPM-GPG-KEY-nm-sshuttle
 rpm --import /tmp/RPM-GPG-KEY-nm-sshuttle
-dnf -y install "$base/nm-sshuttle-release.noarch.rpm"
+dnf -y install --setopt=localpkg_gpgcheck=1 "$base/nm-sshuttle-release.noarch.rpm"
 # nm-sshuttle.repo points at the public site; follow the site under test
 # instead. --allowerasing: the container has systemd-standalone-tmpfiles,
 # which conflicts with the systemd that systemd-resolved needs; a real system
