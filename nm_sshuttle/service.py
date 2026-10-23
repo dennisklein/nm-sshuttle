@@ -521,14 +521,15 @@ class Service:
         proc.communicate_utf8_async(None, None, finished)
 
     def resolve_first_hop(self, user, remote, done):
-        """done(addresses, error): first-hop prints one address per line."""
+        """done(addresses, error, given): with --kind, first-hop prints "given"
+        or "lookup", then one address per line (design §4.2)."""
         def finished(ok, out, err):
-            addrs = out.split()
-            if ok and addrs:
-                done(addrs, None)
+            kind, *addrs = out.split() or [""]
+            if ok and kind in ("given", "lookup") and addrs:
+                done(addrs, None, kind == "given")
             else:
                 done(None, err.strip() or "no address")
-        self._spawn([os.path.join(LIBEXEC, "nm-sshuttle"), "first-hop", user, remote],
+        self._spawn([os.path.join(LIBEXEC, "nm-sshuttle"), "first-hop", "--kind", user, remote],
                     FIRST_HOP_TIMEOUT_S, finished)
 
     def run_cleanup(self, done):

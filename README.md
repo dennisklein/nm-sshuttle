@@ -129,6 +129,14 @@ $ nm-sshuttle add lab  --remote lab  --subnets 10.50.0.0/16
 connects to first, so name it, and the tunnel will not swallow it:
 `--gateway 203.0.113.7`.
 
+**A jump host inside the tunnelled networks.** The plugin ignores an
+address of the jump host that it looked up and that lies in `--subnets`,
+since a forged DNS answer could otherwise take internal addresses out of
+the tunnel. Name it: `--gateway 10.0.0.5`, `--exclude 10.0.0.5`, or
+`HostName 10.0.0.5` in `~/.ssh/config`. A jump host with a changing
+address, such as a dynamic DNS name, therefore does not work with a
+profile that tunnels `0.0.0.0/0` or `::/0`.
+
 **Notice a stuck tunnel.** `--probe 10.1.0.10:22` makes the plugin connect
 to a server on the far side that speaks first, such as an ssh server, every
 10 seconds, and restart the tunnel after two failures.

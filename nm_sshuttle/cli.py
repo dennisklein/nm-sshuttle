@@ -13,8 +13,10 @@
                  ExecStartPre and ExecStopPost)
   exec-tunnel N  ExecStart of the tunnel unit nm-sshuttle-tunnel@N
   ssh-as-user    sshuttle's ssh command
-  first-hop      print the first hop's addresses, one per line, worked out as
-                 the user
+  first-hop [--kind] USER REMOTE
+                 print the first hop's addresses, one per line, worked out as
+                 the user; --kind first prints "given" for a HostName that is
+                 an address, or "lookup"
   post-install   reload NetworkManager's configuration unless an nm-sshuttle
                  VPN is active
 
@@ -152,9 +154,11 @@ def post_install():
     return 0
 
 
-def first_hop(user, remote):
+def first_hop(user, remote, kind=False):
     try:
-        print("\n".join(tunnel.first_hop(user, remote)))
+        addrs, given = tunnel.first_hop(user, remote)
+        # The plugin asks for the kind; a plugin started before an upgrade does not.
+        print("\n".join((["given" if given else "lookup"] if kind else []) + addrs))
     except (OSError, ValueError, subprocess.TimeoutExpired) as e:
         print(f"first-hop: {e}", file=sys.stderr)
         return 1
@@ -273,7 +277,8 @@ def active_conflict(uuid, prof, hops, nmcli, ssh_g):
             continue
         try:
             o = profile.parse(read_settings(other, nmcli), lambda n: pwd.getpwnam(n))
-            o_hops = [o.gateway] if o.gateway else tunnel.first_hop(o.user, o.remote, ssh_g)
+            o_hops = ([o.gateway] if o.gateway else
+                      o.first_hop_addresses(*tunnel.first_hop(o.user, o.remote, ssh_g))[0])
         except (profile.ProfileError, OSError, ValueError, RuntimeError,
                 subprocess.TimeoutExpired):
             continue
@@ -350,11 +355,23 @@ def check(args, nmcli=nmcli_run, ssh_g=ssh_g_as_self, run=subprocess.run,
             hops = [prof.gateway]
             print(f"ok   ssh -G skipped; gateway is {prof.gateway}")
         else:
-            hops = tunnel.first_hop(prof.user, prof.remote, ssh_g)
-            print(f"ok   ssh -G; first hop {', '.join(hops)}")
+            hops, refused, dropped = prof.first_hop_addresses(
+                *tunnel.first_hop(prof.user, prof.remote, ssh_g))
     except (OSError, ValueError, subprocess.TimeoutExpired) as e:
         print(f"FAIL ssh -G: {e}")
         return 1
+    if not prof.gateway:
+        # The plugin leaves these out too (design §4.2).
+        if refused:
+            print(f"WARN first hop {profile.listed(refused)} lies in the profile's networks or "
+                  "DNS servers and is ignored; set 'gateway' or 'exclude' for a first hop there")
+        if dropped:
+            print(f"WARN the first hop has more than {profile.MAX_HOPS} addresses; "
+                  f"{profile.listed(dropped)} ignored")
+        if not hops:
+            print("FAIL the first hop has no usable address")
+            return 1
+        print(f"ok   ssh -G; first hop {', '.join(hops)}")
     # The plugin refuses a profile that conflicts with an active one, and GNOME
     # only shows "Connection failed" (docs/later/multiple-tunnels.md).
     why = active_conflict(uuid, prof, hops, nmcli, ssh_g)
@@ -410,6 +427,7 @@ def main(argv=None):
     et.add_argument("slot", type=slot_number, nargs="?")
     sub.add_parser("post-install")
     fh = sub.add_parser("first-hop")
+    fh.add_argument("--kind", action="store_true")
     fh.add_argument("user")
     fh.add_argument("remote")
     a = sub.add_parser("add", help="create a profile")
@@ -446,5 +464,5 @@ def main(argv=None):
     if args.cmd == "post-install":
         return post_install()
     if args.cmd == "first-hop":
-        return first_hop(args.user, args.remote)
+        return first_hop(args.user, args.remote, args.kind)
     return 2

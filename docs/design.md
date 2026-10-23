@@ -872,7 +872,7 @@ keys:
 | `dns-servers` | `10.1.0.53` | Required for `split` and `all`. IPv4 only. |
 | `dns-domains` | `corp.example,lab.example` | Routing domains for `split`. |
 | `method` | `nft` | `nft` (default), `nat`, or `tproxy`, which also carries UDP ([tproxy](later/tproxy.md)). |
-| `gateway` | `203.0.113.7` | Override the first hop, IPv4 or IPv6. Needed with `ProxyCommand`. |
+| `gateway` | `203.0.113.7` | Override the first hop, IPv4 or IPv6. Needed with `ProxyCommand`. Never looked up, so it may lie in `subnets`. |
 | `probe` | `10.1.0.10:22` | Optional reachability check through the tunnel, `ADDRESS:PORT` or `[IPV6]:PORT`. The service must send first, as an ssh server does (§4.4, "Health"). |
 | `fail-closed` | `yes` | Install the guard table (default `yes`). |
 
@@ -913,6 +913,38 @@ users. There are **no free-form sshuttle or ssh
 options**: ssh options belong in the user's `~/.ssh/config`, which only
 ever reaches the unprivileged ssh. NetworkManager-ssh removed arbitrary ssh
 options for the same reason.
+
+**The first hop's addresses are untrusted too.** Without `gateway`, and
+when the first hop's `HostName` (from `ssh -G`) is a name, they come from
+a lookup on whatever network the host is on, at `Connect` and after every
+network change or resume, and a spoofed answer can add any address. Each
+one is excluded from the tunnel and accepted by the guard before its
+reject rules, so it would leak. The plugin therefore drops an address that
+lies in the guarded networks (the subnets and, with DNS, the DNS servers)
+unless `exclude` covers it, and logs a warning that names it. It keeps at
+most 8 addresses (`MAX_HOPS`) and logs the rest. A message names at most 8
+addresses, since a forged answer can hold hundreds. With no address left,
+`Connect` fails: "the first hop's name resolves only into the profile's
+networks or DNS servers (…); set 'gateway' or 'exclude' for a first hop
+there". After a network change it keeps the old addresses instead. While
+the last lookup refused an address, ssh gets a kept one through the pin
+of §4.3, since its own lookup could pick the refused one, which the guard
+rejects. A bastion whose name resolves inside the subnets on the office
+network (split-horizon DNS) thus keeps its outside address there, which
+works only if the office network reaches it. A failed start, a reconnect
+attempt and the end of the reconnect timeout then name the refused
+addresses. A first hop inside the subnets that is reached by name, such
+as a bastion in the corporate range or any first hop of a `0.0.0.0/0`
+profile, therefore needs `gateway`, or `exclude` with its address. A first
+hop whose address changes, such as a dynamic DNS name, can be neither, so
+it no longer works with a profile whose subnets cover it, as a
+`0.0.0.0/0` profile's do. A `HostName` that is an address,
+in the profile's `remote` or in the user's `~/.ssh/config`, is taken like
+`gateway`: no lookup took place, and the user could give the same address
+as `gateway` or `exclude` anyway. `nm-sshuttle first-hop --kind` tells the
+plugin which it was. An address outside the guarded networks gains nothing
+from the exclusion, so a spoofed one there does no harm. `nm-sshuttle
+check` reports the same.
 
 **[src]** GNOME Settings can break the permissions and method rules without
 an editor plugin. The Details tab's "Make available to other users" clears
@@ -998,6 +1030,9 @@ Include /etc/ssh/ssh_config
   the name, while the pin is in use.
 - When the name resolves, ssh runs as before, with the user's config only.
   VM test M2-29 covers it.
+- The plugin also asks for the pin, whatever `dns` is and whether the
+  name resolves, while the first hop's lookup gave addresses it refused
+  (§4.2).
 
 **How a key gets unlocked.** Unlocking happens in the agent: gcr-ssh-agent
 prompts in the session when a key is first used. With plain `ssh-agent`,
@@ -1053,7 +1088,8 @@ versions, so it stays as the fallback.
 Events and what the supervisor does:
 
 - **Toggle on (`Connect`):**
-  1. Resolve the first hop as the user (`ssh -G` through the bridge).
+  1. Resolve the first hop as the user (`ssh -G` through the bridge), and
+     keep its usable addresses (§4.2).
   2. Sweep stale tables.
   3. Create `nmss0` and install the guard.
   4. Start the tunnel unit and wait for `READY=1` (timeout 30 s).
@@ -1302,8 +1338,10 @@ Events and what the supervisor does:
     but not its addresses, so a new temporary address is no change
     ([IPv6](later/ipv6.md)); otherwise IPv6 changes do not count.
   - After a change or a resume the first hop is resolved again, as the
-    user, before the next attempt; if that fails the old address stays.
-    A new address also goes into `Config`'s `gateway`.
+    user, before the next attempt; if that fails, or leaves no usable
+    address (§4.2), the old address stays, and with refused addresses
+    ssh is pinned to it. A new address also goes into `Config`'s
+    `gateway`.
   - An attempt that started more than 2 s before the change is abandoned.
     The at-once attempt waits until the stop of the tunnel it replaces is
     confirmed (at most 20 s), so the two start and stop jobs do not race.
@@ -1546,8 +1584,8 @@ table inet nm-sshuttle-guard {
 ```
 
 The IPv6 sets are always there, empty for an IPv4-only profile
-([IPv6](later/ipv6.md)). The exclude sets hold every address of the first
-hop and the profile's `exclude`. sshuttle's NAT redirect runs earlier, at
+([IPv6](later/ipv6.md)). The exclude sets hold the first hop's usable
+addresses (§4.2), or `gateway`, and the profile's `exclude`. sshuttle's NAT redirect runs earlier, at
 priority `dstnat`, so packets it redirected carry conntrack status `dnat`
 when they reach the guard. With `method=tproxy` there is no NAT; two rules
 ahead of the `dnat` ones accept what sshuttle's mangle chain marked
@@ -1664,6 +1702,13 @@ minimal path under it; `ip` and `nft` there are untested.
   which is upstream's privilege model without sudo.
 - **The profile is validated** (§4.2) and its permissions are pinned to one
   user.
+- **The local network's DNS does not choose what bypasses the tunnel.**
+  The first hop's addresses from a lookup are checked against the guarded
+  networks and capped (§4.2), and sshuttle gets `127.0.0.1` as its remote,
+  so that 2.0.0 looks nothing up as root unless root's own ssh config
+  gives `127.0.0.1` a `ProxyJump` (§4.3). What stays excluded is
+  the checked first hop, `gateway` and `exclude`. With `fail-closed=no`
+  there is no guard, but sshuttle's own exclusions are the same.
 - **The bridge never runs anything as root except `setpriv`**, and ssh
   never runs as root.
 - **D-Bus access:** only root may own or call the plugin's name, and the

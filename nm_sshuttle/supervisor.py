@@ -116,6 +116,7 @@ class Supervisor:
         self.ac_seen = {}              # AC states seen before our own path was known
         self.invisible = False         # no active connection found: invisible reconnect
         self.hops = []                 # every address of the first hop
+        self.refused = []              # its looked-up addresses left out (design §4.2)
         self.gateway = None            # the one of them that Config carries
         self.ipv6 = False              # sshuttle tunnels IPv6 (docs/later/ipv6.md)
         self.ifindex = None
@@ -508,13 +509,49 @@ class Supervisor:
         self.ac_seen.clear()
         self._ac_changed(seen if seen is not None else state, None)
 
-    def _first_hop_result(self, aid, addrs, error):
+    def _usable_hops(self, addrs, given):
+        """(usable, refused) of the first hop's looked-up addresses, with a
+        warning for those left out (design §4.2)."""
+        usable, refused, dropped = self.profile.first_hop_addresses(addrs, given)
+        if refused:
+            log.warning("ignoring the first hop's addresses %s: they lie in the profile's "
+                        "networks or DNS servers, and the lookup may be spoofed (set 'gateway' "
+                        "or 'exclude' for a first hop there)", profile_mod.listed(refused))
+        if dropped:
+            log.warning("the first hop has more than %d addresses; ignoring %s",
+                        profile_mod.MAX_HOPS, profile_mod.listed(dropped))
+        return usable, refused
+
+    def _refused_hint(self):
+        """What a failed start adds when the lookup refused addresses: ssh gets
+        a kept one, which may be the wrong one on this network."""
+        if not self.refused:
+            return ""
+        return (f"; the first hop's name also resolves to {profile_mod.listed(self.refused)}, "
+                f"inside the profile's networks or DNS servers, which is ignored (set "
+                f"'gateway' or 'exclude' for a first hop there)")
+
+    def _tunnel_spec(self):
+        return self.profile.tunnel_spec(self.hops, self.ipv6, self.slot.n,
+                                        pin=bool(self.refused))
+
+    def _first_hop_result(self, aid, addrs, error, given=False):
         if aid != self.activation_id or self.phase != "connecting":
             return
         if not addrs:
             self.give_up(FAIL_CONNECT, f"cannot work out the first hop: {error}")
             return
-        self._have_first_hop(addrs, None)
+        usable, refused = self._usable_hops(addrs, given)
+        if not refused and not usable:
+            self.give_up(FAIL_CONNECT, "cannot work out the first hop: no address")
+            return
+        if not usable:
+            self.give_up(FAIL_CONNECT, f"the first hop's name resolves only into the profile's "
+                         f"networks or DNS servers ({profile_mod.listed(refused)}); set "
+                         f"'gateway' or 'exclude' for a first hop there")
+            return
+        self.refused = refused
+        self._have_first_hop(usable, None)
 
     def _have_first_hop(self, addrs, stale_device):
         self._set_hops(addrs)
@@ -539,8 +576,7 @@ class Supervisor:
                 self._install_guard()
             if self.profile.method == "tproxy":
                 self._install_routing()
-            self.fx.write_tunnel_spec(self.profile.tunnel_spec(self.hops, self.ipv6,
-                                                               self.slot.n))
+            self.fx.write_tunnel_spec(self._tunnel_spec())
         except (OSError, RuntimeError) as e:
             self.give_up(FAIL_CONNECT, str(e))
             return
@@ -559,7 +595,9 @@ class Supervisor:
         if not ok:
             code = FAIL_LOGIN if classify_failure(detail) == "login" else FAIL_CONNECT
             hint = port_failure(detail, self.ipv6)
-            self.give_up(code, f"the tunnel did not start: {hint + ': ' if hint else ''}{detail}")
+            also = self._refused_hint() if code == FAIL_CONNECT else ""
+            self.give_up(code, f"the tunnel did not start: {hint + ': ' if hint else ''}"
+                               f"{detail}{also}")
             return
         self._wait_device(self._first_device)
 
@@ -806,7 +844,8 @@ class Supervisor:
         if self._nm_ending():
             return      # NM's Disconnect follows; nothing may start the tunnel now
         if self._gap_time() >= self.RECONNECT_TIMEOUT:
-            self.give_up(FAIL_CONNECT, f"no reconnect within {self.RECONNECT_TIMEOUT:.0f} s")
+            self.give_up(FAIL_CONNECT, f"no reconnect within {self.RECONNECT_TIMEOUT:.0f} s"
+                                       f"{self._refused_hint()}")
             return
         if self._paused():
             self._cancel("retry")
@@ -881,15 +920,24 @@ class Supervisor:
         self.retry_after_stop = False
         self._retry()
 
-    def _hop_refreshed(self, aid, addrs, error):
+    def _hop_refreshed(self, aid, addrs, error, given=False):
         """After a network change or resume: the first hop may have new addresses,
-        which go into the guard's exclude sets before the tunnel starts."""
+        which go into the guard's exclude sets before the tunnel starts. The
+        lookup ran on the new network; with no usable address in it, the old
+        ones stay, and with refused ones ssh is pinned to a kept one, since the
+        guard rejects the others (design §4.2)."""
         if aid != self.attempt_id or self.phase != "gap" or self._nm_ending():
             return
+        refused = self.refused
+        if addrs:
+            addrs, refused = self._usable_hops(addrs, given)
+            if not addrs:
+                error = "no usable address"
+        moved = bool(addrs) and list(addrs) != self.hops
         if not addrs:
             log.warning("cannot work out the first hop again (%s); keeping %s", error,
                         ", ".join(self.hops))
-        elif list(addrs) != self.hops:
+        elif moved:
             log.info("the first hop is now %s (was %s)", ", ".join(addrs), ", ".join(self.hops))
             self._set_hops(addrs)
             try:
@@ -900,11 +948,12 @@ class Supervisor:
             if why:
                 self.give_up(FAIL_CONNECT, why)
                 return
+        if moved or refused != self.refused:
+            self.refused = refused
             try:
-                if self.profile.fail_closed:
+                if moved and self.profile.fail_closed:
                     self._install_guard()
-                self.fx.write_tunnel_spec(self.profile.tunnel_spec(self.hops, self.ipv6,
-                                                                   self.slot.n))
+                self.fx.write_tunnel_spec(self._tunnel_spec())
             except (OSError, RuntimeError) as e:
                 self.give_up(FAIL_CONNECT, str(e))
                 return
@@ -942,6 +991,8 @@ class Supervisor:
             hint = port_failure(detail, self.ipv6)
             if hint:
                 log.warning("reconnect attempt %d failed: %s", self.attempts, hint)
+            if self.refused:
+                log.warning("reconnect attempt %d failed%s", self.attempts, self._refused_hint())
             log.info("reconnect attempt %d failed: %s", self.attempts, detail.strip())
             self._schedule_retry()
             return

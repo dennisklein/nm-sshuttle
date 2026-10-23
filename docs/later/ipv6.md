@@ -19,7 +19,8 @@ Goals:
 - The guard gets `subnets6` and `exclude6` and refuses IPv6 traffic to the
   tunnelled networks while the tunnel is down, as it does for IPv4.
 - A first hop that has only an IPv6 address works, and every address of
-  the first hop is excluded, whichever family ssh picks.
+  the first hop is excluded, whichever family ssh picks, as long as it
+  lies outside the guarded networks or `exclude` covers it (design §4.2).
 - `gateway` and `probe` accept IPv6 addresses.
 
 Not in this step:
@@ -120,7 +121,11 @@ first, which is often IPv6. If that address lies inside a tunnelled IPv6
 network, sshuttle would capture ssh's own connection.
 
 - `first_hop()` resolves with `AF_UNSPEC` and returns every address.
-- All of them go into `-x` and the guard's exclude sets.
+- All of them go into `-x` and the guard's exclude sets, except those
+  that lie in the guarded networks without an `exclude` (design §4.2):
+  a first hop inside a tunnelled IPv6 subnet, as in lab T13, needs
+  `gateway`, an `exclude` for its address, or that address as its
+  `HostName`.
 - `Config`'s `gateway` gets the first IPv4 address, or the first IPv6
   address (as `ay`) if there is none. NM needs only one (above).
 - The tunnel spec (`tunnel.json`) carries the list instead of one string.

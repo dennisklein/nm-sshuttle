@@ -4,7 +4,8 @@
 import pytest
 
 from fakes import fake_getpwnam, settings
-from nm_sshuttle.profile import ProfileError, collapse, parse, split_remote
+from nm_sshuttle.profile import (MAX_HOPS, ProfileError, collapse, listed, parse,
+                                 split_remote)
 
 
 def p(s):
@@ -150,3 +151,28 @@ def test_split_remote_splits_as_sshuttle_does():
     assert split_remote("2001:db8::7") == ("", "2001:db8::7", None)
     with pytest.raises(ProfileError):
         split_remote("corp:2222:1")
+
+
+def test_first_hop_addresses_inside_the_guarded_networks_are_refused():
+    # A lookup on the local network may be spoofed (design §4.2).
+    prof = p(settings(subnets="10.0.0.0/8, 2001:db8:10::/48", exclude="10.0.5.0/24",
+                      **{"dns-servers": "192.168.5.5"}))
+    hops = ["203.0.113.7", "10.20.30.40", "192.168.5.5", "10.0.5.9", "2001:db8:10::7",
+            "2001:db8:ffff::7", "not-an-address"]
+    assert prof.first_hop_addresses(hops) == (
+        ["203.0.113.7", "10.0.5.9", "2001:db8:ffff::7"],
+        ["10.20.30.40", "192.168.5.5", "2001:db8:10::7"], [])
+    # given as an address, the first hop was never looked up: as 'gateway'
+    assert prof.first_hop_addresses(["10.20.30.40"], given=True) == (["10.20.30.40"], [], [])
+    # without DNS through the tunnel, its servers are not guarded
+    prof = p(settings(dns="none", **{"dns-servers": "192.168.5.5"}))
+    assert prof.first_hop_addresses(["192.168.5.5"]) == (["192.168.5.5"], [], [])
+
+
+def test_first_hop_addresses_are_capped():
+    hops = [f"198.51.100.{i}" for i in range(1, 12)]
+    usable, refused, dropped = p(settings()).first_hop_addresses(hops)
+    assert usable == hops[:MAX_HOPS] and dropped == hops[MAX_HOPS:] and refused == []
+    assert MAX_HOPS == 8
+    assert listed(hops) == ", ".join(hops[:MAX_HOPS]) + " and 3 more"
+    assert listed(hops[:2]) == "198.51.100.1, 198.51.100.2"

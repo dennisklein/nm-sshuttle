@@ -137,8 +137,10 @@ def exec_tunnel(slot=None):
     text = pinned_ssh_config(spec)
     if text:
         ssh_config = write_ssh_config(text, SSH_CONFIG if slot is None else Slot(slot).ssh_config)
-        print(f"exec-tunnel: the first hop's name does not resolve; ssh gets its address "
-              f"from connect through {ssh_config}", file=sys.stderr, flush=True)
+        why = ("also resolves into the tunnelled networks" if spec.get("pin") else
+               "does not resolve")
+        print(f"exec-tunnel: the first hop's name {why}; ssh gets its address "
+              f"from the plugin through {ssh_config}", file=sys.stderr, flush=True)
     port = None if slot is None else listen_port(Slot(slot).listen_ports,
                                                   udp=spec.get("method") == "tproxy")
     argv = sshuttle_argv(spec, sshuttle, ssh_config, port)
@@ -341,11 +343,18 @@ def first_hop_config(user, remote, ssh_g=ssh_g):
 
 
 def first_hop(user, remote, ssh_g=ssh_g, getaddrinfo=socket.getaddrinfo):
-    """Every address of the first hop, worked out as the user (design §2.2).
+    """(addresses, given): every address of the first hop, worked out as the
+    user (design §2.2), and whether its HostName is an address itself, which
+    no lookup could have forged (§4.2).
 
     ssh connects to whichever of the name's addresses works first, of either
     family, so all of them are returned (docs/later/ipv6.md)."""
     hostname = first_hop_config(user, remote, ssh_g)[1]["hostname"]
+    try:
+        ipaddress.ip_address(hostname)
+        given = True
+    except ValueError:
+        given = False
     addrs = []
     for *_, sockaddr in getaddrinfo(hostname, 22, socket.AF_UNSPEC, socket.SOCK_STREAM):
         addr = sockaddr[0].split("%", 1)[0]       # no scope id: it is no network
@@ -353,7 +362,7 @@ def first_hop(user, remote, ssh_g=ssh_g, getaddrinfo=socket.getaddrinfo):
             addrs.append(addr)
     if not addrs:
         raise ValueError(f"{hostname} has no address")
-    return addrs
+    return addrs, given
 
 
 def resolves(name, timeout=5.0, getaddrinfo=socket.getaddrinfo):
@@ -378,8 +387,13 @@ def pinned_ssh_config(spec, ssh_g=ssh_g, resolves=resolves, getpwnam=pwd.getpwna
     such as a bastion inside ~corp.example. During a reconnect that DNS is down,
     so ssh cannot look the name up. The address looked up at connect still
     works: pin it, and read the user's and the system's config after it, as ssh
-    would (design §4.3). When the name resolves, ssh runs as usual."""
-    if spec.get("dns", "none") == "none" or not first_hops(spec):
+    would (design §4.3). When the name resolves, ssh runs as usual.
+
+    With spec["pin"] the lookup also gave addresses that the plugin refused
+    (design §4.2), which the guard rejects; ssh gets a kept one, whether or
+    not the name resolves."""
+    pin = bool(spec.get("pin"))
+    if (spec.get("dns", "none") == "none" and not pin) or not first_hops(spec):
         return None
     try:
         name, settings = first_hop_config(spec["user"], spec["remote"], ssh_g)
@@ -394,14 +408,17 @@ def pinned_ssh_config(spec, ssh_g=ssh_g, resolves=resolves, getpwnam=pwd.getpwna
     keyalias = settings.get("hostkeyalias", hostname)
     if not all(SSH_NAME_RE.match(n) for n in (name, hostname, keyalias)):
         return None
-    if resolves(hostname):
+    if not pin and resolves(hostname):
         return None
     home = getpwnam(spec["user"]).pw_dir
     hops = first_hops(spec)
     # One address only: IPv4 when there is one, which every uplink can reach.
     addr = next((a for a in hops if family(a) == 4), hops[0])
-    return (f"# Written by nm-sshuttle: {hostname} did not resolve when the tunnel\n"
-            f"# started, so ssh gets the address looked up at connect.\n"
+    why = (f"# Written by nm-sshuttle: {hostname} also resolved into the tunnelled\n"
+           f"# networks, so ssh gets the address the plugin kept.\n" if pin else
+           f"# Written by nm-sshuttle: {hostname} did not resolve when the tunnel\n"
+           f"# started, so ssh gets the address looked up at connect.\n")
+    return (f"{why}"
             f"Host {name}\n"
             f"    HostName {addr}\n"
             f"    HostKeyAlias {keyalias}\n\n"

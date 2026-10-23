@@ -88,6 +88,24 @@ With `ProxyCommand` instead of `ProxyJump`, ssh cannot tell which address it
 connects to first. Give that address to `add` as `--gateway`, so that the
 tunnel does not swallow it.
 
+The plugin looks up the first host ssh connects to (the `ProxyJump` host,
+or else the `HostName`) on the network you are on, and that answer can be
+forged. So it ignores an address of that host that lies in your
+`--subnets` or `--dns-servers`, and uses at most 8 of its addresses.
+If your jump host does lie in the tunnelled networks, for example a
+bastion at `10.0.0.5` with `--subnets 10.0.0.0/8`, or any jump host of a
+profile that tunnels `0.0.0.0/0`, say so in the profile: give its address
+as `--gateway 10.0.0.5`, or `--exclude 10.0.0.5`. A `HostName` (or
+`--remote`) that is already an address, such as `HostName 10.0.0.5`, is
+not looked up and needs neither. A jump host whose address changes, such
+as a home server behind a dynamic DNS name, cannot be named that way, so
+it does not work with a profile that tunnels `0.0.0.0/0` or `::/0`.
+
+If the name has an outside address and also one inside your `--subnets`,
+as with split-horizon DNS on the office network, ssh is pinned to the
+outside one. If the office network cannot reach that, exclude the inside
+address too: `--exclude 10.1.2.3`.
+
 ## Creating a profile
 
 Run these as yourself, not as root:
@@ -112,11 +130,11 @@ The options of `add`:
 |---|---|
 | `--remote` | The ssh destination, as you would type it after `ssh`; usually a `Host` alias. `user@host` works too; put a port in the alias (`Port` in `~/.ssh/config`). A password (`user:password@host`) is refused: use a key. Required. |
 | `--subnets` | The networks to send through the tunnel, IPv4 or IPv6, separated by commas. Required. A scope id (`fe80::%eth0/64`) is refused, here and in the other address options. |
-| `--exclude` | Networks inside those to leave out. |
+| `--exclude` | Networks inside those to leave out. A jump host inside the subnets must be excluded here, or given as `--gateway`. |
 | `--dns` | `none` (the default) leaves DNS alone. `split` sends lookups for `--dns-domains` to `--dns-servers` through the tunnel, and everything else as before. `all` sends every lookup through the tunnel. |
 | `--dns-servers` | The DNS servers on the far side, IPv4 only. Required for `split` and `all`. |
 | `--dns-domains` | The domains `split` sends there, subdomains included. `~corp.example` only routes lookups. A plain `corp.example` also completes short names, so `git` becomes `git.corp.example`. Quote a leading `~` in the shell. |
-| `--gateway` | The address ssh connects to first, when the plugin cannot work it out (`ProxyCommand`). |
+| `--gateway` | The address ssh connects to first, when the plugin cannot work it out (`ProxyCommand`), or when it lies inside the subnets. Nothing is looked up then. |
 | `--probe` | `ADDRESS:PORT` (or `[IPV6]:PORT`) of a server on the far side that speaks first, such as an ssh server. The plugin connects to it every 10 s and restarts the tunnel after two failures in a row. Without it, a tunnel that is up but stuck is noticed only when sshuttle exits. |
 | `--method` | `nft` (the default) or `nat`. `tproxy` also sends UDP through the tunnel, such as QUIC or a DNS server you query directly; it needs `iptables` installed. |
 | `--fail-closed` | `yes` (the default) blocks traffic to the tunnelled networks while the tunnel is down. `no` lets it go out on the local network. |
@@ -265,6 +283,16 @@ Common causes:
 - **`check` warns about `ipv6.auto-route-ext-gw`:** the profile was made
   before IPv6 support. Run the `nmcli connection modify` command it
   prints.
+- **"the first hop's name resolves only into the profile's networks or DNS
+  servers":** your jump host's address lies in `--subnets` or
+  `--dns-servers`. If that is right, set `--gateway` to it, exclude it, or
+  give it as the `HostName` (see [Setting up SSH](#setting-up-ssh)). If not, the network you are on
+  may be answering for the name; the journal names the addresses.
+- **"… the first hop's name also resolves to …, inside the profile's
+  networks or DNS servers":** the tunnel did not start, and the plugin
+  had kept only some of the jump host's addresses, for example only its
+  IPv6 one on an IPv4-only network, or its outside one on the office
+  network. Exclude the address it names if that is your jump host.
 - **"subnets overlap with the active profile …", "… also uses dns=all",
   "… also has the DNS domain …" or "the first hops would run in a
   loop":** another active VPN claims the same traffic or DNS. See
