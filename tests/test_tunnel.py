@@ -4,6 +4,7 @@ import os
 import shlex
 import socket
 import subprocess
+import sys
 import time
 from types import SimpleNamespace
 
@@ -262,6 +263,7 @@ def test_ssh_as_user_execs_ssh_with_the_remote(monkeypatch):
     pw = SimpleNamespace(pw_uid=1000, pw_gid=1000, pw_dir="/home/alice")
     monkeypatch.setattr(tunnel.pwd, "getpwnam", lambda n: pw)
     monkeypatch.setattr(tunnel, "user_environment", lambda u, p: {"SSH_AUTH_SOCK": "/a"})
+    monkeypatch.setattr(tunnel, "reset_oom_score_adj", lambda: None)
     ran = []
     monkeypatch.setattr(tunnel.os, "execvp", lambda f, argv: ran.append(argv))
     tunnel.ssh_as_user("alice", ["--remote", "corp:2222", "127.0.0.1", "--", "cmd"])
@@ -272,6 +274,80 @@ def test_ssh_as_user_execs_ssh_with_the_remote(monkeypatch):
     with pytest.raises(ValueError):
         tunnel.ssh_as_user("alice", ["--remote", "corp", "corp", "--", "cmd"])
     assert len(ran) == 2
+
+
+def test_ssh_as_user_resets_the_oom_score_before_anything_runs_as_the_user(monkeypatch):
+    # The plugin unit's OOMScoreAdjust=-500 must not reach ssh -G's Match exec
+    # or the tunnel's ssh (design §4.7).
+    pw = SimpleNamespace(pw_uid=1000, pw_gid=1000, pw_dir="/home/alice")
+    monkeypatch.setattr(tunnel.pwd, "getpwnam", lambda n: pw)
+    order = []
+    monkeypatch.setattr(tunnel, "reset_oom_score_adj", lambda: order.append("oom"))
+    monkeypatch.setattr(tunnel, "user_environment", lambda u, p: order.append("env") or {})
+    monkeypatch.setattr(tunnel.os, "execvp", lambda f, argv: order.append(argv[0]))
+    tunnel.ssh_as_user("alice", ["-G", "--", "corp"])
+    assert order == ["oom", "env", "setpriv"]
+    order.clear()
+    with pytest.raises(ValueError):           # refused arguments: nothing runs at all
+        tunnel.ssh_as_user("alice", ["--remote", "corp", "corp", "--", "cmd"])
+    assert order == []
+
+
+def test_reset_oom_score_adj(tmp_path, capsys):
+    adj = tmp_path / "oom_score_adj"
+    adj.write_text("-500\n")
+    tunnel.reset_oom_score_adj(str(adj))
+    assert adj.read_text() == "0"
+    tunnel.reset_oom_score_adj(str(tmp_path / "missing" / "oom_score_adj"))   # warns only
+    assert "cannot reset the OOM score adjustment" in capsys.readouterr().err
+
+
+OOM_FLOOR_CHECK = """
+import ctypes, os, sys
+from nm_sshuttle import tunnel
+
+def write(value):
+    try:
+        with open(tunnel.OOM_SCORE_ADJ, "w") as f:
+            f.write(value)
+    except PermissionError:
+        return False
+    return True
+
+if not write("-500"):
+    print("no CAP_SYS_RESOURCE")
+else:
+    if sys.argv[1] == "reset":
+        tunnel.reset_oom_score_adj()
+    os.setgroups([])
+    os.setresgid(65534, 65534, 65534)
+    os.setresuid(65534, 65534, 65534)
+    # The uid change made the process non-dumpable, which gives /proc/self to
+    # root; exec would undo that, as for ssh. PR_SET_DUMPABLE is 4.
+    ctypes.CDLL(None, use_errno=True).prctl(4, 1, 0, 0, 0)
+    with open(tunnel.OOM_SCORE_ADJ) as f:
+        now = f.read().strip()
+    print(now, "writable" if write(now) else "not writable",
+          "allowed" if write("-500") else "refused")
+"""
+
+
+@pytest.mark.skipif(os.geteuid() != 0 or not os.path.exists(tunnel.OOM_SCORE_ADJ),
+                    reason="needs root and /proc")
+def test_reset_oom_score_adj_also_resets_the_floor():
+    # As systemd does for OOMScoreAdjust=-500: root writes it, which also sets
+    # the floor that an unprivileged process may go back down to.
+    root = os.path.dirname(os.path.dirname(os.path.abspath(tunnel.__file__)))
+
+    def check(mode):
+        p = subprocess.run([sys.executable, "-c", OOM_FLOOR_CHECK, mode], capture_output=True,
+                           text=True, cwd=root, timeout=30)
+        assert p.returncode == 0, p.stderr
+        if p.stdout.strip() == "no CAP_SYS_RESOURCE":
+            pytest.skip(p.stdout.strip())
+        return p.stdout.strip()
+    assert check("keep") == "-500 writable allowed"      # the floor without the reset
+    assert check("reset") == "0 writable refused"
 
 
 def test_resolves():

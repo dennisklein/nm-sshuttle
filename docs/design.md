@@ -1689,6 +1689,15 @@ file, `ProtectSystem=true` and `ProtectHome=read-only` (R1e).
 `nm-sshuttle.service` starts from at least that set. R1e ran only a
 minimal path under it; `ip` and `nft` there are untested.
 
+**The OOM value and the user.** `OOMScoreAdjust=-500` is inherited by
+everything the plugin unit starts, the first hop's `ssh -G` and its
+`Match exec` among it, and because systemd writes it as root it is also
+the floor that those processes may set again. The bridge (`ssh-as-user`)
+therefore writes 0 to `/proc/self/oom_score_adj` as root before `setpriv`.
+Written with `CAP_SYS_RESOURCE`, 0 also resets the floor. This covers the
+first hop and the tunnel's ssh. Both still run in a system unit's cgroup,
+outside the user's slice, until the unit stops.
+
 ### 4.8 Security notes
 
 - **The sshuttle client runs as root**, and it parses the multiplexed
