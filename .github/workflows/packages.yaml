@@ -93,7 +93,7 @@ jobs:
       contents: read
     # Its output is signed as built, so it runs in publish's image.
     container:
-      image: quay.io/fedora/fedora:44@sha256:6ad1739ac6fb30f72ecc7b62a7ca94871d1cab215e4f5174113941047e0b4ed4
+      image: quay.io/fedora/fedora:44@sha256:3988086adef2975a8a3a6c15634e21625efebc6ac043c83f02f619efff6c5d11
     steps:
       - name: Install tools
         run: dnf -y install git-core rpm-build
@@ -174,7 +174,7 @@ jobs:
       contents: read
     # Its output is signed as built, so it runs in publish's image.
     container:
-      image: quay.io/fedora/fedora:44@sha256:6ad1739ac6fb30f72ecc7b62a7ca94871d1cab215e4f5174113941047e0b4ed4
+      image: quay.io/fedora/fedora:44@sha256:3988086adef2975a8a3a6c15634e21625efebc6ac043c83f02f619efff6c5d11
     steps:
       - run: dnf -y install rpm-build
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -207,7 +207,7 @@ jobs:
     # This job holds the signing key, so its image is pinned by digest.
     # Refresh it as "Container images" in packaging/README.md says.
     container:
-      image: quay.io/fedora/fedora:44@sha256:6ad1739ac6fb30f72ecc7b62a7ca94871d1cab215e4f5174113941047e0b4ed4
+      image: quay.io/fedora/fedora:44@sha256:3988086adef2975a8a3a6c15634e21625efebc6ac043c83f02f619efff6c5d11
     steps:
       - run: dnf -y install createrepo_c findutils gnupg2 jq python3-rpm rpm-sign
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -266,7 +266,7 @@ jobs:
       contents: read
     # publish's image, so that a pull request with a new digest tries it.
     container:
-      image: quay.io/fedora/fedora:44@sha256:6ad1739ac6fb30f72ecc7b62a7ca94871d1cab215e4f5174113941047e0b4ed4
+      image: quay.io/fedora/fedora:44@sha256:3988086adef2975a8a3a6c15634e21625efebc6ac043c83f02f619efff6c5d11
     steps:
       - run: dnf -y install createrepo_c findutils gnupg2 jq python3-rpm rpm-build rpm-sign
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
